@@ -18,6 +18,11 @@ from enum import Enum
 
 from casbin.rbac import RoleManager as RM
 from casbin.rbac import ConditionalRoleManager as CRM
+from casbin.util.evaluation import (
+    RoleEdge,
+    current_link_condition_snapshot,
+    record_role_edge,
+)
 
 Link = namedtuple("Link", ["user", "role"])
 
@@ -386,54 +391,113 @@ def match_error_handler(fn, key1, key2):
 
 
 class ConditionalRoleManager(RoleManager, CRM):
+    ptype = "g"
+    _owner = None
+
     def has_link(self, name1, name2, *domains):
-        """determines whether role: name1 inherits role: name2."""
+        """determines whether role: name1 inherits role: name2.
+
+        The search carries the conditional edges along each path, so an
+        explanation names only the edges that actually established the link
+        rather than every edge it happened to evaluate.
+        """
         if name1 == name2 or (self.matching_func is not None and self._matching_fn(name1, name2)):
             return True
 
         user = self._get_role(name1)
         role = self._get_role(name2)
 
-        return self._has_link(role.name, [user], self.max_hierarchy_level, *domains)
-
-    def _has_link(self, target_name, roles, level, *domains):
-        """use the Breadth First Search algorithm to traverse the Role tree
-        Judging whether the user has a role (has link) is to judge whether the role node can be reached from the user node
-        """
-        if level < 0 or len(roles) == 0:
+        path = self._find_path(role.name, [(user, ())], self.max_hierarchy_level, *domains)
+        if path is None:
             return False
+        for edge in path:
+            record_role_edge(edge)
+        return True
 
-        next_roles = set()
-        for role in roles:
+    def _find_path(self, target_name, frontier, level, *domains):
+        """breadth first search that returns the conditional edges of a found path."""
+        if level < 0 or not frontier:
+            return None
+
+        next_frontier = []
+        seen = set()
+        for role, path in frontier:
             if target_name == role.name or (
                 self.matching_func is not None and self._matching_fn(role.name, target_name)
             ):
-                return True
+                return path
 
             for next_role in role.roles:
-                linked_role = self.get_next_roles(role, next_role, domains)
-                next_roles.update(set(linked_role))
+                if next_role.name in seen:
+                    continue
+                seen.add(next_role.name)
+                domain = domains[0] if domains else None
+                edge, fn = self.resolve_edge(role.name, next_role.name, domain)
+                if self._edge_passes(edge, fn):
+                    next_frontier.append((next_role, path + (edge,)))
 
-        return self._has_link(target_name, next_roles, level - 1, *domains)
+        return self._find_path(target_name, next_frontier, level - 1, *domains)
 
-    def get_next_roles(self, current_role, next_role, domains):
-        pass_link_condition_func = True
-        next_roles = list()
-        if not domains:
-            link_condition_func = self.get_link_condition_func(current_role.name, next_role.name)
-            if link_condition_func is not None:
-                params = self.get_link_condition_func_params(current_role.name, next_role.name)
-                pass_link_condition_func = link_condition_func(*params)
+    def resolve_edge(self, user_name, role_name, domain=None):
+        """returns the grouping-policy edge to report and its condition.
+
+        For a pattern domain the reported edge uses the stored policy domain,
+        because that is the row an explanation can point back to.
+        """
+        if self._owner is not None:
+            return self._owner.resolve_edge(user_name, role_name, domain)
+        params = self.edge_params(user_name, role_name, domain)
+        edge = RoleEdge(self.ptype or "g", user_name, role_name, domain, params)
+        return edge, self.get_edge_condition(user_name, role_name, domain)
+
+    def edge_condition(self, user_name, role_name, domain=None):
+        return self.get_edge_condition(user_name, role_name, domain)
+
+    def edge_params(self, user_name, role_name, domain=None):
+        if domain is None:
+            return self.get_link_condition_func_params(user_name, role_name)
+        return self.get_link_condition_func_params(user_name, role_name, [domain])
+
+    def _edge_passes(self, edge, fn):
+        """evaluates one link condition against the batch view, if there is one."""
+        snapshot = current_link_condition_snapshot()
+        if snapshot is None:
+            if fn is not None:
+                passed = bool(fn(*edge.params))
+            else:
+                passed = True
         else:
-            link_condition_func = self.get_domain_link_condition_func(current_role.name, next_role.name, domains[0])
-            if link_condition_func is not None:
-                params = self.get_link_condition_func_params(current_role.name, next_role.name, domains)
-                pass_link_condition_func = link_condition_func(*params)
+            key = (edge.ptype, edge.user, edge.role, edge.domain)
+            captured = snapshot.condition_for(key)
+            if captured is None:
+                # An edge that did not exist when the batch started: evaluate the
+                # condition as it is now, but memoise it for the rest of the batch.
+                params = edge.params
+            else:
+                fn, params = captured
+            passed = snapshot.decide(key, fn, params)
 
-        if pass_link_condition_func:
-            next_roles.append(next_role)
+        return passed
 
-        return next_roles
+    def get_edge_condition(self, user_name, role_name, domain=None):
+        """returns the condition function attached to one link, if any."""
+        if domain is None:
+            return self.get_link_condition_func(user_name, role_name)
+        return self.get_domain_link_condition_func(user_name, role_name, domain)
+
+    def iter_condition_rows(self):
+        """yields ``(key, fn, params)`` for every link in this manager."""
+        seen = set()
+        for link in self.all_links:
+            key = (self.ptype or "g", link.user, link.role, None)
+            if key in seen:
+                continue
+            seen.add(key)
+            yield (
+                key,
+                self.get_link_condition_func(link.user, link.role),
+                self.get_link_condition_func_params(link.user, link.role),
+            )
 
     def get_link_condition_func(self, user_name, role_name):
         """get_link_condition_func get link_condition_func based on userName, roleName"""
@@ -482,6 +546,93 @@ class ConditionalRoleManager(RoleManager, CRM):
 
 
 class ConditionalDomainManager(DomainManager, ConditionalRoleManager):
+    """a conditional role manager per domain.
+
+    Conditions and their parameters are kept here rather than only on the
+    cached per-domain role managers: a condition is usually registered before
+    the first request builds any of them, and a request may also arrive with a
+    domain that only matches a policy domain through the domain matching
+    function.  Building a role manager replays this registry into it.
+    """
+
+    ptype = "g"
+
+    def __init__(self, max_hierarchy_level=10):
+        super().__init__(max_hierarchy_level)
+        self._conditions = {}
+        self._condition_params = {}
+
+    def clear(self):
+        super().clear()
+        self._conditions = {}
+        self._condition_params = {}
+
+    def edge_condition(self, user_name, role_name, domain=None):
+        """finds a link condition on this domain or on a matching policy domain."""
+        return self._lookup(user_name, role_name, domain)[0]
+
+    def edge_params(self, user_name, role_name, domain=None):
+        return self._lookup(user_name, role_name, domain)[1]
+
+    def resolve_edge(self, user_name, role_name, domain=None):
+        fn, params, resolved = self._lookup(user_name, role_name, domain)
+        edge = RoleEdge(self.ptype or "g", user_name, role_name, resolved, params)
+        return edge, fn
+
+    def _lookup(self, user_name, role_name, domain):
+        """returns ``(condition, params, stored domain)`` for one grouping row."""
+        for candidate in self._condition_domains(domain, user_name, role_name):
+            fn = self._conditions.get((user_name, role_name, candidate))
+            params = self._condition_params.get((user_name, role_name, candidate))
+            if fn is not None or params:
+                return fn, list(params or ()), candidate
+        return None, [], self.canonical_domain(user_name, role_name, domain)
+
+    def iter_condition_rows(self):
+        """yields ``(key, fn, params)`` for every stored grouping row."""
+        for domain, links in self.all_links.items():
+            for link in links:
+                yield (
+                    (self.ptype or "g", link.user, link.role, domain),
+                    self._conditions.get((link.user, link.role, domain)),
+                    list(self._condition_params.get((link.user, link.role, domain), ())),
+                )
+
+    def canonical_domain(self, user_name, role_name, domain=None):
+        """maps a request domain to the stored domain whose row it came from."""
+        link = Link(user_name, role_name)
+        if domain is not None and link in self.all_links.get(domain, []):
+            return domain
+        for stored, links in self.all_links.items():
+            if stored == domain or link not in links:
+                continue
+            if domain is not None and self.domain_matching_func is not None:
+                if match_error_handler(self.domain_matching_func, domain, stored):
+                    return stored
+            elif stored == domain:
+                return stored
+        return domain
+
+    def _condition_domains(self, domain, user_name=None, role_name=None):
+        """the request's domain first, then matching policy domains."""
+        candidates = [domain] if domain is not None else []
+        for stored_domain in self.all_links:
+            if stored_domain == domain or stored_domain in candidates:
+                continue
+            if domain is not None and self.domain_matching_func is not None:
+                if not match_error_handler(self.domain_matching_func, domain, stored_domain):
+                    continue
+            elif domain != stored_domain:
+                continue
+            if user_name is not None and Link(user_name, role_name) not in self.all_links.get(stored_domain, []):
+                continue
+            candidates.append(stored_domain)
+        return candidates
+
+    def domain_matching_func_for_trace(self):
+        """the function that maps a request domain to a stored policy domain."""
+        return self.domain_matching_func
+
     def _get_role_manager(self, *domain):
         domain1 = self._get_domain(*domain)
         if domain1 not in self.rm_map:
@@ -497,6 +648,8 @@ class ConditionalDomainManager(DomainManager, ConditionalRoleManager):
 
         if rm is None:
             rm = ConditionalRoleManager(max_hierarchy_level=self.max_hierarchy_level)
+            rm.ptype = self.ptype
+            rm._owner = self
             if store:
                 self.rm_map[domain1] = rm
             if self.domain_matching_func is not None:
@@ -507,6 +660,12 @@ class ConditionalDomainManager(DomainManager, ConditionalRoleManager):
             rm.add_matching_func(self.matching_func)
             for link in domain_links:
                 rm.add_link(link[0], link[1])
+            for (user_name, role_name, registered_domain), fn in self._conditions.items():
+                if registered_domain == domain1:
+                    rm.add_domain_link_condition_func(user_name, role_name, registered_domain, fn)
+            for (user_name, role_name, registered_domain), params in self._condition_params.items():
+                if registered_domain == domain1:
+                    rm.set_domain_link_condition_func_params(user_name, role_name, registered_domain, *params)
         return rm
 
     def has_link(self, name1, name2, *domain):
@@ -516,26 +675,34 @@ class ConditionalDomainManager(DomainManager, ConditionalRoleManager):
 
     def add_link(self, name1, name2, *domain):
         domain = self._get_domain(*domain)
+        # Keep the raw grouping policy as the source of truth: a role manager
+        # for a pattern domain is built from it on first use.
+        self.all_links.setdefault(domain, []).append(Link(name1, name2))
         rm = self._get_conditional_role_manager(domain, store=True)
-        rm.add_link(name1, name2, domain)
+        if Link(name1, name2) not in rm.all_links:
+            rm.add_link(name1, name2, domain)
 
     def delete_link(self, name1, name2, *domain):
         domain = self._get_domain(*domain)
+        links = self.all_links.get(domain, [])
+        if Link(name1, name2) in links:
+            links.remove(Link(name1, name2))
         rm = self._get_conditional_role_manager(domain, store=True)
-        rm.delete_link(name1, name2, domain)
+        if Link(name1, name2) in rm.all_links:
+            rm.delete_link(name1, name2, domain)
 
     def add_link_condition_func(self, user_name, role_name, fn):
-        for rm in self.rm_map.values():
-            rm.add_link_condition_func(user_name, role_name, fn)
+        self.add_domain_link_condition_func(user_name, role_name, "", fn)
 
     def add_domain_link_condition_func(self, user_name, role_name, domain, fn):
+        self._conditions[(user_name, role_name, domain)] = fn
         for rm in self.rm_map.values():
             rm.add_domain_link_condition_func(user_name, role_name, domain, fn)
 
     def set_link_condition_func_params(self, user_name, role_name, *params):
-        for rm in self.rm_map.values():
-            rm.set_link_condition_func_params(user_name, role_name, *params)
+        self.set_domain_link_condition_func_params(user_name, role_name, "", *params)
 
     def set_domain_link_condition_func_params(self, user_name, role_name, domain, *params):
+        self._condition_params[(user_name, role_name, domain)] = tuple(params)
         for rm in self.rm_map.values():
             rm.set_domain_link_condition_func_params(user_name, role_name, domain, *params)

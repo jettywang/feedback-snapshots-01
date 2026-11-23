@@ -16,6 +16,7 @@ import math
 
 from casbin.cache import DefaultCache
 from casbin.enforcer import Enforcer
+from casbin.util.evaluation import Explanation, evaluation_snapshot, link_condition_snapshot
 
 # distinguishes "key absent" from a cached None/False without an exception on the hot path.
 _MISSING = object()
@@ -32,6 +33,8 @@ class CacheSupport:
 
     Only enforce_ex() is intercepted. enforce() and batch_enforce() are defined in terms
     of it upstream, so they pick the cache up for free and cannot drift out of sync.
+    The exception is a batch over conditional roles: it has its own time basis, so it
+    bypasses the cache and decides every request against one shared condition view.
     """
 
     def __init__(self, *args, **kwargs):
@@ -135,13 +138,35 @@ class CacheSupport:
 
         cached = self._cache.get(key, _MISSING)
         if cached is not _MISSING:
-            result, explain = cached
+            allowed, explain, edges, evaluated_at = cached
             # Hand out a fresh explanation so callers cannot alter later cache hits.
-            return result, list(explain)
+            return allowed, Explanation(explain, edges, evaluated_at)
 
         result, explain = super().enforce_ex(*rvals)
-        self._cache.set(key, (result, tuple(explain)), self._expire_time)
+        self._cache.set(
+            key,
+            (result, tuple(explain), tuple(edge.copy() for edge in explain.role_edges), explain.evaluated_at),
+            self._expire_time,
+        )
         return result, explain
+
+    def batch_enforce(self, rvals):
+        """a conditional batch is answered against one instant, never from the cache.
+
+        Cached decisions belong to the moment they were made, and a batch with a
+        bounded staleness window could otherwise mix decisions made before and
+        after a temporary role expired.  Models without conditional roles keep
+        the plain cached path.
+        """
+        if not self.cond_rm_map:
+            return super().batch_enforce(rvals)
+
+        conditions, matchers = self._link_conditions()
+        with evaluation_snapshot(None):
+            with link_condition_snapshot(conditions, matchers):
+                # _enforce_ex, not enforce(): the cache must not take part in a
+                # batch whose whole point is one shared time basis.
+                return [self._enforce_ex(*request)[0] for request in rvals]
 
     # Everything below invalidates the cache after letting the enforcer do its work.
     #

@@ -288,6 +288,25 @@ class SyncedEnforcer:
         with self._rl:
             return self._e.batch_enforce(rvals)
 
+    def batch_enforce_ex(self, rvals, at=None):
+        """evaluates a batch with one consistent condition view.
+
+        All requests share the batch's evaluation instant and the conditional
+        role-edge parameters captured when it started.
+        """
+        with self._rl:
+            return self._e.batch_enforce_ex(rvals, at)
+
+    def enforce_ex_at(self, at, *rvals):
+        """evaluates one request at an explicit instant."""
+        with self._rl:
+            return self._e.enforce_ex_at(at, *rvals)
+
+    def enforce_at(self, request, at=None):
+        """evaluates one request at an explicit instant."""
+        with self._rl:
+            return self._e.enforce_at(request, at)
+
     def get_all_subjects(self):
         """gets the list of subjects that show up in the current policy."""
         with self._rl:

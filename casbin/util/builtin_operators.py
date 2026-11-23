@@ -18,6 +18,8 @@ from functools import lru_cache
 from datetime import datetime
 import wcmatch.glob as glob
 
+from casbin.util.evaluation import evaluation_now
+
 KEY_MATCH2_PATTERN = re.compile(r"(.*?):[^\/]+(.*?)")
 KEY_MATCH3_PATTERN = re.compile(r"(.*?){[^\/]+?}(.*?)")
 KEY_MATCH4_PATTERN = re.compile(r"{([^/]+)}")
@@ -460,7 +462,7 @@ def time_match_func(*args):
     start_time, end_time = args[0], args[1]
 
     try:
-        now = datetime.now()
+        now = evaluation_now()
         if start_time != "_":
             start = datetime.strptime(start_time, "%Y-%m-%d %H:%M:%S")
             if not now > start:

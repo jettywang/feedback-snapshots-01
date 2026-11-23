@@ -211,6 +211,54 @@ https://casbin.apache.org/docs/adapters/
 
 https://casbin.apache.org/docs/role-managers/
 
+## Conditional roles and batch previews
+
+A grouping policy can carry a condition, e.g. the validity window of a temporary
+role. PyCasbin reads the window through a link condition function:
+
+```python
+import casbin
+from casbin.util import time_match_func
+
+e = casbin.Enforcer(
+    "examples/rbac_with_domain_temporal_roles_model.conf",
+    "examples/rbac_with_domain_temporal_roles_policy.csv",
+)
+e.add_named_domain_link_condition_func("g", "alice", "data2_admin", "domain2", time_match_func)
+```
+
+`batch_enforce_ex()` evaluates a whole batch against **one** instant and one copy
+of the link conditions, and returns a result per request that points back to the
+grouping-policy edge it used:
+
+```python
+results = e.batch_enforce_ex(
+    [
+        ("alice", "domain2", "data2", "read"),
+        ("alice", "domain3", "data3", "read"),
+    ],
+    at="2026-11-24 12:00:00",  # optional; defaults to the moment the batch starts
+)
+
+for result in results:
+    print(result.allowed, result.rule, result.role_edges, result.evaluated_at)
+```
+
+- Every request in the batch sees the same `evaluated_at` and the same condition
+  parameters, even if a temporary role expires while the batch is running or the
+  parameters are changed half way through.
+- `result.role_edges` is the list of grouping-policy rows (`["g", user, role,
+  domain, start, end]` for a conditional domain link) that established the role,
+  so an explanation can point at the exact edge and window it relied on.
+- A later, separate call reads the current conditions immediately:
+  `enforce_ex()` uses a fresh instant per call, `enforce_at(request, at)` returns
+  a single `EvaluationResult`, and `enforce_ex_at(at, *request)` keeps the
+  `(allowed, explanation)` shape with the extra fields attached.
+- Custom condition functions should call `casbin.util.evaluation_now()` instead of
+  `datetime.now()` to participate in the batch's time basis.
+- A role edge whose domain is matched through a custom domain matching function
+  (`add_named_domain_matching_func`) is traced back to the stored policy domain.
+
 ## Async Enforcer
 
 If your code uses `async` / `await` and is heavily dependent on I/O operations, you can adopt Async Enforcer!

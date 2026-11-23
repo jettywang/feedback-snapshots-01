@@ -29,6 +29,14 @@ from casbin.persist.adapters import FileAdapter
 from casbin.policy_index import PolicyIndex, policy_matches_bucket
 from casbin.rbac import default_role_manager
 from casbin.util import generate_g_function, SimpleEval, util, generate_conditional_g_function, key_match
+from casbin.util.evaluation import (
+    EvaluationResult,
+    Explanation,
+    capture_role_edges,
+    current_evaluation_time,
+    evaluation_snapshot,
+    link_condition_snapshot,
+)
 from casbin.util.log import configure_logging, disabled_logging
 
 
@@ -507,16 +515,47 @@ class CoreEnforcer:
     def enforce_ex(self, *rvals):
         """decides whether a "subject" can access a "object" with the operation "action",
         input parameters are usually: (sub, obj, act).
-        return judge result with reason
-        """
+        return judge result with reason and the conditional role edges that were used.
 
+        One call is evaluated against a single instant: conditional link functions
+        and ``timeMatch`` see the same clock value for every policy row. Outside a
+        batch that instant is the start of this call, so later calls immediately
+        observe changed conditions.
+        """
+        with evaluation_snapshot(None):
+            result, explain, edges = self._enforce_ex(*rvals)
+            return result, Explanation(explain, edges, current_evaluation_time())
+
+    def enforce_at(self, request, at=None):
+        """evaluates one request and returns an :class:`EvaluationResult`.
+
+        Unlike ``enforce_ex_at(at, *request)`` the request stays one sequence;
+        that order keeps the two entry points from being confused.  A single
+        evaluation is also pinned to one instant, so every policy row sees the
+        same clock value.
+        """
+        with evaluation_snapshot(at):
+            result, explain, edges = self._enforce_ex(*request)
+            explanation = Explanation(explain, edges, current_evaluation_time())
+            return EvaluationResult(result, explanation, request)
+
+    def enforce_ex_at(self, at, *rvals):
+        """evaluates one request at an explicit instant and returns the full result.
+
+        ``at`` accepts a ``datetime``, a date, a ``"YYYY-mm-dd HH:MM:SS"`` string or
+        None.  The result unpacks like ``(allowed, explanation)`` and also exposes
+        ``evaluated_at`` and ``role_edges``.
+        """
+        return self.enforce_at(rvals, at)
+
+    def _enforce_ex(self, *rvals):
         rtype = "r"
         ptype = "p"
         etype = "e"
         mtype = "m"
 
         if not self.enabled:
-            return [True, []]
+            return True, [], []
 
         functions = self.fm.get_functions()
 
@@ -575,6 +614,10 @@ class CoreEnforcer:
 
         explain_index = -1
         allow_index = -1
+        # Only a model with conditional role managers can contribute role edges,
+        # so the plain path does not pay for a trace.
+        trace_rows = bool(self.cond_rm_map)
+        row_edges = {}
         if not 0 == policy_len:
             for i, pvals in enumerate(self.model["p"][ptype].policy):
                 if len(p_tokens) != len(pvals):
@@ -590,7 +633,12 @@ class CoreEnforcer:
                     rules = tuple(p_parameters[rule_name] for rule_name in rule_names)
                     expression.set_expr(self._get_eval_expression(exp_string, rules))
 
-                result = expression.eval(parameters)
+                if trace_rows:
+                    with capture_role_edges() as edges:
+                        result = expression.eval(parameters)
+                    row_edges[i] = edges
+                else:
+                    result = expression.eval(parameters)
 
                 if isinstance(result, bool):
                     if not result:
@@ -662,18 +710,66 @@ class CoreEnforcer:
                 self.logger.warning(req_str)
 
         explain_rule = []
+        explain_edges = []
         if explain_index != -1 and explain_index < policy_len:
             explain_rule = list(self.model["p"][ptype].policy[explain_index])
+            explain_edges = row_edges.get(explain_index, [])
 
-        return result, explain_rule
+        return result, explain_rule, explain_edges
 
     def batch_enforce(self, rvals):
-        """batch_enforce enforce in batches"""
-        results = []
-        for request in rvals:
-            result = self.enforce(*request)
-            results.append(result)
-        return results
+        """batch_enforce enforce in batches.
+
+        Every request is evaluated against the batch's first instant and the
+        link conditions captured when the batch started, so a role that expires
+        while the batch is running keeps the same decision throughout it.  A
+        later, separate call sees the update.
+        """
+        conditions, matchers = self._link_conditions()
+        with evaluation_snapshot(None):
+            with link_condition_snapshot(conditions, matchers):
+                results = []
+                for request in rvals:
+                    # Go through enforce() so subclasses (FastEnforcer,
+                    # CachedEnforcer) keep their own request handling.
+                    results.append(self.enforce(*request))
+                return results
+
+    def batch_enforce_ex(self, rvals, at=None):
+        """evaluates a batch with one consistent condition view.
+
+        Returns an :class:`EvaluationResult` per request.  Each result carries the
+        responsive rule, the conditional role edges that were traversed and the
+        instant every request in the batch was evaluated at.  ``at`` pins that
+        instant explicitly; when omitted the batch starts now.
+        """
+        conditions, matchers = self._link_conditions()
+        with evaluation_snapshot(at):
+            with link_condition_snapshot(conditions, matchers):
+                instant = current_evaluation_time()
+                results = []
+                for request in rvals:
+                    result, explain, edges = self._enforce_ex(*request)
+                    results.append(EvaluationResult(result, Explanation(explain, edges, instant), request))
+                return results
+
+    def _link_conditions(self):
+        """collects the condition functions and parameters currently in effect.
+
+        The role managers keep the registered function and the parameters set
+        through ``set_named_*_link_condition_func_params`` (and seeded from the
+        grouping policy).  A batch copies this view once, so a parameter or
+        condition changed while it runs does not make its requests disagree.
+        """
+        conditions = {}
+        matchers = {}
+        for ptype, crm in self.cond_rm_map.items():
+            matcher = getattr(crm, "domain_matching_func_for_trace", lambda: None)()
+            if matcher is not None:
+                matchers[ptype] = matcher
+            for key, fn, params in crm.iter_condition_rows():
+                conditions[key] = (fn, params)
+        return conditions, matchers
 
     @staticmethod
     def configure_logging(logging_config=None):
