@@ -1,0 +1,77 @@
+GEM
+  remote: https://rubygems.org/
+  specs:
+    benchmark-malloc (0.2.0)
+    benchmark-perf (0.6.0)
+    benchmark-trend (0.4.0)
+    date (3.6.0)
+    diff-lcs (1.6.2)
+    logger (1.7.0)
+    mini_mime (1.1.5)
+    net-imap (0.6.8)
+      date
+      net-protocol
+    net-pop (0.1.2)
+      net-protocol
+    net-protocol (0.4.0)
+      timeout
+    net-smtp (0.5.2)
+      net-protocol
+    rexml (3.4.4)
+    rspec (3.13.2)
+      rspec-core (~> 3.13.0)
+      rspec-expectations (~> 3.13.0)
+      rspec-mocks (~> 3.13.0)
+    rspec-benchmark (0.6.0)
+      benchmark-malloc (~> 0.2)
+      benchmark-perf (~> 0.6)
+      benchmark-trend (~> 0.4)
+      rspec (>= 3.0)
+    rspec-core (3.13.7)
+      rspec-support (~> 3.13.0)
+    rspec-expectations (3.13.6)
+      diff-lcs (>= 1.2.0, < 2.0)
+      rspec-support (~> 3.13.0)
+    rspec-mocks (3.13.9)
+      diff-lcs (>= 1.2.0, < 2.0)
+      rspec-support (~> 3.13.0)
+    rspec-support (3.13.8)
+    timeout (0.6.1)
+
+PLATFORMS
+  arm64-darwin-25
+  ruby
+
+DEPENDENCIES
+  logger
+  mini_mime
+  net-imap
+  net-pop
+  net-smtp
+  rexml
+  rspec
+  rspec-benchmark
+
+CHECKSUMS
+  benchmark-malloc (0.2.0) sha256=37c68f0435261634026f584d79956a35325a3027e3e6b4cc8d7575aa10537e6b
+  benchmark-perf (0.6.0) sha256=fe2b01959f3de0f9dd34820d54ef881eb4f3589fccb7d17b63068ac92d7f9621
+  benchmark-trend (0.4.0) sha256=de5a02a9f443babefbbd97784759820decee8554a0c273d859c02a0990845d81
+  date (3.6.0) sha256=18ac945c4e24ebd93534f8eab8c2fd8c5604b3e977105b3798d62a1e8d27b580
+  diff-lcs (1.6.2) sha256=9ae0d2cba7d4df3075fe8cd8602a8604993efc0dfa934cff568969efb1909962
+  logger (1.7.0) sha256=196edec7cc44b66cfb40f9755ce11b392f21f7967696af15d274dde7edff0203
+  mini_mime (1.1.5) sha256=8681b7e2e4215f2a159f9400b5816d85e9d8c6c6b491e96a12797e798f8bccef
+  net-imap (0.6.8) sha256=eb30bb62227b64a3af6b518b04b2375113d69f68f15de59b0193b07d98acf6d9
+  net-pop (0.1.2) sha256=848b4e982013c15b2f0382792268763b748cce91c9e91e36b0f27ed26420dff3
+  net-protocol (0.4.0) sha256=f9f90c8c6f64794a45160bf422177a336db12809de3beeeaa26b88fcd2e8c853
+  net-smtp (0.5.2) sha256=35103cc04d6b2d94632f9928ede07483c24b70b9c0db1f231fea43909b678f3c
+  rexml (3.4.4) sha256=19e0a2c3425dfbf2d4fc1189747bdb2f849b6c5e74180401b15734bc97b5d142
+  rspec (3.13.2) sha256=206284a08ad798e61f86d7ca3e376718d52c0bc944626b2349266f239f820587
+  rspec-benchmark (0.6.0) sha256=1014adb57ec2599a2455c63884229f367a2fff6a63a77fd68ce5d804c83dd6cf
+  rspec-core (3.13.7) sha256=c64ff16d9788119805cbc6a3f4b6d87cc22417c2d25976a3330de136896b5469
+  rspec-expectations (3.13.6) sha256=bf538ca6d367ff5b0d85a87fdb5c0c6038f2cd1308a0eeba07476caa02d22f35
+  rspec-mocks (3.13.9) sha256=ea5c7ff3054a6098ca6039aacef80aec69d5a8a3ef80be8fc88337359b672a30
+  rspec-support (3.13.8) sha256=e4160030309b7e3e9d9863dfe720a35dfcc577162f5402cd68fc8c5258a0ffd6
+  timeout (0.6.1) sha256=78f57368a7e7bbadec56971f78a3f5ecbcfb59b7fcbb0a3ed6ddc08a5094accb
+
+BUNDLED WITH
+  4.0.20
