@@ -48,6 +48,7 @@ Topics
    topics/sessions
    topics/authentication
    topics/security
+   topics/diagnostics
    topics/testing
    topics/worker
    deploying
