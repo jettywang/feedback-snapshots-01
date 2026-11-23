@@ -56,6 +56,19 @@ class UnsupportedParametersError(ValueError):
     """
 
 
+class MigrationStorageError(Argon2Error):
+    """
+    Raised by a commit store while staging or committing a migration group.
+
+    The migrator treats this error as *transient*: it rolls the whole group
+    back and reports it as uncommitted, without ever reading or retaining the
+    cleartext password itself.  The caller is expected to retry the batch with
+    fresh password handles once the backend is healthy again.
+
+    .. versionadded:: 25.2.0
+    """
+
+
 InvalidHash = InvalidHashError
 """
 Deprecated alias for :class:`InvalidHashError`.

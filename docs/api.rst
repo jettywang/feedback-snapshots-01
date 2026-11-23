@@ -100,6 +100,8 @@ Exceptions
 
 .. autoexception:: argon2.exceptions.UnsupportedParametersError
 
+.. autoexception:: argon2.exceptions.MigrationStorageError
+
 
 
 Utilities
@@ -108,6 +110,70 @@ Utilities
 .. autofunction:: argon2.extract_parameters
 
 .. autoclass:: argon2.Parameters
+
+
+Grouped Migration
+-----------------
+
+The grouped migration API lets an account migrator turn an approved batch of
+rehash requests into Argon2 digests without taking ownership of the
+cleartext passwords and without leaving a release group half-applied.
+
+The caller implements two small contracts:
+
+* :class:`~argon2.PasswordHandle` exposes one cleartext password only while
+  its group is being processed.
+* :class:`~argon2.CommitStore` hands out transactions that own the durable
+  write; a group is either fully committed or fully rolled back.
+
+Each :class:`~argon2.ImportGroup` may use its own approved
+:class:`~argon2.Parameters` profile. A failure while processing one group is
+isolated to that group, and re-running a batch is idempotent because accounts
+that already landed under a group id are skipped before their handles are
+opened.
+
+.. autofunction:: argon2.import_groups
+
+.. autoclass:: argon2.ImportGroup
+   :members:
+
+.. autoclass:: argon2.MigrationItem
+   :members:
+
+.. autoclass:: argon2.PasswordHandle
+   :members:
+
+.. autoclass:: argon2.CommitStore
+   :members:
+
+.. autoclass:: argon2.MigrationTransaction
+   :members:
+
+.. autoclass:: argon2.InMemoryCommitStore
+   :members:
+
+.. autoclass:: argon2.BatchResult
+   :members:
+
+.. autoclass:: argon2.GroupResult
+   :members:
+
+.. autoclass:: argon2.ItemResult
+   :members:
+
+.. autoclass:: argon2.GroupFailure
+   :members:
+
+.. autoclass:: argon2.GroupStatus
+   :members:
+
+.. autoclass:: argon2.ItemStatus
+   :members:
+
+.. autoclass:: argon2.GroupFailureReason
+   :members:
+
+.. autofunction:: argon2.digest_fingerprint
 
 
 Low Level

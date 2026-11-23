@@ -20,6 +20,17 @@ You can find our backwards-compatibility policy [here](https://github.com/hynek/
 - Official support for Python 3.15.
   No code changes were necessary.
 
+- A transactional, group-scoped bulk import contract for account
+  migrations: `argon2.import_groups()` plus the `PasswordHandle` and
+  `CommitStore` protocols, the `ImportGroup`/`MigrationItem` inputs,
+  structured `BatchResult`/`GroupResult`/`ItemResult` outcomes, and an
+  in-memory `InMemoryCommitStore` reference implementation.
+  Groups land atomically, failures are isolated per group, transient
+  storage errors never take over the cleartext password lifecycle, and
+  re-running a batch is idempotent.
+  Diagnostics carry `digest_fingerprint()` values rather than full
+  digests or passwords.
+
 
 ### Removed
 
