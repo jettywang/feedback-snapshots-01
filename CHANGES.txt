@@ -65,6 +65,21 @@ Feature
   See https://github.com/Pylons/webob/pull/376 and
   https://github.com/Pylons/webob/pull/379
 
+- ``webob.static.DirectoryApp`` accepts an optional ``ownership_policy``
+  (``webob.static.FileOwnershipPolicy``). When configured, a file is served
+  only if the object that was actually opened is owned by the mounted
+  directory, or is one of the explicitly approved ``shared_files``. Shared
+  files are bound to the identity observed when they are approved, so a
+  replacement does not inherit the approval. The same admission check covers
+  directory index files, ``HEAD`` and range requests, and it is repeated
+  before the body is produced so a change in storage stops the response
+  instead of serving an unapproved object. Without a policy, the existing
+  ``make_fileapp`` factory and directory redirect behaviour are unchanged.
+
+  A ``storage`` argument (``webob.static.FileStorage``) supplies the
+  filesystem operations used for the check, which also makes the policy
+  testable with substitute storage.
+
 Compatibility
 ~~~~~~~~~~~~~
 

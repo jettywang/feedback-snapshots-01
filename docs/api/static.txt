@@ -3,10 +3,24 @@
 
 .. automodule:: webob.static
 
+:class:`~webob.static.DirectoryApp` can enforce an optional file ownership
+policy.  With a policy, a file is served only when the object actually opened
+is inside the mounted directory or on the same volume, or is one of the
+explicitly approved shared files.  The same check covers ordinary files, index
+files, ``HEAD`` and range requests.  It is repeated before the body is
+produced, so a file that changes identity or is withdrawn in the meantime
+stops the response instead of being served.  Use
+:class:`~webob.static.FileStorage` to adapt the policy to a storage layer
+other than the local filesystem.
+
 .. autoclass:: webob.static.FileApp
    :members:
 
 .. autoclass:: webob.static.DirectoryApp
    :members:
 
+.. autoclass:: webob.static.FileOwnershipPolicy
+   :members:
 
+.. autoclass:: webob.static.FileStorage
+   :members:
