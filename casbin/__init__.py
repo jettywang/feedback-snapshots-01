@@ -13,6 +13,7 @@
 # limitations under the License.
 
 from .enforcer import *
+from .coverage import CoverageDecision, CoverageEvidence, CoverageSnapshot, Decision
 from .policy_index import PolicyIndex
 from .synced_enforcer import SyncedEnforcer
 from .distributed_enforcer import DistributedEnforcer

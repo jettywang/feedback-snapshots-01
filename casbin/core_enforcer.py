@@ -23,6 +23,7 @@ from casbin.effect import (
     effect_to_bool,
     get_effector,
 )
+from casbin.coverage import CoverageDecision, CoverageEvidence, CoverageSnapshot, Decision
 from casbin.model import Model, FunctionMap
 from casbin.persist import Adapter
 from casbin.persist.adapters import FileAdapter
@@ -130,6 +131,8 @@ class CoreEnforcer:
 
         self._reset_policy_caches()
         self.init_rm_map()
+
+        self._loaded_filter_batches = []
 
     @staticmethod
     def new_model(path="", text=""):
@@ -333,6 +336,7 @@ class CoreEnforcer:
     def load_policy(self):
         """reloads the policy from file/database."""
         need_to_rebuild = False
+        self._loaded_filter_batches = []
         new_model = copy.deepcopy(self.model)
         new_model.clear_policy()
 
@@ -374,6 +378,7 @@ class CoreEnforcer:
             raise ValueError("filtered policies are not supported by this adapter")
 
         self.adapter.load_filtered_policy(self.model, filter)
+        self._loaded_filter_batches = [filter]
 
         self.model.sort_policies_by_priority()
 
@@ -388,6 +393,7 @@ class CoreEnforcer:
             raise ValueError("filtered policies are not supported by this adapter")
 
         self.adapter.load_filtered_policy(self.model, filter)
+        self._loaded_filter_batches.append(filter)
         self.model.print_policy()
         if self.auto_build_role_links:
             self.build_role_links()
@@ -666,6 +672,125 @@ class CoreEnforcer:
             explain_rule = list(self.model["p"][ptype].policy[explain_index])
 
         return result, explain_rule
+
+    def enforce_with_coverage(self, *rvals):
+        """decides like enforce_ex, but also reports how much of the policy
+        scope backs the decision.
+
+        Returns a CoverageDecision whose decision is Decision.ALLOW or
+        Decision.DENY when the loaded scope is sufficient to make the answer
+        final, and Decision.INDETERMINATE when policy pages relevant to the
+        request (rules, role links or priority ordering) may still be missing.
+        Callers with a fully loaded policy always get a definite ALLOW/DENY
+        that matches enforce().
+        """
+        rtype = "r"
+        ptype = "p"
+        req = rvals
+        if len(req) != 0 and isinstance(req[0], EnforceContext):
+            enforce_context = req[0]
+            rtype = enforce_context.rtype
+            ptype = enforce_context.ptype
+            req = req[1:]
+
+        result, explain_rule = self.enforce_ex(*rvals)
+
+        if not self.enabled:
+            evidence = CoverageEvidence(
+                complete=True,
+                request_domains=(),
+                policy_known=True,
+                role_links_known=True,
+                priority_known=True,
+            )
+            return CoverageDecision(decision=Decision.ALLOW, allowed=True, explain=(), evidence=evidence)
+
+        evidence = self._coverage_evidence(rtype, ptype, req)
+        decision = self._decision_from_coverage(ptype, result, explain_rule, evidence)
+        return CoverageDecision(decision=decision, allowed=result, explain=tuple(explain_rule), evidence=evidence)
+
+    def _decision_from_coverage(self, ptype, result, explain_rule, evidence):
+        scope_known = evidence.complete or (
+            evidence.policy_known and evidence.role_links_known and evidence.priority_known
+        )
+        if scope_known:
+            return Decision.ALLOW if result else Decision.DENY
+        if not result and self._is_explicit_deny(ptype, explain_rule) and isinstance(self.eft, AllowAndDenyEffector):
+            # under allow-and-deny a matched deny cannot be revoked by loading more rules
+            return Decision.DENY
+        return Decision.INDETERMINATE
+
+    def _is_explicit_deny(self, ptype, explain_rule):
+        if not explain_rule:
+            return False
+        tokens = self.model["p"][ptype].tokens
+        eft_key = ptype + "_eft"
+        if eft_key not in tokens:
+            return False
+        eft_index = tokens.index(eft_key)
+        return eft_index < len(explain_rule) and explain_rule[eft_index] == "deny"
+
+    def _coverage_evidence(self, rtype, ptype, rvals):
+        request_domains = self._request_domains(rtype, rvals)
+        if not self.is_filtered():
+            return CoverageEvidence(
+                complete=True,
+                request_domains=request_domains,
+                policy_known=True,
+                role_links_known=True,
+                priority_known=True,
+                loaded_batches=tuple(self._loaded_filter_batches),
+            )
+
+        snapshot = self._adapter_coverage()
+        missing = list(snapshot.missing)
+        has_roles = "g" in self.model.keys() and len(self.model["g"]) != 0
+
+        if request_domains:
+            policy_known = all(d in snapshot.policy_domains for d in request_domains)
+            role_links_known = all(d in snapshot.role_domains for d in request_domains) if has_roles else True
+            for domain in request_domains:
+                if domain not in snapshot.policy_domains:
+                    missing.append("policy rules for domain '%s' not fully loaded" % domain)
+                if has_roles and domain not in snapshot.role_domains:
+                    missing.append("role links for domain '%s' not fully loaded" % domain)
+        else:
+            policy_known = snapshot.complete
+            role_links_known = snapshot.complete if has_roles else True
+            if not snapshot.complete:
+                missing.append("request carries no domain; a partial policy cannot be scoped to it")
+
+        uses_priority = (ptype + "_priority") in self.model["p"][ptype].tokens
+        priority_known = policy_known if uses_priority else True
+        if uses_priority and not priority_known:
+            missing.append("priority ordering for the request scope is incomplete")
+
+        return CoverageEvidence(
+            complete=False,
+            request_domains=request_domains,
+            policy_known=policy_known,
+            role_links_known=role_links_known,
+            priority_known=priority_known,
+            loaded_batches=tuple(self._loaded_filter_batches),
+            missing=tuple(missing),
+        )
+
+    def _request_domains(self, rtype, rvals):
+        r_tokens = self.model["r"][rtype].tokens
+        domains = []
+        for token, value in zip(r_tokens, rvals):
+            if token.endswith("_dom"):
+                domains.append(value)
+        return tuple(domains)
+
+    def _adapter_coverage(self):
+        coverage = getattr(self.adapter, "coverage", None)
+        if callable(coverage):
+            return coverage()
+        return CoverageSnapshot(
+            complete=False,
+            missing=("adapter does not report its loaded scope",),
+        )
 
     def batch_enforce(self, rvals):
         """batch_enforce enforce in batches"""
