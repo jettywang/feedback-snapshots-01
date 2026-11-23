@@ -70,3 +70,55 @@ setting without having to re-declare the list:
 
 ``AllowedHostsOriginValidator`` will also automatically allow local connections
 through if the site is in ``DEBUG`` mode, much like Django's host validation.
+
+
+Rejecting a WebSocket handshake
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Internal ASGI servers come in two generations, and a rejected handshake must
+follow the convention the deployed server understands:
+
+* Newer servers advertise the ``websocket.http.response`` ASGI extension in the
+  connection ``scope["extensions"]`` mapping. They can answer the opening HTTP
+  request with an explicit rejection response (the
+  ``http.response.start`` / ``http.response.body`` events). This lets a security
+  gateway send a public status code and headers explaining the denial.
+* Older servers only understand the legacy ``websocket.close`` event, which
+  drops the connection without an HTTP response.
+
+``WebsocketDenial`` picks the right convention for the connection it is given
+and guarantees that a single connection only ever emits one terminal event:
+
+.. code-block:: python
+
+    from channels.security.websocket import WebsocketDenial
+
+    async def asgi(scope, receive, send):
+        denial = WebsocketDenial(scope, send, receive)
+        await denial.deny()
+
+When the extension is available, ``deny()`` sends the configured HTTP response;
+otherwise it falls back to ``websocket.close``. The status code and header
+names of an HTTP rejection must be on the ``approved_statuses`` and
+``approved_headers`` allow lists passed to the constructor; anything else
+raises ``ValueError`` so a gateway cannot leak arbitrary responses. The defaults
+allow a ``403`` response with a ``content-type`` header.
+
+The three situations in which no terminal event can be sent raise distinct
+exceptions so callers can tell them apart:
+
+* ``WebsocketHttpResponseUnavailable`` — the server does not advertise the
+  extension and an explicit HTTP response was requested.
+* ``ConnectionAlreadyAccepted`` — the connection was already accepted, so a
+  handshake rejection is no longer possible.
+* ``ConnectionDisconnectRaced`` — a ``websocket.disconnect`` event arrived
+  before the denial could be sent. Constructing ``WebsocketDenial`` with the
+  ``receive`` callable enables this check; any handshake message the probe had
+  to read stays available through the ``WebsocketDenial.receive`` wrapper.
+* ``DenialAlreadySent`` — a second terminal event was attempted.
+
+``OriginValidator`` uses this machinery automatically, and
+``WebsocketDenier`` remains available for code that specifically wants the
+legacy close-only behaviour. Source checking and any business-level rejection
+stay the responsibility of your existing entry points; a connection that is
+rejected at either point never proceeds to business message handling.

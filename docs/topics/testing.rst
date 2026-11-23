@@ -256,8 +256,34 @@ either:
 
 * ``(True, <chosen_subprotocol>)`` if the socket was accepted.
   ``chosen_subprotocol`` defaults to ``None``.
-* ``(False, <close_code>)`` if the socket was rejected.
-  ``close_code`` defaults to ``1000``.
+* ``(False, <close_code>)`` if the socket was rejected with a
+  ``websocket.close`` event. ``close_code`` defaults to ``1000``.
+* ``(False, None)`` if the socket was rejected with an HTTP response because
+  the scope advertises the ``websocket.http.response`` extension. The response
+  is exposed on the communicator as ``http_response_status``,
+  ``http_response_headers`` and ``http_response_body``.
+
+Declaring server extensions
+~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Pass ``extensions`` to the constructor to model the capabilities of the server
+under test. It accepts either a list of extension names or the spec's mapping
+of extension name to settings. Declaring ``websocket.http.response`` reproduces
+a newer server that allows handshake HTTP rejections; omitting it reproduces an
+older server that can only close the connection:
+
+.. code-block:: python
+
+    from channels.testing import WebsocketCommunicator
+    communicator = WebsocketCommunicator(
+        application,
+        "/testws/",
+        extensions=["websocket.http.response"],
+    )
+    connected, close_code = await communicator.connect()
+    assert connected is False
+    assert close_code is None
+    assert communicator.http_response_status == 403
 
 send_to
 ~~~~~~~

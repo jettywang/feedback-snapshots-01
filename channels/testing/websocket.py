@@ -13,7 +13,13 @@ class WebsocketCommunicator(ApplicationCommunicator):
     """
 
     def __init__(
-        self, application, path, headers=None, subprotocols=None, spec_version=None
+        self,
+        application,
+        path,
+        headers=None,
+        subprotocols=None,
+        spec_version=None,
+        extensions=None,
     ):
         if not isinstance(path, str):
             raise TypeError("Expected str, got {}".format(type(path)))
@@ -27,20 +33,43 @@ class WebsocketCommunicator(ApplicationCommunicator):
         }
         if spec_version:
             self.scope["spec_version"] = spec_version
+        if extensions is not None:
+            # Accept either a list of extension names or the spec's mapping of
+            # extension name to optional settings.
+            self.scope["extensions"] = (
+                {name: {} for name in extensions}
+                if isinstance(extensions, (list, tuple))
+                else dict(extensions)
+            )
         super().__init__(application, self.scope)
         self.response_headers = None
+        self.http_response_status = None
+        self.http_response_headers = None
+        self.http_response_body = None
 
     async def connect(self, timeout=1):
         """
         Trigger the connection code.
 
         On an accepted connection, returns (True, <chosen-subprotocol>)
-        On a rejected connection, returns (False, <close-code>)
+        On a rejected connection, returns (False, <close-code>). When the
+        server scope advertises ``websocket.http.response`` and the
+        application rejects the handshake with an HTTP response, the rejection
+        is available afterwards as ``http_response_status``,
+        ``http_response_headers`` and ``http_response_body`` and the close code
+        is ``None``.
         """
         await self.send_input({"type": "websocket.connect"})
         response = await self.receive_output(timeout)
         if response["type"] == "websocket.close":
             return (False, response.get("code", 1000))
+        elif response["type"] == "http.response.start":
+            self.http_response_status = response["status"]
+            self.http_response_headers = response.get("headers", [])
+            body = await self.receive_output(timeout)
+            assert body["type"] == "http.response.body"
+            self.http_response_body = body.get("body", b"")
+            return (False, None)
         else:
             assert response["type"] == "websocket.accept"
             self.response_headers = response.get("headers", [])
