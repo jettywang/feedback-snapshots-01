@@ -35,6 +35,9 @@ classifiers = [
 [project.urls]
 "Home-page" = "https://github.com/apache/casbin-pycasbin"
 
+[project.scripts]
+casbin-policy-review = "casbin.policy_review.cli:main"
+
 [build-system]
 requires = ["setuptools"]
 build-backend = "setuptools.build_meta"

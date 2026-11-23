@@ -1,0 +1,126 @@
+{
+  "requests": [
+    {
+      "request_id": "REQ-001",
+      "rvals": [
+        "alice",
+        "domain1",
+        "data1",
+        "read",
+        "*"
+      ],
+      "expected": "allow",
+      "note": "alice inherits admin in domain1"
+    },
+    {
+      "request_id": "REQ-002",
+      "rvals": [
+        "alice",
+        "domain1",
+        "data1",
+        "write",
+        "*"
+      ],
+      "expected": "deny",
+      "note": "explicit deny overrides the inherited admin allow"
+    },
+    {
+      "request_id": "REQ-003",
+      "rvals": [
+        "bob",
+        "domain2",
+        "data2",
+        "write",
+        "*"
+      ],
+      "expected": "allow"
+    },
+    {
+      "request_id": "REQ-004",
+      "rvals": [
+        "carol",
+        "domain1",
+        "data2",
+        "read",
+        "*"
+      ],
+      "expected": "allow"
+    },
+    {
+      "request_id": "REQ-005",
+      "rvals": [
+        "carol",
+        "domain1",
+        "reports",
+        "read"
+      ],
+      "expected": "allow",
+      "note": "optional scope parameter omitted; normalised to empty string and still evaluated by the matcher"
+    },
+    {
+      "request_id": "REQ-006",
+      "rvals": [
+        "carol",
+        "domain1",
+        "data1",
+        "read",
+        "restricted"
+      ],
+      "expected": "allow"
+    }
+  ],
+  "candidates": [
+    {
+      "rule_id": "CAND-A",
+      "ptype": "p",
+      "rule": [
+        "auditor",
+        "domain1",
+        "data2",
+        "read",
+        "*",
+        "allow"
+      ],
+      "note": "archived REQ-004 relies on this rule; deletion must be blocked"
+    },
+    {
+      "rule_id": "CAND-B",
+      "ptype": "p",
+      "rule": [
+        "alice",
+        "domain1",
+        "data1",
+        "write",
+        "*",
+        "deny"
+      ],
+      "note": "deny override; deny wins, removal must be blocked"
+    },
+    {
+      "rule_id": "CAND-C",
+      "ptype": "p",
+      "rule": [
+        "admin",
+        "domain1",
+        "data1",
+        "write",
+        "*",
+        "allow"
+      ],
+      "note": "no archived request observes its effect (deny-shadowed); unknown scope"
+    },
+    {
+      "rule_id": "CAND-D",
+      "ptype": "p",
+      "rule": [
+        "legacy_app",
+        "domain1",
+        "legacy",
+        "read",
+        "*",
+        "allow"
+      ],
+      "note": "dead rule: no subject inherits legacy_app and no archived request touches it"
+    }
+  ]
+}

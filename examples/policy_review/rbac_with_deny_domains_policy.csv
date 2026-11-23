@@ -1,0 +1,13 @@
+p, admin, domain1, data1, read, *, allow
+p, admin, domain1, data1, write, *, allow
+p, auditor, domain1, data1, read, restricted, allow
+p, auditor, domain1, data2, read, *, allow
+p, admin, domain2, data2, read, *, allow
+p, admin, domain2, data2, write, *, allow
+p, auditor, domain1, reports, read, , allow
+p, legacy_app, domain1, legacy, read, *, allow
+p, alice, domain1, data1, write, *, deny
+
+g, alice, admin, domain1
+g, bob, admin, domain2
+g, carol, auditor, domain1
