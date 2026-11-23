@@ -37,6 +37,30 @@ class HashingError(Argon2Error):
     """
 
 
+class KeyMaterialUnavailableError(Argon2Error):
+    """
+    Key material for a password digest's key generation is unavailable.
+
+    This is distinct from a password mismatch: the digest may be valid, but
+    the caller's key provider cannot currently supply the generation that is
+    recorded in it.  Never fall back to an unpeppered digest or to another
+    generation in this situation.
+
+    Attributes:
+        generation: The key generation whose material is missing.
+
+    .. versionadded:: 25.2.0
+    """
+
+    generation: int
+
+    def __init__(self, generation: int):
+        self.generation = generation
+        super().__init__(
+            f"No key material is available for key generation {generation}."
+        )
+
+
 class InvalidHashError(ValueError):
     """
     Raised if the hash is invalid before passing it to Argon2.

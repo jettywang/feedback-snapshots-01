@@ -20,6 +20,16 @@ You can find our backwards-compatibility policy [here](https://github.com/hynek/
 - Official support for Python 3.15.
   No code changes were necessary.
 
+- Optional `argon2.PepperedPasswordHasher` for password digests that mix in an
+  application-managed pepper supplied by a caller-provided
+  `argon2.KeyProvider`.
+  Digests record their key generation, old generations remain verifiable,
+  new writes only use the approved generation, and migration is explicit.
+  Key material is never stored by *argon2-cffi*.
+
+- `argon2.exceptions.KeyMaterialUnavailableError` to distinguish missing
+  pepper material from a password mismatch.
+
 
 ### Removed
 

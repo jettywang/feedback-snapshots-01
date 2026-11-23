@@ -18,6 +18,26 @@ They are taken from :data:`argon2.profiles.RFC_9106_LOW_MEMORY`, but they may va
 You can use :func:`argon2.profiles.get_default_parameters` to get the current platform's defaults.
 
 
+Peppered Hashing
+----------------
+
+Applications that manage an additional secret outside of their database can
+use the separate, optional :class:`argon2.PepperedPasswordHasher`.
+Unlike :class:`argon2.PasswordHasher`, its digests record a key generation and
+require a caller-supplied :class:`argon2.KeyProvider` to verify them.
+Key material is never stored by *argon2-cffi*.
+
+.. autoclass:: argon2.KeyProvider
+  :members: current_generation, key_for_generation
+
+.. autoclass:: argon2.PepperedPasswordHasher
+  :members: hash, verify, check_needs_rehash, migrate
+
+.. autoclass:: argon2.PepperStatus
+
+.. autoclass:: argon2.PepperedVerification
+
+
 Profiles
 --------
 
@@ -93,6 +113,8 @@ Exceptions
 .. autoexception:: argon2.exceptions.VerifyMismatchError
 
 .. autoexception:: argon2.exceptions.HashingError
+
+.. autoexception:: argon2.exceptions.KeyMaterialUnavailableError
 
 .. autoexception:: argon2.exceptions.InvalidHashError
 

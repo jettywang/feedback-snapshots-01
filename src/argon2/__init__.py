@@ -14,6 +14,12 @@ from ._password_hasher import (
     DEFAULT_TIME_COST,
     PasswordHasher,
 )
+from ._pepper import (
+    KeyProvider,
+    PepperedPasswordHasher,
+    PepperedVerification,
+    PepperStatus,
+)
 from ._utils import Parameters, extract_parameters
 from .low_level import Type
 
@@ -31,8 +37,12 @@ __all__ = [
     "DEFAULT_PARALLELISM",
     "DEFAULT_RANDOM_SALT_LENGTH",
     "DEFAULT_TIME_COST",
+    "KeyProvider",
     "Parameters",
     "PasswordHasher",
+    "PepperedPasswordHasher",
+    "PepperedVerification",
+    "PepperStatus",
     "Type",
     "exceptions",
     "extract_parameters",
