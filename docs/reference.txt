@@ -166,6 +166,46 @@ path segment on PATH_INFO:
     >>> req.path_info
     ''
 
+Request Summary
+---------------
+
+For diagnostics and support tickets, :py:meth:`req.summary(...)
+<webob.request.BaseRequest.summary>` produces an immutable snapshot of the
+request's shape.  It only exposes headers the caller explicitly approves, and
+it never reads the request body.
+
+.. code-block:: python
+
+    >>> summary_req = Request.blank('/article?id=1')
+    >>> summary_req.headers['X-Request-Id'] = 'req-123'
+    >>> summary = summary_req.summary(['X-Request-Id'], stage='ingress')
+    >>> summary.headers[0].value
+    'req-123'
+    >>> summary.header_source
+    'wsgi-environ'
+    >>> summary.headers[0].count is None
+    True
+
+The summary records where the header information came from.  A WSGI environ
+contains only the server-merged value for each header, so ``header_source`` is
+``'wsgi-environ'``, ``merged`` is ``True``, and ``count`` is ``None``: the
+number of original header lines cannot be proven.  An ingress layer that
+observed the raw header pairs can pass them as ``raw_headers``; the summary
+then preserves every value, sets ``count`` exactly, and reports
+``header_source == 'raw'``.
+
+Credential-bearing headers (see :py:data:`webob.summary.PROTECTED_HEADERS`)
+are always replaced with ``<protected>``, even when approved.  The same field
+policy applies to the text form,
+:py:meth:`~webob.summary.RequestSummary.as_dict` and
+:py:meth:`~webob.summary.RequestSummary.to_json`.
+
+Because the summary is a snapshot, taking one and then changing ordinary
+headers or reading the body does not alter it.  The body's
+``content_length`` and readable state are reported without consuming the
+stream, so later business reads behave exactly as they would without a
+summary.
+
 Headers
 -------
 

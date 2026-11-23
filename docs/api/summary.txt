@@ -1,0 +1,12 @@
+:mod:`webob.summary` -- Safe request summaries
+==============================================
+
+.. automodule:: webob.summary
+
+.. autoclass:: webob.summary.RequestSummary
+   :members:
+
+.. autoclass:: webob.summary.HeaderSummary
+   :members:
+
+.. autodata:: webob.summary.PROTECTED_HEADERS

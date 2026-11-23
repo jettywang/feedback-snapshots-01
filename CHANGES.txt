@@ -47,6 +47,14 @@ Security Fix
 Feature
 ~~~~~~~
 
+- Add ``Request.summary()`` and the immutable ``webob.summary.RequestSummary``
+  diagnostic view.  A summary only
+  exposes approved header names, always redacts credential-bearing headers
+  such as ``Authorization`` and ``Cookie``, reports whether header values
+  came from the merged WSGI environ or from raw ingress pairs, preserves the
+  known content length and call stage, and never reads the request body.
+  The same field policy applies to its text, structured, and JSON forms.
+
 - Rename "master" git branch to "main"
 
 - Add support for Python 3.12.

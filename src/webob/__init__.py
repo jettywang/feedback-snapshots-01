@@ -10,12 +10,15 @@ from webob.datetime_utils import (
 )
 from webob.request import BaseRequest, Request
 from webob.response import Response
+from webob.summary import HeaderSummary, RequestSummary
 from webob.util import html_escape
 
 __all__ = [
     "BaseRequest",
     "Request",
     "Response",
+    "RequestSummary",
+    "HeaderSummary",
     "UTC",
     "day",
     "week",

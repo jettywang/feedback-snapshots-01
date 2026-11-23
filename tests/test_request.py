@@ -20,6 +20,7 @@ from webob.acceptparse import (
     AcceptValidHeader,
 )
 from webob.multidict import NoVars
+from webob.request import Request
 from webob.util import bytes_, text_
 
 
@@ -1124,7 +1125,7 @@ class TestRequestCommon:
         assert body == b"<body skipped (len=337)>"
 
     def test_charset_in_content_type(self):
-        Request = self._getTargetClass()
+        from webob.request import Request
         # should raise no exception
         req = Request(
             {
@@ -3262,3 +3263,305 @@ class _Helper_test_request_wrong_clen:
 
     def seek(self, pos):
         pass
+
+
+class CountingInput:
+    """A request body stream that counts how many times it is read."""
+
+    def __init__(self, data):
+        self.data = data
+        self.pos = 0
+        self.reads = 0
+
+    def tell(self):
+        return self.pos
+
+    def read(self, size=-1):
+        self.reads += 1
+
+        if size is None or size < 0:
+            chunk = self.data[self.pos :]
+            self.pos = len(self.data)
+            return chunk
+
+        chunk = self.data[self.pos : self.pos + size]
+        self.pos += len(chunk)
+        return chunk
+
+
+class TestRequestSummary:
+    SECRET = "test-secret-authorization-value"
+
+    def _request(self, body=b"name=value", counting=None):
+        counting = counting or CountingInput(body)
+        environ = {
+            "REQUEST_METHOD": "POST",
+            "PATH_INFO": "/submit",
+            "SCRIPT_NAME": "",
+            "QUERY_STRING": "",
+            "SERVER_NAME": "localhost",
+            "SERVER_PORT": "80",
+            "SERVER_PROTOCOL": "HTTP/1.1",
+            "wsgi.url_scheme": "http",
+            "wsgi.input": counting,
+            "CONTENT_LENGTH": str(len(body)),
+            "CONTENT_TYPE": "application/x-www-form-urlencoded",
+        }
+        return Request(environ), counting
+
+    def test_requires_explicit_approval(self):
+        req, counting = self._request()
+        with pytest.raises(TypeError):
+            req.summary(None)
+        assert counting.reads == 0
+
+    def test_approved_headers_only(self):
+        req, counting = self._request()
+        req.headers["X-Business"] = "first, second"
+        req.headers["X-Other"] = "not-approved"
+        summary = req.summary(["X-Business"])
+        assert [header.name for header in summary.headers] == ["X-Business"]
+        assert summary.headers[0].value == "first, second"
+        assert "not-approved" not in str(summary)
+        assert "not-approved" not in summary.to_json()
+        assert counting.reads == 0
+
+    def test_environ_only_reports_merged_source_and_unknown_count(self):
+        req, _counting = self._request()
+        req.headers["X-Business"] = "first, second"
+        summary = req.summary(["X-Business"])
+        header = summary.headers[0]
+        assert header.values == ("first, second",)
+        assert header.count is None
+        assert header.merged is True
+        assert header.source == "wsgi-environ"
+        assert summary.header_source == "wsgi-environ"
+        assert "count=unknown" in str(summary)
+        assert summary.as_dict()["headers"][0]["count_known"] is False
+
+    def test_raw_headers_preserve_duplicate_count(self):
+        req, _counting = self._request()
+        raw = [("X-Business", "first"), ("X-Business", "second")]
+        summary = req.summary(["X-Business"], raw_headers=raw)
+        header = summary.headers[0]
+        assert header.name == "X-Business"
+        assert header.values == ("first", "second")
+        assert header.count == 2
+        assert header.merged is False
+        assert header.source == "raw"
+        assert summary.header_source == "raw"
+        assert "count=2" in str(summary)
+        assert summary.as_dict()["headers"][0]["count_known"] is True
+
+    def test_raw_header_mapping_with_lists_preserves_count(self):
+        req, _counting = self._request()
+        summary = req.summary(
+            ["X-Business"], raw_headers={"X-Business": ["first", "second"]}
+        )
+        header = summary.headers[0]
+        assert header.values == ("first", "second")
+        assert header.count == 2
+        assert header.merged is False
+
+    def test_raw_headers_still_honor_approval_and_protection(self):
+        req, _counting = self._request()
+        raw = [
+            ("X-Business", "first"),
+            ("X-Business", "second"),
+            ("Authorization", self.SECRET),
+            ("X-Other", "not-approved"),
+        ]
+        summary = req.summary(["X-Business", "Authorization"], raw_headers=raw)
+        names = [header.name for header in summary.headers]
+        assert names == ["Authorization", "X-Business"]
+        protected = summary.headers[0]
+        assert protected.redacted is True
+        assert protected.values == ("<protected>",)
+        assert protected.count == 1
+
+        for artifact in (str(summary), repr(summary), summary.to_json()):
+            assert self.SECRET not in artifact
+        assert self.SECRET not in str(summary.as_dict())
+
+    def test_protected_header_is_redacted_from_environ(self):
+        req, _counting = self._request()
+        req.headers["Authorization"] = "Bearer %s" % self.SECRET
+        req.headers["Cookie"] = "session=%s" % self.SECRET
+        summary = req.summary(["Authorization", "Cookie"])
+        assert {header.name for header in summary.headers} == {
+            "Authorization",
+            "Cookie",
+        }
+
+        for artifact in (str(summary), repr(summary), summary.to_json()):
+            assert self.SECRET not in artifact
+        for header in summary.as_dict()["headers"]:
+            assert header["redacted"] is True
+            assert header["value"] == "<protected>"
+
+    def test_summary_does_not_consume_body(self):
+        body = b"name=value"
+        req, counting = self._request(body)
+        summary = req.summary(["X-Business"])
+        assert counting.reads == 0
+        assert summary.body_status == "unread"
+        assert summary.length_known is True
+        assert summary.content_length == len(body)
+        assert summary.as_dict()["body"] == {
+            "included": False,
+            "read_by_summary": False,
+            "status": "unread",
+            "readable": True,
+            "seekable": False,
+            "content_length": len(body),
+            "length_known": True,
+            "position": 0,
+        }
+
+        # The business path reads exactly as it would without a summary.
+        assert req.body_file.read() == body
+
+        baseline, baseline_counting = self._request(body)
+        assert baseline.body_file.read() == body
+        assert counting.reads == baseline_counting.reads
+
+    def test_unknown_length_is_reported_without_reading(self):
+        body = b"streamed"
+        counting = CountingInput(body)
+        environ = {
+            "REQUEST_METHOD": "POST",
+            "PATH_INFO": "/stream",
+            "SCRIPT_NAME": "",
+            "QUERY_STRING": "",
+            "SERVER_NAME": "localhost",
+            "SERVER_PORT": "80",
+            "SERVER_PROTOCOL": "HTTP/1.1",
+            "wsgi.url_scheme": "http",
+            "wsgi.input": counting,
+            "wsgi.input_terminated": True,
+            "CONTENT_TYPE": "application/octet-stream",
+        }
+        req = Request(environ)
+        summary = req.summary(["X-Business"])
+        assert summary.length_known is False
+        assert summary.content_length is None
+        assert summary.body_status == "unread"
+        assert "content-length: unknown" in str(summary)
+        assert counting.reads == 0
+
+    def test_body_status_reflects_prior_consumption(self):
+        body = b"name=value"
+        req, counting = self._request(body)
+        assert req.body_file.read(4) == body[:4]
+        reads = counting.reads
+        summary = req.summary(["X-Business"])
+        assert summary.body_status == "read-started"
+        assert counting.reads == reads
+        assert req.body_file.read() == body[4:]
+
+    def test_duplicate_business_headers_and_snapshot(self):
+        req, _counting = self._request()
+        raw = [("X-Business", "first"), ("X-Business", "second")]
+        ingress = req.summary(["X-Business"], stage="ingress", raw_headers=raw)
+        assert ingress.headers[0].values == ("first", "second")
+        assert ingress.headers[0].count == 2
+
+        # The application rewrites the merged environ value and reads the
+        # stream; a second summary sees the new value and the new stage.
+        req.headers["X-Business"] = "rewritten"
+        assert req.body_file.read() == b"name=value"
+        application = req.summary(["X-Business"], stage="application")
+        assert application.headers[0].value == "rewritten"
+        assert application.stage == "application"
+        assert application.body_status == "read-started"
+
+        # The first summary is an immutable snapshot and still explains the
+        # two ingress header lines, even though the request has moved on.
+        assert ingress.headers[0].values == ("first", "second")
+        assert ingress.headers[0].count == 2
+        assert ingress.stage == "ingress"
+        assert "first" in str(ingress)
+        assert "second" in str(ingress)
+        assert "rewritten" not in str(ingress)
+        assert ingress.header_source == "raw"
+        assert application.header_source == "wsgi-environ"
+
+    def test_protected_placeholders_absent_from_all_public_artifacts(self):
+        req, _counting = self._request()
+        raw = [
+            ("X-Business", "first"),
+            ("X-Business", "second"),
+            ("Authorization", "Bearer %s" % self.SECRET),
+            ("Cookie", "session=%s" % self.SECRET),
+        ]
+        summary = req.summary(
+            ["X-Business", "Authorization", "Cookie"], raw_headers=raw
+        )
+
+        public = [
+            str(summary),
+            repr(summary),
+            summary.to_json(),
+            repr(summary.as_dict()),
+            repr(summary.headers),
+        ]
+        for artifact in public:
+            assert self.SECRET not in artifact
+            assert "session=%s" % self.SECRET not in artifact
+
+        for header in summary.headers:
+            if header.name in ("Authorization", "Cookie"):
+                assert header.redacted is True
+                assert header.values == ("<protected>",)
+                assert "count=1" in str(summary)
+
+    def test_field_policy_is_identical_across_representations(self):
+        req, _counting = self._request()
+        req.headers["X-Business"] = "visible"
+        req.headers["Authorization"] = "Bearer %s" % self.SECRET
+        req.headers["X-Unapproved"] = "hidden"
+        summary = req.summary(["X-Business", "Authorization"])
+
+        artifacts = [str(summary), repr(summary), summary.to_json()]
+        artifacts.extend(str(value) for value in summary.as_dict().values())
+        for artifact in artifacts:
+            assert "hidden" not in artifact
+            assert self.SECRET not in artifact
+        assert "visible" in str(summary)
+        assert "visible" in summary.to_json()
+        assert "visible" in repr(summary.as_dict())
+
+        structured = summary.as_dict()
+        assert structured["approved_headers"] == [
+            "authorization",
+            "x-business",
+        ]
+        assert [header["name"] for header in structured["headers"]] == [
+            "Authorization",
+            "X-Business",
+        ]
+        assert structured["headers"][0]["redacted"] is True
+        assert structured["headers"][1]["redacted"] is False
+
+    def test_line_breaks_are_escaped_in_text_form(self):
+        req, _counting = self._request()
+        req.headers["X-Business"] = "first\r\nsecond"
+        summary = req.summary(["X-Business"])
+        assert "first\\r\\nsecond" in str(summary)
+        assert "first\r\nsecond" not in str(summary)
+
+    def test_non_ascii_header_value_round_trips_through_json(self):
+        req, _counting = self._request()
+        summary = self._request()[0].summary(
+            ["X-Business"],
+            raw_headers=[
+                ("X-Business", "fürst"),
+                ("X-Business", "second"),
+            ],
+        )
+        import json as json_module
+
+        parsed = json_module.loads(summary.to_json())
+        assert parsed["headers"][0]["values"] == ["fürst", "second"]
+        assert "fürst" in str(summary)
+        assert summary.headers[0].count == 2

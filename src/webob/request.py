@@ -38,6 +38,7 @@ from webob.descriptors import (
 from webob.etag import AnyETag, IfRange, NoETag, etag_property
 from webob.headers import EnvironHeaders
 from webob.multidict import GetDict, MultiDict, NestedMultiDict, NoVars
+from webob.summary import RequestSummary
 from webob.util import bytes_, parse_qsl_text, text_, url_unquote, urljoin
 
 try:
@@ -46,7 +47,7 @@ except ImportError:
     import json
 
 
-__all__ = ["BaseRequest", "Request"]
+__all__ = ["BaseRequest", "Request", "RequestSummary"]
 
 
 class _NoDefault:
@@ -332,6 +333,29 @@ class BaseRequest:
         self.headers.update(value)
 
     headers = property(_headers__get, _headers__set, doc=_headers__get.__doc__)
+
+    def summary(self, approved_headers, stage=None, raw_headers=None):
+        """Return an immutable diagnostic summary of this request.
+
+        ``approved_headers`` lists the header names that may be exposed.
+        Header names outside that list are omitted entirely.  Headers that
+        carry credentials are always redacted, even when approved.
+
+        ``stage`` labels where in the call chain the summary was taken
+        (for example ``"ingress"`` or ``"application"``).  ``raw_headers``
+        lets an ingress layer pass the header pairs it actually observed,
+        preserving duplicate names and their exact count.  Without it the
+        summary uses the WSGI environ, which can only prove the merged value
+        the server supplied.
+
+        Reading a summary never reads the request body.
+        """
+        return RequestSummary.from_request(
+            self,
+            approved_headers=approved_headers,
+            stage=stage,
+            raw_headers=raw_headers,
+        )
 
     @property
     def client_addr(self):
