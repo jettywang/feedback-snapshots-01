@@ -1034,3 +1034,75 @@ class WhenCheckingTemplateForAccessGrantedPutObjectAndTest(ValidationTest):
 
         self.assertEqual(0, len(self.output['BlockingFindings']))
 
+
+
+def build_default_admission_args():
+    return Namespace(
+        template_path='abcdef',
+        region=account_config.region,
+        parameters={},
+        profile=None,
+        func=ANY,
+        allow_dynamic_ref_without_version=False,
+        exclude_resource_type=[],
+        template_configuration_file=None,
+        enable_logging=False,
+        approved_policy='approved.json',
+        principals=None,
+        ignore_finding=None,
+        findings_are_blocking=True
+    )
+
+
+class WhenParsingArgumentsForCheckAdmission(unittest.TestCase):
+    def setUp(self):
+        self.args = [
+            'check-admission',
+            '--template-path', 'abcdef',
+            '--region', account_config.region,
+            '--approved-policy', 'approved.json'
+        ]
+        ignore_warnings()
+
+    def assert_called_with(self, **overrides):
+        arguments = build_default_admission_args()
+        for key, value in overrides.items():
+            setattr(arguments, key, value)
+        setattr(arguments, '{parse,validate,check-no-new-access,check-access-not-granted,check-no-public-access}', ANY)
+
+        self.mock.assert_called_with(arguments)
+
+    def check_admission(self):
+        with patch.object(main, 'check_admission_from_cli') as self.mock:
+            main.main(args=self.args)
+
+    def check_admission_with_expected_error(self, error_message):
+        with self.assertRaises(SystemExit) as context_manager, captured_output() as (out, err):
+            main.main(self.args)
+
+        self.assertEqual(2, context_manager.exception.code)
+        self.assertIn(error_message, err.getvalue())
+
+    @mock_validation_setup()
+    def test_approved_policy_is_required(self):
+        self.args = [
+            'check-admission', '--template-path', 'abcdef', '--region', account_config.region
+        ]
+        self.check_admission_with_expected_error("the following arguments are required: --approved-policy")
+
+    @mock_validation_setup()
+    def test_defaults(self):
+        self.check_admission()
+        self.assert_called_with()
+
+    @mock_validation_setup()
+    def test_principals_are_parsed_to_a_list(self):
+        self.args.extend(['--principals', 'RoleA,RoleB'])
+        self.check_admission()
+        self.assert_called_with(principals=['RoleA', 'RoleB'])
+
+    @mock_validation_setup()
+    def test_findings_can_be_treated_as_non_blocking(self):
+        self.args.append('--treat-findings-as-non-blocking')
+        self.check_admission()
+        self.assert_called_with(findings_are_blocking=False)

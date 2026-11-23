@@ -171,6 +171,43 @@ Parses IAM identity-based and resource-based policies from AWS CloudFormation te
 | --allow-dynamic-ref-without-version | | | Override the default behavior and allow dynamic SSM references without version numbers.  The version number ensures that the SSM parameter value that was validated is the one that is deployed. |
 | --exclude-resource-types | | AWS::SERVICE::RESOURCE, AWS::SERVICE::RESOURCE | List of comma-separated resource types. Resource types should be the same as Cloudformation template resource names such as AWS::IAM::Role, AWS::S3::Bucket |
 
+**check-admission**
+
+```bash
+cfn-policy-validator check-admission --template-path ./my-template.json --region us-east-1 --approved-policy ./approved.json
+```
+
+Runs an offline admission check: every permission granted to a role must be contained in the approved policy document, and the report says where each permission came from. The analysis itself does not call IAM Access Analyzer and does not need real permissions to evaluate; it works from the parsed template, so the same template and approved policy produce the same verdict with a fake account. Like the other commands, the CLI still resolves the account and region through STS.
+
+For each role, the result contains a `PermissionsBySource` breakdown:
+
+- `RoleIdentity` — policies written directly on the role (or user/group/permission set).
+- `AttachedPolicies` — inline policies attached from separate resources, template managed policies, and managed policies read from the environment.
+- `ResourcePolicies` — resource policies whose `Principal` names that role. Matching is either exact (the role ARN) or account scope (`<account-id>`, `arn:aws:iam::<account-id>:root`, or `"*"`), and the match is recorded on the grant.
+
+`ResourcePolicies` grants are attributed to the specific identity named by `Principal`; a statement for another principal is listed under `AdmissionCheck.UnattributedResourceStatements` and never counts toward any role. Each grant also carries `Conditions`/`ConditionSummary` so the effective condition can be traced along the way, and `DeniedBy` when an unconditional deny revokes it.
+
+A managed policy that exists outside the template may only resolve to a name/ARN (for example `AccessDenied` when reading it). Such references are listed under `EvidenceGaps` and put the role in `INCOMPLETE_EVIDENCE`; it is never reported as `FullyCompliant`. A role is only `COMPLIANT` when it has no scope violations and no evidence gaps. `NON_COMPLIANT` outranks `INCOMPLETE_EVIDENCE`.
+
+| Arguments | Required |  Options | Description |
+| --------- | -------- | ---------| ----------- |
+| --template-path | Yes | FILE_NAME | The path to the CloudFormation template. |
+| --region | | REGION | The destination region the resources will be deployed to. If not specified, defaults to the AWS_REGION or AWS_DEFAULT_REGION environment variable. |
+| --approved-policy | Yes | FILE_PATH.json | The policy document that defines the only approved permissions. |
+| --principals | | ROLE_NAME,ROLE_ARN | Restrict the check to specific roles. Defaults to every role in the template. |
+| --parameters | | KEY=VALUE [KEY=VALUE ...] | Keys and values for CloudFormation template parameters.  Only parameters that are referenced by IAM policies in the template are required. |
+| --template-configuration-file | | FILE_PATH.json | A JSON formatted file that specifies template parameter values. Identical values passed in the --parameters flag override parameters in this file. |
+| --profile | | PROFILE | The named profile to use for AWS API calls. |
+| --enable-logging | | | Enables log output to stdout |
+| --ignore-finding | | FINDING_CODE,RESOURCE_NAME,RESOURCE_NAME.FINDING_CODE | Allow findings to be ignored. Can be a finding code (`ADMISSION_SCOPE_EXCEEDED`, `ADMISSION_EVIDENCE_MISSING`), a resource name, or both separated by a period. |
+| --treat-findings-as-non-blocking | | | When set, all findings are reported as non-blocking. |
+| --allow-dynamic-ref-without-version | | | Override the default behavior and allow dynamic SSM references without version numbers. |
+| --exclude-resource-types | | AWS::SERVICE::RESOURCE, AWS::SERVICE::RESOURCE | List of comma-separated resource types to exclude from parsing. |
+
+`--principals` takes a comma-separated list of role names or role ARNs. Running without it checks
+every role in the template. The command exits `2` when any blocking finding is present and `0`
+otherwise.
+
 ### Supported resource-based policies
 
 | CloudFormation Resource Type | Policy best practice checks | Access previews (check for external access) | Custom Policy Check (public access)
@@ -310,7 +347,7 @@ This repository ships an [Agent Skill](https://agentskills.io/specification) und
 [`skills/iam-policy-validator/`](skills/iam-policy-validator/) so AI coding agents
 can drive `cfn-policy-validator` on their own. The skill teaches the agent when to
 use each command (`validate`, `check-no-new-access`, `check-access-not-granted`,
-`check-no-public-access`, `parse`), how to prepare CloudFormation and
+`check-no-public-access`, `check-admission`, `parse`), how to prepare CloudFormation and
 CDK-synthesized input, how to scope each check to the policies it can evaluate, and
 how to read the `BlockingFindings` / `NonBlockingFindings` output and exit code. It
 leaves flag-level detail to `cfn-policy-validator --help`.

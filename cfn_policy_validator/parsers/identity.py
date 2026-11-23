@@ -14,7 +14,8 @@ from cfn_policy_validator.parsers.identity_schemas import groups_schema, managed
 	roles_schema, inline_policy_schema, users_schema, permission_set_schema, role_policy_schema, group_policy_schema, \
 	user_policy_schema
 from cfn_policy_validator.parsers.utils.arn_generator import ArnGenerator
-from cfn_policy_validator.parsers.output import Role, User, Policy, Group, PermissionSet
+from cfn_policy_validator.parsers.output import Role, User, Policy, Group, PermissionSet, PolicySource, \
+	UnresolvedPolicyReference
 from cfn_policy_validator.parsers.utils.topological_sorter import TopologicalSorter
 
 
@@ -28,17 +29,17 @@ class IdentityParser:
 	"""
 
 	@classmethod
-	def parse(cls, template, account_config, excluded_resource_types={}):
+	def parse(cls, template, account_config, excluded_resource_types={}, tolerate_unresolved_managed_policies=False):
 		parsers = {
-			'AWS::IAM::Role': RoleParser(account_config.region),
+			'AWS::IAM::Role': RoleParser(account_config.region, tolerate_unresolved_managed_policies),
 			'AWS::IAM::Policy': InlinePolicyParser(),
 			'AWS::IAM::RolePolicy': RolePolicyParser(),
 			'AWS::IAM::GroupPolicy': GroupPolicyParser(),
 			'AWS::IAM::UserPolicy': UserPolicyParser(),
 			'AWS::IAM::ManagedPolicy': ManagedPolicyParser(account_config),
-			'AWS::IAM::User': UserParser(account_config.region),
-			'AWS::IAM::Group': GroupParser(account_config.region),
-			'AWS::SSO::PermissionSet': PermissionSetParser(account_config.region)
+			'AWS::IAM::User': UserParser(account_config.region, tolerate_unresolved_managed_policies),
+			'AWS::IAM::Group': GroupParser(account_config.region, tolerate_unresolved_managed_policies),
+			'AWS::SSO::PermissionSet': PermissionSetParser(account_config.region, tolerate_unresolved_managed_policies)
 		}
 
 		# topologically sort which allows us to process dependent resources first
@@ -85,6 +86,11 @@ class IdentityParser:
 		return orphaned_policies
 
 
+def _client_error_code(error):
+	response = getattr(error, 'response', None) or {}
+	return (response.get('Error') or {}).get('Code')
+
+
 class AttachedPolicyParser:
 	"""
 	Handles parsing managed and inline policies from other resources
@@ -93,16 +99,17 @@ class AttachedPolicyParser:
 		self.client = client.build('iam', region)
 
 	@staticmethod
-	def parse_inline_policies(principal, properties):
+	def parse_inline_policies(principal, properties, source=PolicySource.ATTACHED_INLINE_POLICY):
 		inline_policies = properties.get('Policies', [])
 		for inline_policy in inline_policies:
 			policy_name = inline_policy['PolicyName']
 			policy_document = inline_policy['PolicyDocument']
 
-			policy = Policy(policy_name, policy_document)
+			policy = Policy(policy_name, policy_document, source=source)
 			principal.add_policy(policy)
 
-	def parse_managed_policies(self, principal, properties, property_name='ManagedPolicyArns'):
+	def parse_managed_policies(self, principal, properties, property_name='ManagedPolicyArns',
+							   tolerate_unresolved=False):
 		managed_policy_arns = properties.get(property_name, [])
 		for arn in managed_policy_arns:
 			policy = ManagedPolicyParser.managed_policies.get(arn)
@@ -114,17 +121,38 @@ class AttachedPolicyParser:
 				# if the ARN is not a managed policy in the template, pull it from the environment
 				response = self.client.get_policy(PolicyArn=arn)
 			except ClientError as e:
-				if e.response['Error']['Code'] == 'NoSuchEntity':
+				error_code = _client_error_code(e)
+				if error_code == 'NoSuchEntity':
+					if tolerate_unresolved:
+						# we only know the reference, not the permissions it grants.  Record the gap so that
+						# admission checks do not mistake this principal for fully compliant.
+						principal.add_unresolved_policy(UnresolvedPolicyReference(
+							arn, PolicySource.EXTERNAL_MANAGED_POLICY, 'ManagedPolicyNotFound'))
+						continue
 					raise ApplicationError(f'Could not find managed policy with {arn} in template or in environment.')
-				else:
-					raise
+				if error_code in ('AccessDenied', 'AccessDeniedException') and tolerate_unresolved:
+					# the reference is visible but its contents are not readable from here
+					principal.add_unresolved_policy(UnresolvedPolicyReference(
+						arn, PolicySource.EXTERNAL_MANAGED_POLICY, 'ManagedPolicyNotReadable'))
+					continue
+				raise
 
 			policy_name = response['Policy']['PolicyName']
 			default_version_id = response['Policy']['DefaultVersionId']
 			policy_path = response['Policy']['Path']
 
-			response = self.client.get_policy_version(PolicyArn=arn, VersionId=default_version_id)
-			policy_document = response['PolicyVersion']['Document']
+			try:
+				response = self.client.get_policy_version(PolicyArn=arn, VersionId=default_version_id)
+				policy_document = response['PolicyVersion']['Document']
+			except ClientError as e:
+				error_code = _client_error_code(e)
+				if tolerate_unresolved and error_code in ('NoSuchEntity', 'AccessDenied', 'AccessDeniedException'):
+					# only the policy metadata (name/path) is available; the document itself is not
+					principal.add_unresolved_policy(UnresolvedPolicyReference(
+						arn, PolicySource.EXTERNAL_MANAGED_POLICY, 'ManagedPolicyDocumentNotReadable',
+						policy_name=policy_name))
+					continue
+				raise
 
 			# it must be a valid ARN if we made it this far
 			arn_parts = arn.split(':')
@@ -132,7 +160,9 @@ class AttachedPolicyParser:
 			# record whether this is an AWS managed policy because we may treat them slightly different for validation
 			is_aws_managed_policy = account_id.lower() == 'aws'
 
-			policy = Policy(policy_name, policy_document, policy_path, is_aws_managed_policy)
+			source = PolicySource.AWS_MANAGED_POLICY if is_aws_managed_policy \
+				else PolicySource.EXTERNAL_MANAGED_POLICY
+			policy = Policy(policy_name, policy_document, policy_path, is_aws_managed_policy, source=source)
 			principal.add_policy(policy)
 
 
@@ -143,8 +173,9 @@ class RoleParser:
 	# store roles for the lifetime of the run for static lookup by other parsers
 	roles = {}
 
-	def __init__(self, region):
+	def __init__(self, region, tolerate_unresolved_managed_policies=False):
 		self.attached_policy_parser = AttachedPolicyParser(region)
+		self.tolerate_unresolved_managed_policies = tolerate_unresolved_managed_policies
 		RoleParser.roles = {}
 
 	@classmethod
@@ -170,8 +201,9 @@ class RoleParser:
 
 		role = Role(role_name, path, trust_policy)
 
-		self.attached_policy_parser.parse_inline_policies(role, properties)
-		self.attached_policy_parser.parse_managed_policies(role, properties)
+		self.attached_policy_parser.parse_inline_policies(role, properties, PolicySource.ROLE_IDENTITY)
+		self.attached_policy_parser.parse_managed_policies(
+			role, properties, tolerate_unresolved=self.tolerate_unresolved_managed_policies)
 
 		self.roles[resource_name] = role
 
@@ -183,8 +215,9 @@ class UserParser:
 	# store users for the lifetime of the run for static lookup by other parsers
 	users = {}
 
-	def __init__(self, region):
+	def __init__(self, region, tolerate_unresolved_managed_policies=False):
 		self.attached_policy_parser = AttachedPolicyParser(region)
+		self.tolerate_unresolved_managed_policies = tolerate_unresolved_managed_policies
 		UserParser.users = {}
 
 	@classmethod
@@ -207,8 +240,9 @@ class UserParser:
 
 		user = User(user_name, path)
 
-		self.attached_policy_parser.parse_inline_policies(user, properties)
-		self.attached_policy_parser.parse_managed_policies(user, properties)
+		self.attached_policy_parser.parse_inline_policies(user, properties, PolicySource.USER_IDENTITY)
+		self.attached_policy_parser.parse_managed_policies(
+			user, properties, tolerate_unresolved=self.tolerate_unresolved_managed_policies)
 
 		self.users[resource_name] = user
 
@@ -220,8 +254,9 @@ class GroupParser:
 	# store groups for the lifetime of the run for static lookup by other parsers
 	groups = {}
 
-	def __init__(self, region):
+	def __init__(self, region, tolerate_unresolved_managed_policies=False):
 		self.attached_policy_parser = AttachedPolicyParser(region)
+		self.tolerate_unresolved_managed_policies = tolerate_unresolved_managed_policies
 		GroupParser.groups = {}
 
 	@classmethod
@@ -244,8 +279,9 @@ class GroupParser:
 
 		group = Group(group_name, path)
 
-		self.attached_policy_parser.parse_inline_policies(group, properties)
-		self.attached_policy_parser.parse_managed_policies(group, properties)
+		self.attached_policy_parser.parse_inline_policies(group, properties, PolicySource.GROUP_IDENTITY)
+		self.attached_policy_parser.parse_managed_policies(
+			group, properties, tolerate_unresolved=self.tolerate_unresolved_managed_policies)
 
 		self.groups[resource_name] = group
 
@@ -256,8 +292,9 @@ class PermissionSetParser:
 
 	permission_sets = {}
 
-	def __init__(self, region):
+	def __init__(self, region, tolerate_unresolved_managed_policies=False):
 		self.attached_policy_parser = AttachedPolicyParser(region)
+		self.tolerate_unresolved_managed_policies = tolerate_unresolved_managed_policies
 		PermissionSetParser.permission_sets = {}
 
 	def parse(self, resource_name, resource):
@@ -270,7 +307,9 @@ class PermissionSetParser:
 		permission_set = PermissionSet(name)
 
 		self.parse_inline_policy(permission_set, properties)
-		self.attached_policy_parser.parse_managed_policies(permission_set, properties, property_name="ManagedPolicies")
+		self.attached_policy_parser.parse_managed_policies(
+			permission_set, properties, property_name="ManagedPolicies",
+			tolerate_unresolved=self.tolerate_unresolved_managed_policies)
 
 		self.permission_sets[resource_name] = permission_set
 
@@ -282,7 +321,7 @@ class PermissionSetParser:
 		if inline_policy is None:
 			return
 
-		policy = Policy('InlinePolicy', inline_policy)
+		policy = Policy('InlinePolicy', inline_policy, source=PolicySource.PERMISSION_SET_IDENTITY)
 		permission_set.add_policy(policy)
 
 
@@ -342,7 +381,7 @@ class InlinePolicyParser(PolicyParser):
 		policy_name = properties['PolicyName']
 		policy_document = properties['PolicyDocument']
 
-		policy = Policy(policy_name, policy_document)
+		policy = Policy(policy_name, policy_document, source=PolicySource.ATTACHED_INLINE_POLICY)
 
 		self.parse_roles(policy, properties)
 		self.parse_users(policy, properties)
@@ -369,7 +408,7 @@ class RolePolicyParser(PolicyParser):
 		policy_document = properties['PolicyDocument']
 		role_name = properties['RoleName']
 
-		policy = Policy(policy_name, policy_document)
+		policy = Policy(policy_name, policy_document, source=PolicySource.ATTACHED_INLINE_POLICY)
 
 		self.add_policy_to_role_with(role_name, policy)
 		self.role_policies.append(policy)
@@ -393,7 +432,7 @@ class GroupPolicyParser(PolicyParser):
 		policy_document = properties['PolicyDocument']
 		group_name = properties['GroupName']
 
-		policy = Policy(policy_name, policy_document)
+		policy = Policy(policy_name, policy_document, source=PolicySource.ATTACHED_INLINE_POLICY)
 
 		self.add_policy_to_group_with(group_name, policy)
 		self.group_policies.append(policy)
@@ -417,7 +456,7 @@ class UserPolicyParser(PolicyParser):
 		policy_document = properties['PolicyDocument']
 		user_name = properties['UserName']
 
-		policy = Policy(policy_name, policy_document)
+		policy = Policy(policy_name, policy_document, source=PolicySource.ATTACHED_INLINE_POLICY)
 
 		self.add_policy_to_user_with(user_name, policy)
 		self.user_policies.append(policy)
@@ -443,7 +482,7 @@ class ManagedPolicyParser(PolicyParser):
 		policy_document = properties['PolicyDocument']
 		path = properties.get('Path', '/')
 
-		policy = Policy(policy_name, policy_document, path)
+		policy = Policy(policy_name, policy_document, path, source=PolicySource.MANAGED_POLICY)
 
 		# attempt to see if this managed policy is attached to any roles, users or groups in the template
 		self.parse_roles(policy, properties)

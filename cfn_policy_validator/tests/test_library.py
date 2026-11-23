@@ -277,3 +277,28 @@ class WhenParsingArgumentsForParse(unittest.TestCase):
             'Key2': 'Value2'
         }, allow_dynamic_ref_without_version=True)
         self.assert_called_with(parameters={'Key1': 'Value1', 'Key2': 'Value2'}, allow_dynamic_ref_without_version=True)
+
+
+class WhenParsingArgumentsForCheckAdmission(unittest.TestCase):
+    def setUp(self):
+        ignore_warnings()
+
+    def check_admission(self, **kwargs):
+        with patch.object(cfn_policy_validator, '_inner_check_admission') as self.mock:
+            cfn_policy_validator.check_admission(
+                {}, account_config.region, account_config.account_id, account_config.partition,
+                {'Statement': []}, **kwargs)
+
+    def test_ignore_finding_is_parsed_to_class(self):
+        self.check_admission(ignore_finding=['MyRole.ADMISSION_SCOPE_EXCEEDED'])
+        args = self.mock.call_args
+        # (template_body, region, account_id, partition, approved_policy, principals,
+        #  template_parameters, ignore_finding, findings_are_blocking, allow_dynamic_ref_without_version)
+        self.assertEqual([ResourceAndCodeFindingToIgnore('MyRole', 'ADMISSION_SCOPE_EXCEEDED')],
+                         args[0][7])
+
+    def test_principals_and_flags_default(self):
+        self.check_admission()
+        args = self.mock.call_args
+        self.assertIsNone(args[0][5])
+        self.assertTrue(args[0][8])

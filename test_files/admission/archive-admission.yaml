@@ -1,0 +1,133 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Three roles used to exercise the admission check: one fully controlled role, one role whose
+  attached policy exceeds the approved archive-read scope, and one role that references a managed
+  policy whose contents are not available.
+
+Parameters:
+  ArchiveBucketName:
+    Type: String
+    Default: acme-archive
+
+Resources:
+  # 1) Fully controlled: every permission is inline on the role and stays inside the approved scope.
+  ArchiveReaderRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: ArchiveReaderRole
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: ArchiveReadOnly
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:ListBucket
+                Resource:
+                  - !Sub arn:${AWS::Partition}:s3:::${ArchiveBucketName}
+                  - !Sub arn:${AWS::Partition}:s3:::${ArchiveBucketName}/*
+                Condition:
+                  StringEquals:
+                    aws:PrincipalAccount: !Ref AWS::AccountId
+                  Bool:
+                    aws:SecureTransport: 'true'
+
+  # 2) Attached policy exceeds the approved scope: it is attached via a separate AWS::IAM::Policy
+  #    resource, so the excess permission comes from the "attached policy" source, not the role body.
+  ArchiveExporterRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: ArchiveExporterRole
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: ArchiveReadOnly
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:ListBucket
+                Resource:
+                  - !Sub arn:${AWS::Partition}:s3:::${ArchiveBucketName}
+                  - !Sub arn:${AWS::Partition}:s3:::${ArchiveBucketName}/*
+                Condition:
+                  StringEquals:
+                    aws:PrincipalAccount: !Ref AWS::AccountId
+                  Bool:
+                    aws:SecureTransport: 'true'
+
+  ArchiveExporterExtraPolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: ArchiveExportAndDelete
+      Roles:
+        - !Ref ArchiveExporterRole
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action:
+              - s3:GetObject
+              - s3:DeleteObject
+            Resource: !Sub arn:${AWS::Partition}:s3:::${ArchiveBucketName}/*
+
+  # 3) Missing evidence: the role references a managed policy that only resolves to an ARN/name.
+  #    Its contents are unknown, so it must not be reported as fully compliant.
+  ArchiveAuditorRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: ArchiveAuditorRole
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: cloudtrail.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/ReadOnlyAccess
+
+  ArchiveBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Ref ArchiveBucketName
+
+  # A resource policy that names the fully controlled role directly.  This is how the resource-side
+  # permissions get attributed back to the specific identity instead of being counted generically.
+  ArchiveBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref ArchiveBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowReaderRoleList
+            Effect: Allow
+            Principal:
+              AWS: !GetAtt ArchiveReaderRole.Arn
+            Action: s3:ListBucket
+            Resource: !Sub arn:${AWS::Partition}:s3:::${ArchiveBucketName}
+            Condition:
+              Bool:
+                aws:SecureTransport: 'true'
+          - Sid: GrantExporterRoleWrite
+            Effect: Allow
+            Principal:
+              AWS: !GetAtt ArchiveExporterRole.Arn
+            Action: s3:PutObject
+            Resource: !Sub arn:${AWS::Partition}:s3:::${ArchiveBucketName}/*

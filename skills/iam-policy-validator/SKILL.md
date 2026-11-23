@@ -29,6 +29,11 @@ and `cfn-policy-validator <command> --help`.
 - `check-no-public-access` — confirm a resource policy cannot grant public
   access. Applies to resource policies only; a template with none has nothing
   for it to evaluate.
+- `check-admission` — offline admission check: every permission must be inside
+  an approved policy document. Reports each permission by source (role
+  identity, attached policy, resource policy), traces effective conditions and
+  deny overrides, and flags managed policies whose contents could not be read
+  as missing evidence rather than a pass.
 - `parse` — print the resolved policies without calling Access Analyzer. Use to
   troubleshoot what the tool extracted and how intrinsics were evaluated.
 
@@ -46,6 +51,14 @@ and `cfn-policy-validator <command> --help`.
 Each check returns JSON with `BlockingFindings` and `NonBlockingFindings` and
 exits `2` when any blocking finding is present, `0` otherwise. Report blocking
 findings first. In CI, gate on the exit code.
+
+`check-admission` additionally returns `AdmissionCheck` (a per-status summary)
+and `Principals` (one entry per role). Each principal entry has a `Status` of
+`COMPLIANT`, `NON_COMPLIANT`, or `INCOMPLETE_EVIDENCE`, plus
+`PermissionsBySource` split into `RoleIdentity`, `AttachedPolicies`, and
+`ResourcePolicies`. Only treat a role as compliant when its status is
+`COMPLIANT`; `INCOMPLETE_EVIDENCE` means a referenced managed policy resolved to
+a name/ARN but its contents were unavailable, so its permissions are unknown.
 
 ## Example
 

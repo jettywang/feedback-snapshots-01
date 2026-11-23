@@ -165,15 +165,20 @@ class Report:
 	def __init__(self, blocking_findings, nonblocking_findings):
 		self.blocking_findings = blocking_findings
 		self.nonblocking_findings = nonblocking_findings
+		self.additional = None
 
 	def has_blocking_findings(self):
 		return len(self.blocking_findings) > 0
 
 	def to_json(self):
-		return {
+		report = {
 			'BlockingFindings': [vars(finding) for finding in self.blocking_findings],
 			'NonBlockingFindings': [vars(finding) for finding in self.nonblocking_findings]
 		}
+		# checks that produce a per-principal breakdown attach it here
+		if self.additional is not None:
+			report.update(self.additional)
+		return report
 
 	def print(self):
 		report = self.to_json()

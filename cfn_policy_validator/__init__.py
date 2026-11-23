@@ -83,6 +83,54 @@ def _inner_validate(template_body, region, account_id, partition,
     return report.to_json()
 
 
+def check_admission(template_body,
+                    region,
+                    account_id,
+                    partition,
+                    approved_policy,
+                    principals=None,
+                    template_parameters=None,
+                    ignore_finding=None,
+                    findings_are_blocking=True,
+                    allow_dynamic_ref_without_version=False):
+    """
+    Parses a CloudFormation template and runs an offline admission check against an approved policy.
+    @param template_body: String containing the body of the CloudFormation template.
+    @param region: The region that the CloudFormation template will be deployed to.
+    @param account_id: The AWS account ID that the CloudFormation template will be deployed to.
+    @param partition: The AWS partition that the CloudFormation template will be deployed to.
+    @param approved_policy: A policy document (dict or JSON string) that defines the only approved permissions.
+    @param principals: Optional list of role names or role ARNs to restrict the check to.
+    @param template_parameters: A key: value dictionary of parameters passed to the template.
+    @param ignore_finding: Findings to ignore, in the same format as validate().
+    @param findings_are_blocking: When False, findings are reported as non-blocking.
+    @param allow_dynamic_ref_without_version: Allow dynamic SSM references without a version number.
+    @return: A JSON formatted object containing the per-principal admission breakdown and findings.
+    """
+    template_parameters = {} if template_parameters is None else template_parameters
+    ignore_finding = parse_findings_to_ignore(ignore_finding)
+
+    return _inner_check_admission(template_body, region, account_id, partition, approved_policy,
+                                  principals, template_parameters, ignore_finding,
+                                  findings_are_blocking, allow_dynamic_ref_without_version)
+
+
+def _inner_check_admission(template_body, region, account_id, partition, approved_policy,
+                           principals, template_parameters, ignore_finding,
+                           findings_are_blocking, allow_dynamic_ref_without_version):
+    from cfn_policy_validator.validation import admission as admission_check
+
+    account_config = AccountConfig(partition, region, account_id)
+    template = _parse_template(template_body, account_config, template_parameters,
+                               allow_dynamic_ref_without_version)
+    parser_output = _parse_template_output(template, account_config,
+                                           tolerate_unresolved_managed_policies=True)
+
+    report = admission_check.check_admission(parser_output, approved_policy, principals,
+                                             ignore_finding, findings_are_blocking)
+    return report.to_json()
+
+
 def parse(template_body,
           region,
           account_id,
@@ -149,11 +197,13 @@ def _parse_template_file(file_path, account_config, template_parameters, allow_d
     return template
 
 
-def _parse_template_output(template, account_config, excluded_resource_types={}):
+def _parse_template_output(template, account_config, excluded_resource_types={},
+                           tolerate_unresolved_managed_policies=False):
     output = Output(account_config)
     LOGGER.info(f'Not parsing resources: {excluded_resource_types}' if excluded_resource_types else 'Parsing all resources')
     output.Roles, output.Users, output.Groups, output.PermissionSets, output.OrphanedPolicies = \
-        IdentityParser.parse(template, account_config, excluded_resource_types)
+        IdentityParser.parse(template, account_config, excluded_resource_types,
+                             tolerate_unresolved_managed_policies)
     output.Resources = ResourceParser.parse(template, account_config, excluded_resource_types)
 
     return output

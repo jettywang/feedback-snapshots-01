@@ -1,8 +1,12 @@
 [
   {
-    "skills": ["iam-policy-validator"],
+    "skills": [
+      "iam-policy-validator"
+    ],
     "query": "Review the IAM policies in fixtures/invalid-and-wildcard-policies.yaml for errors and security issues before I deploy it.",
-    "files": ["fixtures/invalid-and-wildcard-policies.yaml"],
+    "files": [
+      "fixtures/invalid-and-wildcard-policies.yaml"
+    ],
     "expected_behavior": [
       "Selects the validate command (not a custom check) for the open-ended review request",
       "Runs cfn-policy-validator validate against fixtures/invalid-and-wildcard-policies.yaml",
@@ -11,9 +15,13 @@
     ]
   },
   {
-    "skills": ["iam-policy-validator"],
+    "skills": [
+      "iam-policy-validator"
+    ],
     "query": "Does fixtures/public-bucket.yaml let anything be publicly accessible?",
-    "files": ["fixtures/public-bucket.yaml"],
+    "files": [
+      "fixtures/public-bucket.yaml"
+    ],
     "expected_behavior": [
       "Selects check-no-public-access rather than validate, matching the public-access question",
       "Runs cfn-policy-validator check-no-public-access against fixtures/public-bucket.yaml",
@@ -22,13 +30,34 @@
     ]
   },
   {
-    "skills": ["iam-policy-validator"],
+    "skills": [
+      "iam-policy-validator"
+    ],
     "query": "I just want to see what IAM policies fixtures/invalid-and-wildcard-policies.yaml actually resolves to. Do not run any analysis.",
-    "files": ["fixtures/invalid-and-wildcard-policies.yaml"],
+    "files": [
+      "fixtures/invalid-and-wildcard-policies.yaml"
+    ],
     "expected_behavior": [
       "Selects the parse command because the user asked to inspect resolved policies without analysis",
       "Runs cfn-policy-validator parse against fixtures/invalid-and-wildcard-policies.yaml",
       "Returns the resolved policies and makes no Access Analyzer call (no BlockingFindings / NonBlockingFindings in the output)"
+    ]
+  },
+  {
+    "skills": [
+      "iam-policy-validator"
+    ],
+    "query": "Check fixtures/archive-admission.yaml against fixtures/approved-archive-read.json. We only approve read access to the archive bucket; tell me which roles stay inside that and which do not.",
+    "files": [
+      "fixtures/archive-admission.yaml",
+      "fixtures/approved-archive-read.json"
+    ],
+    "expected_behavior": [
+      "Selects check-admission with --approved-policy, matching the admission question rather than validate or check-no-new-access",
+      "Runs cfn-policy-validator check-admission against fixtures/archive-admission.yaml with fixtures/approved-archive-read.json",
+      "Reports ArchiveReaderRole as COMPLIANT, ArchiveExporterRole as NON_COMPLIANT because its attached policy and a resource policy exceed the approved action set, and ArchiveAuditorRole as INCOMPLETE_EVIDENCE because the referenced managed policy could not be read",
+      "Explains that the extra permissions are attributed to the attached policy and resource policy sources respectively, not to the role identity",
+      "Does not report ArchiveAuditorRole as fully compliant; calls out the missing managed policy contents as unknown permissions"
     ]
   }
 ]

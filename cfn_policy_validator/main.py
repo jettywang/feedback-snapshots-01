@@ -7,7 +7,7 @@ import logging
 import os
 import sys
 import traceback
-from cfn_policy_validator.validation import policy_analysis
+from cfn_policy_validator.validation import policy_analysis, admission
 
 from cfn_policy_validator.validation import validator
 from cfn_policy_validator.version import __version__
@@ -75,6 +75,31 @@ def check_access_from_cli(arguments):
 def check_no_public_access_from_cli(arguments):
     LOGGER.info(f'Checking that template {arguments.template_path} does not grant public access to resources.')
     report = policy_analysis.check_no_public_access(get_parser_output(arguments), arguments.ignore_finding, arguments.findings_are_blocking)
+
+    report.print()
+    if report.has_blocking_findings():
+        exit(2)
+    else:
+        exit(0)
+
+
+# consumable when running as CLI
+def check_admission_from_cli(arguments):
+    LOGGER.info(f'Checking that template {arguments.template_path} only grants permissions in the approved policy '
+                f'{arguments.approved_policy}')
+    approved_policy = _load_json_file(arguments.approved_policy)
+
+    account_id, partition = client.get_account_and_partition(arguments.region)
+    account_config = AccountConfig(partition, arguments.region, account_id)
+    template = _parse_template_file(arguments.template_path, account_config, arguments.parameters,
+                                    arguments.allow_dynamic_ref_without_version)
+    # a managed policy that exists outside the template may only be resolvable by name.  Keep parsing and
+    # record the gap instead of failing, so the admission report can call it out.
+    parser_output = _parse_template_output(template, account_config, set(arguments.exclude_resource_type),
+                                           tolerate_unresolved_managed_policies=True)
+
+    report = admission.check_admission(parser_output, approved_policy, arguments.principals,
+                                       arguments.ignore_finding, arguments.findings_are_blocking)
 
     report.print()
     if report.has_blocking_findings():
@@ -261,7 +286,35 @@ def main(args=None):
                                         '(e.g. "MyResource"), or a combination of both separated by a period.'
                                         '(e.g. "MyResource.PASS_ROLE_WITH_STAR_IN_RESOURCE").',
                                         action=ParseFindingsToIgnoreFromCLI)
-        check_no_public_access_parser.add_argument('--treat-findings-as-non-blocking', dest="findings_are_blocking", 
+        check_no_public_access_parser.add_argument('--treat-findings-as-non-blocking', dest="findings_are_blocking",
+                                    help='If set, all findings will be treated as non-blocking',
+                                    default=True, action='store_false')
+
+        # check-admission command
+        check_admission_parser = subparsers.add_parser('check-admission',
+                                    help='Parses IAM identity-based and resource-based policies from AWS CloudFormation templates '
+                                         'and performs an offline admission check: every permission must be contained in an approved '
+                                         'policy, and each permission is reported by the source it came from (role identity, attached '
+                                         'policy, or resource policy). Missing policy evidence is reported, never treated as a pass.  '
+                                         'Returns the per-principal breakdown in JSON format.', parents=[parent_parser])
+        check_admission_parser.set_defaults(func=check_admission_from_cli)
+
+        check_admission_parser.add_argument('--approved-policy', dest="approved_policy", required=True,
+                                    help='Path to the JSON policy document that defines the only approved permissions.')
+
+        check_admission_parser.add_argument('--principals', dest="principals",
+                                    help='Restrict the check to specific principals. Specify as a comma separated list of role '
+                                         'names or role ARNs. Defaults to every role in the template.',
+                                    action=ParseListFromCLI)
+
+        check_admission_parser.add_argument('--ignore-finding', dest="ignore_finding", metavar='FINDING_CODE,RESOURCE_NAME,RESOURCE_NAME.FINDING_CODE',
+                                    help='Allow findings to be ignored.\n'
+                                        'Specify as a comma separated list of findings to be ignored. Can be individual '
+                                        'finding codes (e.g. "ADMISSION_SCOPE_EXCEEDED"), a specific resource name '
+                                        '(e.g. "MyResource"), or a combination of both separated by a period.'
+                                        '(e.g. "MyResource.ADMISSION_SCOPE_EXCEEDED").',
+                                        action=ParseFindingsToIgnoreFromCLI)
+        check_admission_parser.add_argument('--treat-findings-as-non-blocking', dest="findings_are_blocking",
                                     help='If set, all findings will be treated as non-blocking',
                                     default=True, action='store_false')
     add_policy_analysis_subparsers()

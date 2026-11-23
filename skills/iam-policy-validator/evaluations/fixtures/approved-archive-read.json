@@ -1,0 +1,25 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ReadArchivePrefix",
+      "Effect": "Allow",
+      "Action": [
+        "s3:GetObject",
+        "s3:ListBucket"
+      ],
+      "Resource": [
+        "arn:aws:s3:::acme-archive",
+        "arn:aws:s3:::acme-archive/*"
+      ],
+      "Condition": {
+        "StringEquals": {
+          "aws:PrincipalAccount": "111222333444"
+        },
+        "Bool": {
+          "aws:SecureTransport": "true"
+        }
+      }
+    }
+  ]
+}

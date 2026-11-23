@@ -61,12 +61,84 @@ class Output:
         return hash((self.Roles, self.Users, self.Groups, self.Resources, self.OrphanedPolicies))
 
 
+class PolicySource:
+    """
+    Describes where an identity policy came from.  This matters for admission checks because a permission
+    granted directly in a role definition is a different kind of evidence than one granted by an attached
+    managed policy or by a resource policy.
+    """
+    ROLE_IDENTITY = 'RoleIdentity'
+    USER_IDENTITY = 'UserIdentity'
+    GROUP_IDENTITY = 'GroupIdentity'
+    PERMISSION_SET_IDENTITY = 'PermissionSetIdentity'
+    ATTACHED_INLINE_POLICY = 'AttachedInlinePolicy'
+    MANAGED_POLICY = 'ManagedPolicy'
+    AWS_MANAGED_POLICY = 'AWSManagedPolicy'
+    EXTERNAL_MANAGED_POLICY = 'ExternalManagedPolicy'
+    RESOURCE_POLICY = 'ResourcePolicy'
+
+
+# Groups policy provenance into the three evidence buckets an admission decision reports on.
+POLICY_SOURCE_CATEGORIES = {
+    PolicySource.ROLE_IDENTITY: 'RoleIdentity',
+    PolicySource.USER_IDENTITY: 'RoleIdentity',
+    PolicySource.GROUP_IDENTITY: 'RoleIdentity',
+    PolicySource.PERMISSION_SET_IDENTITY: 'RoleIdentity',
+    PolicySource.ATTACHED_INLINE_POLICY: 'AttachedPolicies',
+    PolicySource.MANAGED_POLICY: 'AttachedPolicies',
+    PolicySource.AWS_MANAGED_POLICY: 'AttachedPolicies',
+    PolicySource.EXTERNAL_MANAGED_POLICY: 'AttachedPolicies',
+    PolicySource.RESOURCE_POLICY: 'ResourcePolicies',
+}
+
+
+def policy_source_category(source):
+    return POLICY_SOURCE_CATEGORIES.get(source, 'OtherPolicies')
+
+
+class UnresolvedPolicyReference:
+    """
+    A reference to a policy whose contents could not be retrieved.  For example, a managed policy that exists
+    outside the template may only be resolvable to a name/ARN.  Consumers must treat this as missing evidence
+    rather than assuming the principal is compliant.
+    """
+
+    def __init__(self, reference, source, reason, policy_name=None):
+        self.Reference = reference
+        self.Name = policy_name if policy_name is not None else (
+            reference.rsplit('/', 1)[-1] if isinstance(reference, str) else None)
+        self.Source = source
+        self.Reason = reason
+
+    def __eq__(self, other):
+        if not isinstance(other, UnresolvedPolicyReference):
+            return False
+
+        return self.Reference == other.Reference and \
+            self.Source == other.Source and \
+            self.Reason == other.Reason
+
+    def __hash__(self):
+        return hash((self.Reference, self.Source, self.Reason))
+
+
 class IdentityWithPolicies:
     def __init__(self):
         self.Policies = []
+        self.UnresolvedPolicies = []
 
     def add_policy(self, policy):
         self.Policies.append(policy)
+
+    def add_unresolved_policy(self, unresolved_policy):
+        self.UnresolvedPolicies.append(unresolved_policy)
+
+    def custom_to_json(self):
+        as_dict = dict(self.__dict__)
+        # only surface the evidence gap when one exists so existing output remains unchanged
+        if not as_dict.get('UnresolvedPolicies'):
+            as_dict.pop('UnresolvedPolicies')
+        return as_dict
 
     def __eq__(self, other):
         if not isinstance(other, IdentityWithPolicies):
@@ -162,11 +234,19 @@ class PermissionSet(IdentityWithPolicies):
 
 
 class Policy:
-    def __init__(self, name, document, path="/", is_aws_managed_policy=False):
+    def __init__(self, name, document, path="/", is_aws_managed_policy=False, source=None):
         self.Name = name
         self.Policy = document
         self.Path = path
         self.IsAWSManagedPolicy = is_aws_managed_policy
+        self.Source = source
+
+    def custom_to_json(self):
+        as_dict = dict(self.__dict__)
+        # policy provenance is additive metadata; omit it when unknown so prior output is unchanged
+        if self.Source is None:
+            as_dict.pop('Source', None)
+        return as_dict
 
     def __eq__(self, other):
         if not isinstance(other, Policy):
