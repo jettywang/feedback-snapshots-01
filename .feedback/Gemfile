@@ -1,0 +1,7 @@
+source "https://rubygems.org"
+gem "redis-client"
+gem "connection_pool"
+gem "rack"
+gem "json"
+gem "logger"
+gem "minitest", "~>5.0"
