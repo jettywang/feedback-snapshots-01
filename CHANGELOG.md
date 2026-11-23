@@ -2,6 +2,12 @@
 
 ## [Unreleased](https://github.com/cedarcode/webauthn-ruby/compare/v3.5.1...master/)
 
+### Added
+
+- Add `WebAuthn::BackupPolicy` to distinguish stable registration-time backup eligibility from authentication-time backup state, and to gate daily and sensitive actions.
+- Add `WebAuthn::InMemoryCredentialStore` and `WebAuthn::BackupCredentialManager` for versioned registration, legacy migration and concurrent authentication handling.
+- Document backup attribute policy and add FakeClient coverage for legacy, synchronized and out-of-order authentication paths.
+
 ## [v3.5.1](https://github.com/cedarcode/webauthn-ruby/compare/v3.5.0...v3.5.1/) - 2026-11-10
 
 ### Changed

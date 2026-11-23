@@ -166,6 +166,12 @@ rescue WebAuthn::Error => e
 end
 ```
 
+## Backup Attributes and Action Policy
+
+Passkeys can report backup eligibility (`BE`) and backup state (`BS`). Registration records eligibility, while authentication tracks only the current backup state. A policy can then distinguish daily actions from sensitive actions, and legacy credentials without stored flags remain on the daily policy.
+
+See [Backup Attributes and Action Policy](backup_policy.md) for the policy matrix, migration guidance, and the versioned concurrent-authentication behavior.
+
 ## Moving from Global to Instance Based Configuration
 
 Adding a configuration for a new instance does not mean you need to get rid of your Global configuration. They can co-exist in your application and be both available for the different usages you might have. `WebAuthn.configuration.relying_party` will always return the global one while `WebAuthn::RelyingParty.new`, executed anywhere in your codebase, will allow you to create a different instance as you see the need. They will not collide and instead operate in isolation without any shared state.

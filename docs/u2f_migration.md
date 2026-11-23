@@ -88,3 +88,22 @@ During authentication verification phase, if you followed the [verification phas
 
 > If true, the AppID was used and thus, when verifying an assertion, the Relying Party MUST expect the `rpIdHash` to be
 > the hash of the _AppID_, not the RP ID.
+
+## Backup attributes for migrated U2F credentials
+
+U2F credentials predate the WebAuthn backup flags. If the old row has no backup evidence, migrate it with both
+`backup_eligible` and `backup_state` omitted so that it is recorded as a legacy credential and stays on the daily
+action policy. Do not treat a single later authentication as evidence that the entire history is device-bound:
+
+```ruby
+manager.migrate(
+  id: mid,
+  public_key: public_key,
+  sign_count: 41,
+  requested_actions: [:login, :financial]
+)
+# => approved_actions: [:login], basis: :legacy_migration
+```
+
+If the source system positively recorded that the credential is device-bound, pass `backup_eligible: false,
+backup_state: false`; sensitive actions may then be approved. See [Backup Attributes and Action Policy](backup_policy.md).
