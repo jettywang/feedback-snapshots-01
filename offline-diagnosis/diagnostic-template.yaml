@@ -1,0 +1,95 @@
+# Offline diagnostic template.
+# Three roles exercise the two non-confirmable states plus one independently
+# resolvable control role. No AWS account, network or Access Analyzer call is
+# required: cfn_loader + NodeEvaluator resolve everything locally.
+Parameters:
+  BucketScope:
+    Type: String
+
+Resources:
+
+  # --- Root cause #1: reference cycle (ring) ---------------------------------
+  # RoleRingA.RoleName -> Ref RoleRingB
+  # RoleRingB.RoleName -> Ref RoleRingA
+  # RoleRingA policy resource -> Fn::GetAtt RoleRingB.Arn
+  # Re-entering either name node trips validate_no_cycle() -> ApplicationError
+  # "Cycle detected for ...".
+  RoleRingA:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Ref RoleRingB
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: ReachRingB
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: s3:GetObject
+                Resource: !GetAtt RoleRingB.Arn
+
+  RoleRingB:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Ref RoleRingA
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+
+  # --- Root cause #2: insufficient data (missing parameter value) ------------
+  # The BucketScope parameter exists in the template but no value is supplied.
+  # RefEvaluator reaches the parameter branch, finds parameter_values empty and
+  # raises ApplicationError "No value passed for referenced parameter". This is
+  # a missing input, not a cycle. Supplying --parameters BucketScope=... recovers it.
+  RoleNeedsParam:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: role-needs-param
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: ScopedRead
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: s3:GetObject
+                Resource: !Sub "arn:aws:s3:::${BucketScope}/*"
+
+  # --- Control: independently resolved, usable as evidence -------------------
+  # No unresolved reference. Its inline policy evaluates on its own and stays
+  # admissible even though the two roles above cannot be confirmed.
+  RoleClean:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: role-clean
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: StaticRead
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: s3:ListBucket
+                Resource: arn:aws:s3:::static-evidence-bucket

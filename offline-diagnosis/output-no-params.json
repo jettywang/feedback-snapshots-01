@@ -1,0 +1,80 @@
+{
+  "template": "diagnostic-template.yaml",
+  "parameters_supplied": [],
+  "roles_confirmed": [
+    "RoleClean"
+  ],
+  "roles_unconfirmed_cycle": [
+    "RoleRingA",
+    "RoleRingB"
+  ],
+  "roles_unconfirmed_no_data": [
+    "RoleNeedsParam"
+  ],
+  "roles_unconfirmed_other": [],
+  "safe_passes": 0,
+  "roles": [
+    {
+      "role": "RoleRingA",
+      "status": "UNCONFIRMED_CYCLE",
+      "error": "Cycle detected for RoleRingB and RoleName.",
+      "cycle_path": [
+        [
+          "RoleRingB",
+          "RoleName"
+        ],
+        [
+          "RoleRingA",
+          "RoleName"
+        ],
+        [
+          "RoleRingB",
+          "RoleName"
+        ]
+      ]
+    },
+    {
+      "role": "RoleRingB",
+      "status": "UNCONFIRMED_CYCLE",
+      "error": "Cycle detected for RoleRingA and RoleName.",
+      "cycle_path": [
+        [
+          "RoleRingA",
+          "RoleName"
+        ],
+        [
+          "RoleRingB",
+          "RoleName"
+        ],
+        [
+          "RoleRingA",
+          "RoleName"
+        ]
+      ]
+    },
+    {
+      "role": "RoleNeedsParam",
+      "status": "UNCONFIRMED_NO_DATA",
+      "error": "No value passed for referenced parameter: BucketScope.\nParameters are passed using the --parameters flag."
+    },
+    {
+      "role": "RoleClean",
+      "status": "CONFIRMED",
+      "evidence": [
+        {
+          "PolicyName": "StaticRead",
+          "PolicyDocument": {
+            "Version": "2012-10-17",
+            "Statement": [
+              {
+                "Effect": "Allow",
+                "Action": "s3:ListBucket",
+                "Resource": "arn:aws:s3:::static-evidence-bucket"
+              }
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}
