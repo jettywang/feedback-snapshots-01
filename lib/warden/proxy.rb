@@ -29,6 +29,74 @@ module Warden
       @env, @users, @winning_strategies, @locked = env, {}, {}, false
       @manager, @config = manager, manager.config.dup
       @strategies = Hash.new { |h,k| h[k] = {} }
+      @delegation_stack = []
+    end
+
+    # Runs a block with a scope-restricted context suitable for handing to a
+    # plugin. The context can always read already resolved identities from the
+    # allowed scopes; writes and strategy execution happen only for explicitly
+    # delegated capabilities.
+    #
+    # The grant lives only for the duration of the block. When the block
+    # returns or raises, the context is revoked and the proxy returns to its
+    # normal behaviour, so the main request keeps managing the session through
+    # the ordinary Warden API.
+    #
+    # Parameters:
+    #   scopes       - scopes the plugin may inspect. Defaults to the default scope.
+    #   capabilities - explicitly delegated operations. Supported values are
+    #                  :read, :set_user, :logout and :authenticate. :read is
+    #                  always available. Granting :authenticate also grants :read.
+    #
+    # Example:
+    #   env['warden'].delegate(:scopes => [:reports]) do |ctx|
+    #     ctx.user                # resolved identity, never runs a strategy
+    #     ctx.session[:filters]   # read-only view of the scoped session
+    #   end
+    #
+    #   env['warden'].delegate(:scopes => [:default], :capabilities => [:set_user]) do |ctx|
+    #     ctx.set_user(user)      # explicit, short-lived delegated write
+    #   end
+    #
+    # :api: public
+    def delegate(*args, scopes: nil, capabilities: [:read], &block)
+      options = args.last.is_a?(Hash) ? args.pop : {}
+      if args.length > 1
+        raise ArgumentError, "expected at most one positional scope list, got #{args.inspect}"
+      end
+
+      scopes = args.first unless args.empty?
+      scopes = options[:scopes] if options.key?(:scopes)
+      capabilities = options[:capabilities] if options.key?(:capabilities)
+
+      raise ArgumentError, "a block is required to delegate a restricted context" unless block
+
+      parent = @delegation_stack.last
+      context = RestrictedContext.new(
+        self,
+        :scopes => scopes.nil? ? [@config.default_scope] : scopes,
+        :capabilities => capabilities,
+        :parent => parent
+      )
+
+      @delegation_stack.push(context)
+      begin
+        block.call(context)
+      ensure
+        context.revoke!
+        @delegation_stack.pop
+      end
+    end
+    alias restricted_context delegate
+
+    # The innermost active restricted context, if any.
+    # :api: private
+    def current_delegation
+      @delegation_stack.last
+    end
+
+    def delegating?
+      !@delegation_stack.empty?
     end
 
     # Run the on_request callbacks
@@ -46,9 +114,13 @@ module Warden
     # Points to a SessionSerializer instance responsible for handling
     # everything related with storing, fetching and removing the user
     # session.
+    #
+    # Inside a restricted context this is a read-only wrapper, so a plugin
+    # cannot store or delete identities through it.
     # :api: public
     def session_serializer
-      @session_serializer ||= Warden::SessionSerializer.new(@env)
+      return ReadOnlySessionSerializer.new(_session_serializer) if delegating?
+      _session_serializer
     end
 
     # Clear the cache of performed strategies so far. Warden runs each
@@ -75,6 +147,11 @@ module Warden
     #
     # :api: public
     def clear_strategies_cache!(*args)
+      if delegating?
+        raise CapabilityNotGranted,
+              "the strategy cache cannot be cleared inside a restricted context"
+      end
+
       scope, _opts = _retrieve_scope_and_opts(args)
 
       @winning_strategies.delete(scope)
@@ -90,6 +167,10 @@ module Warden
     #
     # :api: public
     def lock!
+      if delegating?
+        raise CapabilityNotGranted,
+              "the proxy cannot be locked inside a restricted context"
+      end
       @locked = true
     end
 
@@ -107,6 +188,7 @@ module Warden
     #
     # :api: public
     def authenticate(*args)
+      _guard_authentication!(args)
       user, _opts = _perform_authentication(*args)
       user
     end
@@ -130,6 +212,7 @@ module Warden
     #
     # :api: public
     def authenticate!(*args)
+      _guard_authentication!(args)
       user, opts = _perform_authentication(*args)
       throw(:warden, opts) unless user
       user
@@ -168,29 +251,11 @@ module Warden
     #
     # :api: public
     def set_user(user, opts = {})
-      scope = (opts[:scope] ||= @config.default_scope)
-
-      # Get the default options from the master configuration for the given scope
-      opts = (@config[:scope_defaults][scope] || {}).merge(opts)
-      opts[:event] ||= :set_user
-      @users[scope] = user
-
-      if opts[:store] != false && opts[:event] != :fetch
-        options = env[ENV_SESSION_OPTIONS]
-        if options
-          if options.frozen?
-            env[ENV_SESSION_OPTIONS] = options.merge(:renew => true).freeze
-          else
-            options[:renew] = true
-          end
-        end
-        session_serializer.store(user, scope)
+      if delegating?
+        _assert_capability!(:set_user)
+        _assert_scope!(opts[:scope] || @config.default_scope)
       end
-
-      run_callbacks = opts.fetch(:run_callbacks, true)
-      manager._run_callbacks(:after_set_user, user, self, opts) if run_callbacks
-
-      @users[scope]
+      _set_user(user, opts)
     end
 
     # Provides access to the user object in a given scope for a request.
@@ -217,17 +282,8 @@ module Warden
     def user(argument = {})
       opts  = argument.is_a?(Hash) ? argument : { :scope => argument }
       scope = (opts[:scope] ||= @config.default_scope)
-
-      if @users.has_key?(scope)
-        @users[scope]
-      else
-        unless user = session_serializer.fetch(scope)
-          run_callbacks = opts.fetch(:run_callbacks, true)
-          manager._run_callbacks(:after_failed_fetch, user, self, :scope => scope) if run_callbacks
-        end
-
-        @users[scope] = user ? set_user(user, opts.merge(:event => :fetch)) : nil
-      end
+      _assert_scope!(scope) if delegating?
+      _user(opts)
     end
 
     # Provides a scoped session data for authenticated users.
@@ -242,8 +298,24 @@ module Warden
     #
     # :api: public
     def session(scope = @config.default_scope)
+      if delegating?
+        _assert_scope!(scope)
+        raise NotAuthenticated, "#{scope.inspect} user is not logged in" unless authenticated?(scope)
+        return ReadOnlySession.new(_raw_session["warden.user.#{scope}.session"] || {}, scope)
+      end
+
       raise NotAuthenticated, "#{scope.inspect} user is not logged in" unless authenticated?(scope)
       raw_session["warden.user.#{scope}.session"] ||= {}
+    end
+
+    # The raw session is not exposed inside a restricted context. A plugin
+    # should use the delegated, scoped #session view instead.
+    def raw_session
+      if delegating?
+        raise CapabilityNotGranted,
+              "the raw session is not exposed inside a restricted context"
+      end
+      _raw_session
     end
 
     # Provides logout functionality.
@@ -264,20 +336,15 @@ module Warden
     #
     # :api: public
     def logout(*scopes)
-      if scopes.empty?
-        scopes = @users.keys
-        reset_session = true
+      if delegating?
+        _assert_capability!(:logout)
+        if scopes.empty?
+          raise ScopeNotGranted,
+                "an explicit scope is required when logging out inside a restricted context"
+        end
+        scopes.each { |scope| _assert_scope!(scope) }
       end
-
-      scopes.each do |scope|
-        user = @users.delete(scope)
-        manager._run_callbacks(:before_logout, user, self, :scope => scope)
-
-        raw_session.delete("warden.user.#{scope}.session") unless raw_session.nil?
-        session_serializer.delete(scope, user)
-      end
-
-      reset_session! if reset_session
+      _logout(*scopes)
     end
 
     # proxy methods through to the winning strategy
@@ -331,15 +398,112 @@ module Warden
 
       # Look for an existing user in the session for this scope.
       # If there was no user in the session, see if we can get one from the request.
-      return user, opts if user = user(opts.merge(:scope => scope))
+      return user, opts if user = _user(opts.merge(:scope => scope))
       _run_strategies_for(scope, args)
 
       if winning_strategy && winning_strategy.successful?
         opts[:store] = opts.fetch(:store, winning_strategy.store?)
-        set_user(winning_strategy.user, opts.merge!(:event => :authentication))
+        _set_user(winning_strategy.user, opts.merge!(:event => :authentication))
       end
 
       [@users[scope], opts]
+    end
+
+    # Checks capability and scope for a strategy-running authentication call.
+    def _guard_authentication!(args)
+      return unless delegating?
+
+      opts = args.last.is_a?(Hash) ? args.last : {}
+      _assert_capability!(:authenticate)
+      _assert_scope!(opts[:scope] || @config.default_scope)
+    end
+
+    # Raises unless the innermost restricted context delegated the capability.
+    def _assert_capability!(capability)
+      context = current_delegation
+      return if context && context.granted_capability?(capability)
+
+      raise CapabilityNotGranted,
+            "capability #{capability.inspect} was not delegated to this restricted context"
+    end
+
+    # Raises unless the innermost restricted context grants the scope.
+    def _assert_scope!(scope)
+      context = current_delegation
+      return if context && context.granted_scope?(scope)
+
+      raise ScopeNotGranted,
+            "scope #{scope.inspect} was not delegated to this restricted context"
+    end
+
+    # The real Rack session, bypassing the restricted read-only view.
+    def _raw_session
+      @env['rack.session']
+    end
+
+    def _session_serializer
+      @session_serializer ||= Warden::SessionSerializer.new(@env)
+    end
+
+    def _set_user(user, opts = {})
+      scope = (opts[:scope] ||= @config.default_scope)
+
+      # Get the default options from the master configuration for the given scope
+      opts = (@config[:scope_defaults][scope] || {}).merge(opts)
+      opts[:event] ||= :set_user
+      @users[scope] = user
+
+      if opts[:store] != false && opts[:event] != :fetch
+        options = env[ENV_SESSION_OPTIONS]
+        if options
+          if options.frozen?
+            env[ENV_SESSION_OPTIONS] = options.merge(:renew => true).freeze
+          else
+            options[:renew] = true
+          end
+        end
+        _session_serializer.store(user, scope)
+      end
+
+      run_callbacks = opts.fetch(:run_callbacks, true)
+      manager._run_callbacks(:after_set_user, user, self, opts) if run_callbacks
+
+      @users[scope]
+    end
+
+    def _user(opts = {})
+      scope = (opts[:scope] ||= @config.default_scope)
+
+      if @users.has_key?(scope)
+        @users[scope]
+      else
+        # Inside a restricted context a read must not clean up stale keys.
+        serializer = delegating? ? session_serializer : _session_serializer
+        unless user = serializer.fetch(scope)
+          run_callbacks = opts.fetch(:run_callbacks, true)
+          manager._run_callbacks(:after_failed_fetch, user, self, :scope => scope) if run_callbacks
+        end
+
+        @users[scope] = user ? _set_user(user, opts.merge(:event => :fetch)) : nil
+      end
+    end
+
+    def _logout(*scopes)
+      if scopes.empty?
+        scopes = @users.keys
+        reset_session = true
+      end
+
+      scopes.each do |scope|
+        user = @users.delete(scope)
+        manager._run_callbacks(:before_logout, user, self, :scope => scope)
+
+        session = _raw_session
+        session.delete("warden.user.#{scope}.session") unless session.nil?
+        _session_serializer.delete(scope, user)
+      end
+
+      reset_session! if reset_session
     end
 
     def _retrieve_scope_and_opts(args) #:nodoc:

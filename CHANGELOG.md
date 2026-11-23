@@ -1,5 +1,13 @@
 # CHANGELOG
 
+## Unreleased
+* Add `Warden::Proxy#delegate` for handing a plugin a scope-restricted context.
+  The yielded `Warden::RestrictedContext` only exposes granted scopes, returns a
+  read-only session, never runs strategies for a plain identity read, allows
+  writes only through explicitly delegated capabilities, rejects nested
+  escalation, and is revoked when the call returns or raises so the main
+  request keeps its normal session entry points.
+
 ## Version 1.2.9 / 2020-08-31
 * Avoid warning on uninitialized instance variable (#188)
 * Bump rack to 2.2.3 (#190)
