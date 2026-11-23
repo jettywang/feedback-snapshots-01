@@ -9,10 +9,15 @@ module WebAuthn
       WebAuthn::AuthenticatorAttestationResponse
     end
 
-    def verify(challenge, user_presence: nil, user_verification: nil)
+    def verify(challenge, user_presence: nil, user_verification: nil, verify_attestation_statement: nil)
       super
 
-      response.verify(encoder.decode(challenge), user_presence: user_presence, user_verification: user_verification)
+      response.verify(
+        encoder.decode(challenge),
+        user_presence: user_presence,
+        user_verification: user_verification,
+        verify_attestation_statement: verify_attestation_statement
+      )
 
       true
     end

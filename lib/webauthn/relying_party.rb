@@ -4,6 +4,7 @@ require "openssl"
 require "webauthn/credential"
 require "webauthn/encoder"
 require "webauthn/error"
+require "webauthn/registration_policy"
 
 module WebAuthn
   class RootCertificateFinderNotSupportedError < Error; end
@@ -29,6 +30,7 @@ module WebAuthn
       silent_authentication: false,
       acceptable_attestation_types: ['None', 'Self', 'Basic', 'AttCA', 'Basic_or_AttCA', 'AnonCA'],
       attestation_root_certificates_finders: [],
+      registration_policy: nil,
       legacy_u2f_appid: nil
     )
       @algorithms = algorithms
@@ -43,6 +45,7 @@ module WebAuthn
       @silent_authentication = silent_authentication
       @acceptable_attestation_types = acceptable_attestation_types
       @legacy_u2f_appid = legacy_u2f_appid
+      self.registration_policy = registration_policy
       self.origin = origin
       self.attestation_root_certificates_finders = attestation_root_certificates_finders
     end
@@ -60,7 +63,7 @@ module WebAuthn
                   :acceptable_attestation_types,
                   :legacy_u2f_appid
 
-    attr_reader :attestation_root_certificates_finders
+    attr_reader :attestation_root_certificates_finders, :registration_policy
 
     # This is the user-data encoder.
     # Used to decode user input and to encode data provided to the user.
@@ -82,19 +85,89 @@ module WebAuthn
       @attestation_root_certificates_finders = finders
     end
 
+    def registration_policy=(policy)
+      unless policy.nil? || policy.is_a?(WebAuthn::RegistrationPolicy)
+        raise ArgumentError, "registration_policy must be a WebAuthn::RegistrationPolicy"
+      end
+
+      @registration_policy = policy
+    end
+
+    def registration_policy?
+      !registration_policy.nil?
+    end
+
+    # Confirms a registration.
+    #
+    # When a policy is given (or configured on the relying party) both pieces
+    # of algorithm evidence must be approved independently. A rejected policy
+    # raises RegistrationPolicy::RejectedError carrying the full result.
+    #
+    # Without a policy this keeps the original #verify_registration behavior.
+    def verify_registration(
+      raw_credential,
+      challenge,
+      user_presence: nil,
+      user_verification: nil,
+      policy: nil
+    )
+      policy ||= registration_policy
+
+      unless policy
+        return verify_registration_without_policy(
+          raw_credential,
+          challenge,
+          user_presence: user_presence,
+          user_verification: user_verification
+        )
+      end
+
+      result = evaluate_registration(
+        raw_credential,
+        challenge,
+        user_presence: user_presence,
+        user_verification: user_verification,
+        policy: policy
+      )
+
+      unless result.persistable?
+        raise WebAuthn::RegistrationPolicy::RejectedError.new(result)
+      end
+
+      result.credential
+    end
+    alias_method :confirm_registration, :verify_registration
+
+    # Confirms a registration and returns the policy result, which explains
+    # each piece of evidence and the final admission reason. It does not raise
+    # on policy rejection; inspect #persistable? on the result instead.
+    def evaluate_registration(
+      raw_credential,
+      challenge,
+      user_presence: nil,
+      user_verification: nil,
+      policy: nil
+    )
+      policy ||= registration_policy
+      raise ArgumentError, "No registration policy configured" unless policy
+
+      webauthn_credential = WebAuthn::Credential.from_create(raw_credential, relying_party: self)
+
+      webauthn_credential.verify(
+        challenge,
+        user_presence: user_presence,
+        user_verification: user_verification,
+        verify_attestation_statement: false
+      )
+
+      policy.evaluate(webauthn_credential)
+    end
+
     def options_for_registration(**keyword_arguments)
       WebAuthn::Credential.options_for_create(
         **keyword_arguments,
         relying_party: self
       )
-    end
-
-    def verify_registration(raw_credential, challenge, user_presence: nil, user_verification: nil)
-      webauthn_credential = WebAuthn::Credential.from_create(raw_credential, relying_party: self)
-
-      if webauthn_credential.verify(challenge, user_presence: user_presence, user_verification: user_verification)
-        webauthn_credential
-      end
     end
 
     def options_for_authentication(**keyword_arguments)
@@ -149,6 +222,16 @@ module WebAuthn
       )
 
       @allowed_origins ||= Array(new_origin) # rubocop:disable Naming/MemoizedInstanceVariableName
+    end
+
+    private
+
+    def verify_registration_without_policy(raw_credential, challenge, user_presence: nil, user_verification: nil)
+      webauthn_credential = WebAuthn::Credential.from_create(raw_credential, relying_party: self)
+
+      if webauthn_credential.verify(challenge, user_presence: user_presence, user_verification: user_verification)
+        webauthn_credential
+      end
     end
   end
 end

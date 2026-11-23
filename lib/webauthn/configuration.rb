@@ -36,6 +36,8 @@ module WebAuthn
                    :silent_authentication=,
                    :acceptable_attestation_types,
                    :acceptable_attestation_types=,
+                   :registration_policy,
+                   :registration_policy=,
                    :attestation_root_certificates_finders,
                    :attestation_root_certificates_finders=,
                    :encoder,

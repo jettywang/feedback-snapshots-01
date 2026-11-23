@@ -45,6 +45,8 @@ module WebAuthn
             trusted_certificates: root_certificates(aaguid: aaguid)
           )
 
+        @trust_path_checked = true
+
         key_attestation.valid? && key_attestation.key && key_attestation.key.to_pem == key.to_pem
       end
 

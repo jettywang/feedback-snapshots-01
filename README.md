@@ -467,6 +467,55 @@ credential.authenticator_extension_outputs
 
 You can define what trust policy to enforce by setting `acceptable_attestation_types` config to a subset of `['None', 'Self', 'Basic', 'AttCA', 'Basic_or_AttCA']` and `attestation_root_certificates_finders` to an object that responds to `#find` and returns the corresponding root certificate for each registration. The `#find` method will be called passing keyword arguments `attestation_format`, `aaguid` and `attestation_certificate_key_id`.
 
+### Registration Algorithm Policy
+
+A relying party can optionally require two independent pieces of algorithm evidence when confirming a
+registration:
+
+- the algorithm of the newly registered **credential public key**
+- the algorithm of the attestation statement that proves the authenticator's **provenance**
+
+The provenance evidence can come from a validated certificate trust path (`packed` with `x5c`, `fido-u2f`,
+`tpm`, `android-key`, `android-safetynet`, `apple`) or from self attestation (`packed` without `x5c`). Both
+forms use their own algorithm and are approved for their own reason; a successful credential algorithm check
+never approves the attestation evidence, and vice versa.
+
+```ruby
+relying_party = WebAuthn::RelyingParty.new(
+  allowed_origins: ["https://auth.example.com"],
+  attestation_root_certificates_finders: my_finder,
+  registration_policy: WebAuthn::RegistrationPolicy.new(
+    credential_algorithms: ["ES256"],
+    attestation_algorithms: ["RS1"]
+  )
+)
+
+# Raises WebAuthn::RegistrationPolicy::RejectedError when either piece of
+# evidence is not approved. The error exposes the full policy result.
+credential = relying_party.verify_registration(params[:publicKeyCredential], session[:creation_challenge])
+
+# Or inspect the result without raising.
+result = relying_party.evaluate_registration(params[:publicKeyCredential], session[:creation_challenge])
+result.persistable?                  # both pieces approved
+result.credential_evidence.to_h      # algorithm, approved?, reason
+result.attestation_evidence.to_h     # algorithm, approved?, reason
+result.attestation_source            # :trust_path, :self_attestation or :none
+result.trust_path_checked?           # whether a certificate chain was validated
+```
+
+`attestation_requirement:` defaults to `:required`. An entry point that should explicitly accept registrations
+without external attestation can be built with:
+
+```ruby
+WebAuthn::RegistrationPolicy.allowing_no_attestation(credential_algorithms: ["ES256"])
+```
+
+Under that policy a `none` attestation is approved with the reason `:attestation_not_required`, but the
+credential public key algorithm is still enforced. At an entry point that requires attestation, a `none`
+attestation is classified as `:attestation_missing`, and an unverifiable chain as `:attestation_unverifiable`.
+
+Registering without a policy leaves `RelyingParty#verify_registration` behavior unchanged.
+
 ## Testing Your Integration
 
 The Webauthn spec requires for data that is signed and authenticated. As a result, it can be difficult to create valid test authenticator data when testing your integration. webauthn-ruby exposes [WebAuthn::FakeClient](https://github.com/cedarcode/webauthn-ruby/blob/master/lib/webauthn/fake_client.rb) for you to use in your tests. Example usage can be found in [webauthn-ruby/spec/webauthn/authenticator_assertion_response_spec.rb](https://github.com/cedarcode/webauthn-ruby/blob/master/spec/webauthn/authenticator_assertion_response_spec.rb).

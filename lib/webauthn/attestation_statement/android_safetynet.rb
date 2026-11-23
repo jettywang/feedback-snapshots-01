@@ -16,6 +16,19 @@ module WebAuthn
           [attestation_type, attestation_trust_path]
       end
 
+      def attestation_algorithm_name(_authenticator_data = nil)
+        @attestation_algorithm_name ||=
+          begin
+            JWT.decode(statement["response"], nil, false).last["alg"]
+          rescue StandardError
+            nil
+          end
+      end
+
+      def attestation_source
+        :trust_path
+      end
+
       private
 
       def valid_response?(authenticator_data, client_data_hash)
@@ -40,6 +53,7 @@ module WebAuthn
 
       def valid_certificate_chain?(**_)
         # Already performed as part of #valid_response?
+        @trust_path_checked = true
         true
       end
 

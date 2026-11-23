@@ -49,6 +49,26 @@ module WebAuthn
         attestation_certificate.subject_key_identifier&.unpack1("H*")
       end
 
+      # How this format proves the authenticator's provenance.
+      #
+      # :trust_path       - the statement carries a certificate chain validated
+      #                     against configured roots
+      # :self_attestation - the statement is signed by the credential key itself
+      # :none             - the statement carries no external proof
+      def attestation_source
+        certificates&.any? ? :trust_path : :none
+      end
+
+      # COSE algorithm name of the signature that protects this statement.
+      def attestation_algorithm_name(_authenticator_data = nil)
+        COSE::Algorithm.find(algorithm)&.name
+      end
+
+      # Whether the certificate trust path was actually validated.
+      def trust_path_checked?
+        !!@trust_path_checked
+      end
+
       private
 
       attr_reader :statement, :relying_party
@@ -108,13 +128,17 @@ module WebAuthn
         )
 
         if certificates&.one? && root_certificates.include?(attestation_certificate)
+          @trust_path_checked = true
+
           return true
         end
 
         attestation_root_certificates_store(
           aaguid: aaguid,
           attestation_certificate_key_id: attestation_certificate_key_id
-        ).verify(attestation_certificate, attestation_trust_path)
+        ).verify(attestation_certificate, attestation_trust_path).tap do
+          @trust_path_checked = true
+        end
       end
 
       def attestation_root_certificates_store(aaguid: nil, attestation_certificate_key_id: nil)

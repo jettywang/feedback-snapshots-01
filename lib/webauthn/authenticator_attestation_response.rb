@@ -31,7 +31,7 @@ module WebAuthn
       )
     end
 
-    attr_reader :attestation_type, :attestation_trust_path, :transports
+    attr_reader :attestation_type, :attestation_trust_path, :attestation_trust_path_checked, :transports
 
     def initialize(attestation_object:, transports: [], **options)
       super(**options)
@@ -41,13 +41,31 @@ module WebAuthn
       @relying_party = relying_party
     end
 
-    def verify(expected_challenge, expected_origin = nil, user_presence: nil, user_verification: nil, rp_id: nil)
-      super
+    def verify(
+      expected_challenge,
+      expected_origin = nil,
+      user_presence: nil,
+      user_verification: nil,
+      rp_id: nil,
+      verify_attestation_statement: nil
+    )
+      super(
+        expected_challenge,
+        expected_origin,
+        user_presence: user_presence,
+        user_verification: user_verification,
+        rp_id: rp_id
+      )
 
       verify_item(:attested_credential)
-      if relying_party.verify_attestation_statement
+
+      should_verify_attestation =
+        verify_attestation_statement.nil? ? relying_party.verify_attestation_statement : verify_attestation_statement
+
+      if should_verify_attestation
         verify_item(:attestation_statement)
       end
+
       verify_item(:credential_id_length)
 
       true
@@ -55,6 +73,14 @@ module WebAuthn
 
     def attestation_object
       @attestation_object ||= WebAuthn::AttestationObject.deserialize(attestation_object_bytes, relying_party)
+    end
+
+    # Stores the outcome of an attestation statement verification so callers
+    # can inspect it even when the regular verification path skipped it.
+    def record_attestation_result(attestation_type, attestation_trust_path, trust_path_checked: nil)
+      @attestation_type = attestation_type
+      @attestation_trust_path = attestation_trust_path
+      @attestation_trust_path_checked = trust_path_checked
     end
 
     def_delegators(
@@ -82,7 +108,14 @@ module WebAuthn
     end
 
     def valid_attestation_statement?
-      @attestation_type, @attestation_trust_path = attestation_object.valid_attestation_statement?(client_data.hash)
+      result = attestation_object.valid_attestation_statement?(client_data.hash)
+
+      if result
+        @attestation_type, @attestation_trust_path = result
+        @attestation_trust_path_checked = attestation_object.attestation_statement.trust_path_checked?
+      end
+
+      result
     end
 
     def valid_credential_id_length?

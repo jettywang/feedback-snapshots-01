@@ -6,11 +6,15 @@ module WebAuthn
   module AttestationStatement
     class None < Base
       def valid?(*_args)
-        if statement == {} && trustworthy?
+        if valid_format? && trustworthy?
           [WebAuthn::AttestationStatement::ATTESTATION_TYPE_NONE, nil]
         else
           false
         end
+      end
+
+      def valid_format?
+        statement == {}
       end
 
       private

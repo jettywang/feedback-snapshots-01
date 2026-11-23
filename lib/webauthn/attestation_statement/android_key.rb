@@ -27,6 +27,8 @@ module WebAuthn
       end
 
       def valid_certificate_chain?(aaguid: nil, **_)
+        @trust_path_checked = true
+
         android_key_attestation.verify_certificate_chain(root_certificates: root_certificates(aaguid: aaguid))
       rescue AndroidKeyAttestation::CertificateVerificationError
         false

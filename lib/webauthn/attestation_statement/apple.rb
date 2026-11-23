@@ -34,6 +34,17 @@ module WebAuthn
           [attestation_type, attestation_trust_path]
       end
 
+      def attestation_algorithm_name(_authenticator_data = nil)
+        case attestation_certificate&.public_key
+        when OpenSSL::PKey::EC
+          {
+            "prime256v1" => "ES256",
+            "secp384r1" => "ES384",
+            "secp521r1" => "ES512"
+          }[attestation_certificate.public_key.group.curve_name]
+        end
+      end
+
       private
 
       def valid_nonce?(authenticator_data, client_data_hash)

@@ -12,6 +12,10 @@ module WebAuthn
       VALID_ATTESTATION_CERTIFICATE_ALGORITHM = COSE::Algorithm.by_name("ES256")
       VALID_ATTESTATION_CERTIFICATE_KEY_CURVE = COSE::Key::Curve.by_name("P-256")
 
+      def attestation_algorithm_name(_authenticator_data = nil)
+        VALID_ATTESTATION_CERTIFICATE_ALGORITHM.name
+      end
+
       def valid?(authenticator_data, client_data_hash)
         valid_format? &&
           valid_certificate_public_key? &&

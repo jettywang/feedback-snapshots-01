@@ -19,6 +19,10 @@ module WebAuthn
           [attestation_type, attestation_trust_path]
       end
 
+      def attestation_source
+        self_attestation? ? :self_attestation : :trust_path
+      end
+
       private
 
       def valid_algorithm?(credential)

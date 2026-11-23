@@ -2,6 +2,10 @@
 
 ## [Unreleased](https://github.com/cedarcode/webauthn-ruby/compare/v3.5.1...master/)
 
+### Added
+
+- Add an optional `WebAuthn::RegistrationPolicy` that independently constrains the algorithm of the new credential public key and the algorithm of the attestation statement proving authenticator provenance. `RelyingParty#verify_registration` gains a `policy:` option and `RelyingParty#evaluate_registration` returns the per-evidence result. `WebAuthn::RegistrationPolicy.allowing_no_attestation` explicitly accepts the `none` attestation format while still enforcing the credential algorithm.
+
 ## [v3.5.1](https://github.com/cedarcode/webauthn-ruby/compare/v3.5.0...v3.5.1/) - 2026-11-10
 
 ### Changed
