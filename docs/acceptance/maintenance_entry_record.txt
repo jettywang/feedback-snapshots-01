@@ -1,0 +1,85 @@
+
+维护入口：Warden 锁与失败应用接入
+  RECORD [:hook, :on_request]
+  RECORD [:hook, :after_failed_fetch, :maint]
+  RECORD [:strategy_run, :fake_grant, :maint]
+  RECORD [:hook, :after_set_user, :authentication, :maint]
+  RECORD [:state, :cached_identity, "u-maint", "u-maint"]
+  RECORD [:state, :winning_before_lock, :maint]
+  RECORD [:hook, :after_failed_fetch, :admin]
+  RECORD [:state, :after_lock_approved, "u-maint"]
+  RECORD [:state, :after_lock_other, "nil"]
+  RECORD [:state, :other_authenticated?, false]
+  已缓存策略：锁后已核准 scope 继续返回缓存用户，另一 scope 不再执行策略
+  RECORD [:hook, :on_request]
+  RECORD [:session, :deserialize, :maint, "u-maint"]
+  RECORD [:hook, :after_set_user, :fetch, :maint]
+  RECORD [:state, :resumed, "u-maint"]
+  已持久化用户：锁不阻止会话恢复，已核准 scope 仍可继续
+  RECORD [:hook, :on_request]
+  RECORD [:hook, :after_failed_fetch, :maint]
+  RECORD [:hook, :before_failure, "unauthenticated", "/unauthenticated"]
+  没有身份：锁后 authenticate! 抛 :warden，由失败应用提交终态
+  RECORD [:hook, :on_request]
+  RECORD [:session, :deserialize, :maint, "u-maint"]
+  RECORD [:hook, :after_set_user, :fetch, :maint]
+  RECORD [:state, :after_clear_cache, "u-maint", []]
+  锁后清理策略缓存不会清除已恢复的用户
+  RECORD [:hook, :on_request]
+  RECORD [:hook, :after_failed_fetch, :maint]
+  RECORD [:state, :session_raised, "Warden::NotAuthenticated"]
+  未认证时 session 抛 NotAuthenticated，不进入失败分派
+  RECORD [:hook, :on_request]
+  RECORD [:session, :deserialize, :maint, "u-maint"]
+  RECORD [:hook, :after_set_user, :fetch, :maint]
+  RECORD [:state, :read_before_lock, "u-maint"]
+  RECORD [:state, :after_lock, "u-maint"]
+  顺序 A（先会话后锁）：会话先恢复，锁只影响后续策略
+  RECORD [:hook, :on_request]
+  RECORD [:session, :deserialize, :maint, "u-maint"]
+  RECORD [:hook, :after_set_user, :fetch, :maint]
+  RECORD [:session, :deserialize, :admin, "u-admin"]
+  RECORD [:hook, :after_set_user, :fetch, :admin]
+  RECORD [:state, :locked_read, "u-maint", "u-admin"]
+  RECORD [:state, :other_authenticated?, true]
+  顺序 B（先锁后读）：锁不限制会话读取，未核准 scope 也会被恢复
+  RECORD [:hook, :on_request]
+  RECORD [:hook, :after_set_user, :set_user, :maint]
+  RECORD [:hook, :after_failed_fetch, :admin]
+  RECORD [:state, :set_after_lock, "u-forced"]
+  RECORD [:state, :silent_auth, "nil", false]
+  RECORD [:state, :persisted_keys, ["warden.user.maint.key"]]
+  锁后 set_user 仍可写入身份，且 authenticate 不抛错只返回 nil
+  RECORD [:hook, :on_request]
+  RECORD [:hook, :after_failed_fetch, :maint]
+  RECORD [:hook, :before_failure, "maint_gate", "/maint_gate"]
+  RECORD [:state, :bang_action, "/maint_gate", "maint_gate"]
+  RECORD [:hook, :on_request]
+  RECORD [:hook, :before_failure, "unauthenticated", "/unauthenticated"]
+  RECORD [:state, :bare_action, "/unauthenticated", "unauthenticated"]
+  authenticate! 的失败会带上 scope 的 action，裸 throw 的 scope 不会
+  RECORD [:hook, :on_request]
+  RECORD [:hook, :after_failed_fetch, :maint]
+  RECORD [:strategy_run, :fake_grant, :maint]
+  RECORD [:hook, :after_set_user, :authentication, :maint]
+  RECORD [:hook, :before_failure, :maintenance, "/maintenance"]
+  应用主动 throw :warden 与策略失败走同一条失败分派路径
+  RECORD [:hook, :on_request]
+  应用抛出未捕获异常时不会进入失败应用，异常原样上抛
+  RECORD [:hook, :on_request]
+  RECORD [:hook, :before_failure, "unauthenticated", "/unauthenticated"]
+  RECORD [:state, :intercepted_401, 401, ["You Fail!"]]
+  RECORD [:hook, :on_request]
+  RECORD [:state, :custom_failure, 401, ["app-401"]]
+  RECORD [:hook, :on_request]
+  RECORD [:state, :passthrough_403, 403, ["app-403"]]
+  RECORD [:hook, :on_request]
+  RECORD [:hook, :before_failure, "unauthenticated", "/unauthenticated"]
+  RECORD [:state, :rack_response_401, "Array", 401, ["You Fail!"]]
+  RECORD [:hook, :on_request]
+  RECORD [:state, :rack_response_200, "Rack::Response", 200]
+  响应提交：下游 401 由 intercept_401 接管，custom_failure! 与应用自建 403 不被改写
+
+Finished in 0.04892 seconds (files took 0.10808 seconds to load)
+12 examples, 0 failures
+
