@@ -1,0 +1,90 @@
+{
+  "ticket_id": "APPR-2026-1124-001",
+  "generated_at": "2026-11-24T10:05:00Z",
+  "scope": [
+    "res-clean",
+    "res-parse-fail",
+    "res-dup",
+    "res-pending",
+    "res-no-evidence"
+  ],
+  "events": [
+    {
+      "resource_id": "res-clean",
+      "template": "templates/web.yaml",
+      "sequence": 1,
+      "observed_at": "2026-11-24T09:59:10Z",
+      "stage": "analysis",
+      "outcome": "completed",
+      "findings": [],
+      "source": "analyzer-1"
+    },
+    {
+      "resource_id": "res-parse-fail",
+      "template": "templates/legacy.yaml",
+      "sequence": 1,
+      "observed_at": "2026-11-24T09:59:12Z",
+      "stage": "parse",
+      "outcome": "failed",
+      "error": {"parser": "cfn-yaml", "message": "mapping values are not allowed here (line 42)"},
+      "source": "parser-1"
+    },
+    {
+      "resource_id": "res-dup",
+      "template": "templates/data.yaml",
+      "sequence": 2,
+      "observed_at": "2026-11-24T10:00:20Z",
+      "stage": "analysis",
+      "outcome": "completed",
+      "findings": [{"rule": "WildcardResource", "severity": "medium"}],
+      "source": "analyzer-2"
+    },
+    {
+      "resource_id": "res-dup",
+      "template": "templates/data.yaml",
+      "sequence": 1,
+      "observed_at": "2026-11-24T10:00:05Z",
+      "stage": "analysis",
+      "outcome": "completed",
+      "findings": [],
+      "source": "analyzer-1"
+    },
+    {
+      "resource_id": "res-dup",
+      "template": "templates/data.yaml",
+      "sequence": 2,
+      "observed_at": "2026-11-24T10:00:20Z",
+      "stage": "analysis",
+      "outcome": "completed",
+      "findings": [{"rule": "WildcardResource", "severity": "medium"}],
+      "source": "analyzer-2"
+    },
+    {
+      "resource_id": "res-pending",
+      "template": "templates/auth.yaml",
+      "sequence": 1,
+      "observed_at": "2026-11-24T09:59:40Z",
+      "stage": "analysis",
+      "outcome": "inconclusive",
+      "source": "analyzer-1"
+    },
+    {
+      "resource_id": "res-extra",
+      "template": "templates/unrelated.yaml",
+      "sequence": 1,
+      "observed_at": "2026-11-24T09:59:50Z",
+      "stage": "analysis",
+      "outcome": "completed",
+      "findings": [],
+      "source": "analyzer-1"
+    },
+    {
+      "resource_id": "res-parse-fail",
+      "template": "templates/legacy.yaml",
+      "sequence": 2,
+      "observed_at": "2026-11-24T10:01:00Z",
+      "stage": "parse",
+      "source": "parser-1"
+    }
+  ]
+}

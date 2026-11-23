@@ -1,0 +1,153 @@
+{
+  "report_version": "1.0",
+  "ticket_id": "APPR-2026-1124-001",
+  "generated_at": "2026-11-24T10:05:00Z",
+  "summary": {
+    "total": 6,
+    "checked": 2,
+    "out_of_scope": 1,
+    "pending": 2,
+    "parse_failed": 1
+  },
+  "handoff": {
+    "ready": [
+      "res-clean",
+      "res-dup",
+      "res-extra"
+    ],
+    "blocked": [
+      {
+        "resource_id": "res-no-evidence",
+        "status": "pending"
+      },
+      {
+        "resource_id": "res-parse-fail",
+        "status": "parse_failed"
+      },
+      {
+        "resource_id": "res-pending",
+        "status": "pending"
+      }
+    ]
+  },
+  "quarantined_events": [
+    {
+      "index": 7,
+      "missing_fields": [
+        "outcome"
+      ],
+      "event": {
+        "resource_id": "res-parse-fail",
+        "template": "templates/legacy.yaml",
+        "sequence": 2,
+        "observed_at": "2026-11-24T10:01:00Z",
+        "stage": "parse",
+        "source": "parser-1"
+      }
+    }
+  ],
+  "resources": [
+    {
+      "resource_id": "res-clean",
+      "in_scope": true,
+      "evidence": {
+        "sequence": 1,
+        "observed_at": "2026-11-24T09:59:10Z",
+        "stage": "analysis",
+        "outcome": "completed",
+        "source": "analyzer-1"
+      },
+      "superseded": [],
+      "error": null,
+      "status": "checked",
+      "finding": "none",
+      "findings_count": 0,
+      "handoff_ready": true
+    },
+    {
+      "resource_id": "res-dup",
+      "in_scope": true,
+      "evidence": {
+        "sequence": 2,
+        "observed_at": "2026-11-24T10:00:20Z",
+        "stage": "analysis",
+        "outcome": "completed",
+        "source": "analyzer-2"
+      },
+      "superseded": [
+        {
+          "sequence": 1,
+          "observed_at": "2026-11-24T10:00:05Z",
+          "reason": "stale"
+        },
+        {
+          "sequence": 2,
+          "observed_at": "2026-11-24T10:00:20Z",
+          "reason": "duplicate"
+        }
+      ],
+      "error": null,
+      "status": "checked",
+      "finding": "present",
+      "findings_count": 1,
+      "handoff_ready": true
+    },
+    {
+      "resource_id": "res-extra",
+      "in_scope": false,
+      "evidence": null,
+      "superseded": [],
+      "error": null,
+      "status": "out_of_scope",
+      "finding": "unknown",
+      "note": "resource is not covered by the ticket's authorization scope",
+      "handoff_ready": true
+    },
+    {
+      "resource_id": "res-no-evidence",
+      "in_scope": true,
+      "evidence": null,
+      "superseded": [],
+      "error": null,
+      "status": "pending",
+      "finding": "unknown",
+      "note": "no evidence received yet",
+      "handoff_ready": false
+    },
+    {
+      "resource_id": "res-parse-fail",
+      "in_scope": true,
+      "evidence": {
+        "sequence": 1,
+        "observed_at": "2026-11-24T09:59:12Z",
+        "stage": "parse",
+        "outcome": "failed",
+        "source": "parser-1"
+      },
+      "superseded": [],
+      "error": {
+        "parser": "cfn-yaml",
+        "message": "mapping values are not allowed here (line 42)"
+      },
+      "status": "parse_failed",
+      "finding": "unknown",
+      "handoff_ready": false
+    },
+    {
+      "resource_id": "res-pending",
+      "in_scope": true,
+      "evidence": {
+        "sequence": 1,
+        "observed_at": "2026-11-24T09:59:40Z",
+        "stage": "analysis",
+        "outcome": "inconclusive",
+        "source": "analyzer-1"
+      },
+      "superseded": [],
+      "error": null,
+      "status": "pending",
+      "finding": "unknown",
+      "handoff_ready": false
+    }
+  ]
+}

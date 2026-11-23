@@ -1,0 +1,11 @@
+{
+  "parse_not_analyzed": [
+    "res-parse-fail"
+  ],
+  "confirmed_clean": [
+    "res-clean"
+  ],
+  "duplicate_results": [
+    "res-dup"
+  ]
+}
