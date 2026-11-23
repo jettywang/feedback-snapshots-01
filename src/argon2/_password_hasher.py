@@ -10,9 +10,20 @@ from ._utils import (
     Parameters,
     _check_types,
     extract_parameters,
+    inspect_hash,
     validate_params_for_platform,
 )
-from .exceptions import InvalidHashError
+from ._verification import (
+    DEFAULT_VERIFICATION_POLICY,
+    VerificationOutcome,
+    VerificationPolicy,
+    VerificationReport,
+)
+from .exceptions import (
+    InvalidHashError,
+    VerificationError,
+    VerifyMismatchError,
+)
 from .low_level import Type, hash_secret, verify_secret
 from .profiles import get_default_parameters
 
@@ -257,6 +268,110 @@ class PasswordHasher:
 
         return verify_secret(
             hash, _ensure_bytes(password, self.encoding), hash_type
+        )
+
+    def verify_with_report(
+        self,
+        hash: str | bytes,
+        password: str | bytes,
+        policy: VerificationPolicy = DEFAULT_VERIFICATION_POLICY,
+    ) -> VerificationReport:
+        """
+        Verify *password* against *hash* and return a structured receipt.
+
+        Unlike :meth:`verify`, this never raises for ordinary verification
+        failures.  The returned :class:`VerificationReport` separates three
+        concerns that a plain boolean cannot:
+
+        - the low-level cryptographic conclusion (:attr:`VerificationReport
+          .outcome`),
+        - the evidence that could be parsed from the hash text
+          (:attr:`VerificationReport.inspection`, including any values the
+          library inferred for legacy records), and
+        - whether the record falls within *policy*'s version window and
+          whether it should be rehashed (:attr:`VerificationReport.accepted`
+          and :attr:`VerificationReport.needs_rehash`).
+
+        A successful password match only proves the stored digest is usable;
+        it does not imply the metadata was fully present in the text or that
+        the record has been migrated.  Tightening *policy* lets callers tell
+        apart an inapplicable format, uninterpretable parameters, and a
+        genuine password mismatch.
+
+        Args:
+            hash: An encoded hash as returned from :meth:`PasswordHasher.hash`
+                or a legacy Argon2 v1.2 record.
+
+            password: The password to verify.
+
+            policy:
+                Runtime policy selecting which records the login service
+                accepts.  Defaults to a window covering both legacy v1.2
+                (version 18) and current v1.3 (version 19) records.
+
+        Returns:
+            A receipt describing the attempt.  The receipt never carries the
+            password, salt, or digest.
+
+        .. versionadded:: 25.2.0
+        """
+        hash_bytes = _ensure_bytes(hash, "ascii")
+
+        # 1. Is this an Argon2 record at all?
+        try:
+            hash_type = self._header_to_type[hash_bytes[:9]]
+        except LookupError:
+            return VerificationReport._build(
+                VerificationOutcome.FORMAT_NOT_APPLICABLE, None
+            )
+
+        # 2. Can the text be explained?
+        try:
+            inspection = inspect_hash(hash_bytes.decode("ascii"))
+        except InvalidHashError:
+            return VerificationReport._build(
+                VerificationOutcome.PARAMETERS_UNINTERPRETABLE, None
+            )
+
+        # 3. Does the parsed record fit the registered migration window?
+        accepted = policy.accepts(inspection)
+        needs_rehash = self._parameters != inspection.parameters
+        if not accepted:
+            return VerificationReport._build(
+                VerificationOutcome.PARAMETERS_UNINTERPRETABLE,
+                inspection,
+                accepted=False,
+                needs_rehash=needs_rehash,
+            )
+
+        # 4. Cryptographic verification of an accepted, explainable record.
+        try:
+            verify_secret(
+                hash_bytes,
+                _ensure_bytes(password, self.encoding),
+                hash_type,
+            )
+        except VerifyMismatchError:
+            return VerificationReport._build(
+                VerificationOutcome.PASSWORD_MISMATCH,
+                inspection,
+                accepted=True,
+                needs_rehash=needs_rehash,
+            )
+        except VerificationError as error:
+            return VerificationReport._build(
+                VerificationOutcome.VERIFICATION_ERROR,
+                inspection,
+                accepted=True,
+                needs_rehash=needs_rehash,
+                low_level_error=error.args[0] if error.args else None,
+            )
+
+        return VerificationReport._build(
+            VerificationOutcome.VERIFIED,
+            inspection,
+            accepted=True,
+            needs_rehash=needs_rehash,
         )
 
     def check_needs_rehash(self, hash: str | bytes) -> bool:

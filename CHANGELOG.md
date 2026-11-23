@@ -19,6 +19,19 @@ You can find our backwards-compatibility policy [here](https://github.com/hynek/
 
 - Official support for Python 3.15.
   No code changes were necessary.
+- `PasswordHasher.verify_with_report()` returns a structured
+  `VerificationReport` that separates the low-level verification outcome
+  from hash-text parsing evidence and the active migration policy.
+  It distinguishes an inapplicable format, uninterpretable parameters, and a
+  password mismatch, and documents which legacy parameters the library
+  inferred.
+  The existing `verify()` method keeps its return value and exception
+  contract unchanged.
+- `inspect_hash()`, `HashFormat`, and `HashInspection` expose how an encoded
+  hash was parsed, including values assumed for legacy Argon2 v1.2 records.
+- `VerificationPolicy`, `VerificationOutcome`, and
+  `DEFAULT_VERIFICATION_POLICY` let login services register the accepted
+  version window for stored records.
 
 
 ### Removed

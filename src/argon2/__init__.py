@@ -14,7 +14,19 @@ from ._password_hasher import (
     DEFAULT_TIME_COST,
     PasswordHasher,
 )
-from ._utils import Parameters, extract_parameters
+from ._utils import (
+    HashFormat,
+    HashInspection,
+    Parameters,
+    extract_parameters,
+    inspect_hash,
+)
+from ._verification import (
+    DEFAULT_VERIFICATION_POLICY,
+    VerificationOutcome,
+    VerificationPolicy,
+    VerificationReport,
+)
 from .low_level import Type
 
 
@@ -31,13 +43,20 @@ __all__ = [
     "DEFAULT_PARALLELISM",
     "DEFAULT_RANDOM_SALT_LENGTH",
     "DEFAULT_TIME_COST",
+    "DEFAULT_VERIFICATION_POLICY",
+    "HashFormat",
+    "HashInspection",
     "Parameters",
     "PasswordHasher",
     "Type",
+    "VerificationOutcome",
+    "VerificationPolicy",
+    "VerificationReport",
     "exceptions",
     "extract_parameters",
     "hash_password",
     "hash_password_raw",
+    "inspect_hash",
     "low_level",
     "profiles",
     "verify_password",

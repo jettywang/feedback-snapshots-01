@@ -208,6 +208,11 @@ ignore = [
 
 [tool.ruff.lint.per-file-ignores]
 "src/argon2/__main__.py" = ["T201"] # need print in CLI
+"docs/login_report_example.py" = [
+    "S101", # assertions document expected outcomes
+    "S105", # demo uses a synthetic, non-secret credential
+    "T201", # the demo's purpose is printed output
+]
 "tests/*" = [
     "ARG",    # stubs don't care about arguments
     "S101",   # assert

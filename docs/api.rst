@@ -4,7 +4,7 @@ API Reference
 .. module:: argon2
 
 .. autoclass:: PasswordHasher
-  :members: from_parameters, hash, verify, check_needs_rehash
+  :members: from_parameters, hash, verify, verify_with_report, check_needs_rehash
 
 If you don't specify any parameters, the following constants are used:
 
@@ -107,7 +107,31 @@ Utilities
 
 .. autofunction:: argon2.extract_parameters
 
+.. autofunction:: argon2.inspect_hash
+
 .. autoclass:: argon2.Parameters
+
+.. autoclass:: argon2.HashFormat
+   :members:
+
+.. autoclass:: argon2.HashInspection
+   :members:
+
+.. autoclass:: argon2.VerificationPolicy
+   :members:
+
+.. autoclass:: argon2.VerificationReport
+   :members:
+
+.. autoclass:: argon2.VerificationOutcome
+   :members:
+
+.. data:: argon2.DEFAULT_VERIFICATION_POLICY
+
+   Default migration window used by
+   :meth:`argon2.PasswordHasher.verify_with_report`.  It accepts both legacy
+   Argon2 v1.2 records (understood as version 18) and current v1.3 records
+   (version 19).
 
 
 Low Level

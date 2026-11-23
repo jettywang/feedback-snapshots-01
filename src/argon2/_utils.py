@@ -5,7 +5,8 @@ from __future__ import annotations
 import platform
 import sys
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from enum import Enum
 
 from .exceptions import InvalidHashError, UnsupportedParametersError
 from .low_level import Type
@@ -104,32 +105,97 @@ class Parameters:
     )
 
 
+class HashFormat(str, Enum):
+    """
+    Encoding generation of an Argon2 hash string.
+
+    Attributes:
+        LEGACY_1_2:
+            Argon2 v1.2 hash without an explicit ``v=`` field (five
+            ``$``-separated parts).  The version has to be inferred as 18.
+
+        MODERN:
+            Hash carrying an explicit ``v=`` field (six ``$``-separated
+            parts).
+
+    .. versionadded:: 25.2.0
+    """
+
+    LEGACY_1_2 = "argon2-1.2"
+    MODERN = "argon2-1.3"
+
+
+# Version that pre-1.3 ("v1.2") Argon2 hashes are understood to use.
+LEGACY_1_2_VERSION = 18
+
+
+@dataclass(frozen=True)
+class HashInspection:
+    """
+    Evidence obtained by parsing an encoded Argon2 hash string.
+
+    A successful inspection means that the hash's *text* could be explained.
+    It does not say anything about whether a password matches it; that is a
+    separate, cryptographic step.
+
+    Attributes:
+        hash_format: Encoding generation of the hash.
+
+        parameters:
+            Parameters parsed from the text.  For legacy hashes, values that
+            were not carried by the text are filled in per historical
+            convention and additionally listed in *inferred_parameters*.
+
+        inferred_parameters:
+            Mapping of parameter names to the values the library assumed
+            because the hash did not state them explicitly.  An empty mapping
+            means every value was read directly from the hash text.
+
+    .. versionadded:: 25.2.0
+    """
+
+    hash_format: HashFormat
+    parameters: Parameters
+    inferred_parameters: dict[str, int] = field(default_factory=dict)
+
+
 _NAME_TO_TYPE = {"argon2id": Type.ID, "argon2i": Type.I, "argon2d": Type.D}
 _REQUIRED_KEYS = sorted(("v", "m", "t", "p"))
 
 
-def extract_parameters(hash: str) -> Parameters:
+def inspect_hash(hash: str) -> HashInspection:
     """
-    Extract parameters from an encoded *hash*.
+    Parse an encoded Argon2 *hash* and report how the result was derived.
+
+    Unlike :func:`extract_parameters`, this keeps track of which values were
+    stated in the hash text and which the library inferred.
 
     Args:
         hash: An encoded Argon2 hash string.
 
     Returns:
-        The parameters used to create the hash.
+        The parsing evidence for *hash*.
 
-    .. versionadded:: 18.2.0
+    Raises:
+        argon2.exceptions.InvalidHashError:
+            If the text does not follow the Argon2 encoded-hash grammar or
+            carries parameters that cannot be interpreted.
+
+    .. versionadded:: 25.2.0
     """
     parts = hash.split("$")
 
-    # Backwards compatibility for Argon v1.2 hashes
+    # Backwards compatibility for Argon v1.2 hashes, which omit the version
+    # field entirely.
     if len(parts) == 5:
-        parts.insert(2, "v=18")
+        hash_format = HashFormat.LEGACY_1_2
+        parts.insert(2, f"v={LEGACY_1_2_VERSION}")
+        inferred_parameters: dict[str, int] = {"version": LEGACY_1_2_VERSION}
+    else:
+        hash_format = HashFormat.MODERN
+        inferred_parameters = {}
 
-    if len(parts) != 6:
-        raise InvalidHashError
-
-    if parts[0]:
+    if len(parts) != 6 or parts[0]:
         raise InvalidHashError
 
     try:
@@ -147,7 +213,7 @@ def extract_parameters(hash: str) -> Parameters:
     if sorted(kvs.keys()) != _REQUIRED_KEYS:
         raise InvalidHashError
 
-    return Parameters(
+    parameters = Parameters(
         type=type,
         salt_len=_decoded_str_len(len(parts[4])),
         hash_len=_decoded_str_len(len(parts[5])),
@@ -156,6 +222,27 @@ def extract_parameters(hash: str) -> Parameters:
         memory_cost=kvs["m"],
         parallelism=kvs["p"],
     )
+
+    return HashInspection(
+        hash_format=hash_format,
+        parameters=parameters,
+        inferred_parameters=inferred_parameters,
+    )
+
+
+def extract_parameters(hash: str) -> Parameters:
+    """
+    Extract parameters from an encoded *hash*.
+
+    Args:
+        hash: An encoded Argon2 hash string.
+
+    Returns:
+        The parameters used to create the hash.
+
+    .. versionadded:: 18.2.0
+    """
+    return inspect_hash(hash).parameters
 
 
 def validate_params_for_platform(params: Parameters) -> None:
