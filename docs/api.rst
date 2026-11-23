@@ -85,6 +85,44 @@ That should give you a feeling on how they perform in *your* environment.
 .. _`RFC 9106`: https://www.rfc-editor.org/rfc/rfc9106.html
 
 
+Runtime Profile Management
+--------------------------
+
+At startup the active Argon2 backend may only support a subset of the
+configured parameter profiles.  The profile manager makes the runtime adopt
+nothing but a verification plan that has been self-checked against the
+backend in use.
+
+A candidate profile is probed with a complete hash-and-verify round-trip.
+Only a successful probe is promoted to the active plan; a failed re-probe
+leaves a previously confirmed plan untouched and is recorded as a failed
+state instead.  Explicit profiles and the running environment's default
+profile are both supported, while a read-only probe evaluates a candidate
+using its own configuration without affecting in-flight requests.
+
+.. autoclass:: argon2.ProfileManager
+   :members: initialize, switch_to, probe, active_parameters, status,
+             is_verified, last_error
+
+.. autoclass:: argon2.ProfileStatus
+   :members: UNINITIALIZED, VERIFIED, FAILED
+
+.. autoclass:: argon2.VerificationResult
+   :members: parameters, status, applied, error, active_parameters
+
+For example:
+
+.. doctest::
+
+   >>> from argon2 import ProfileManager, profiles
+   >>> manager = ProfileManager()
+   >>> result = manager.initialize(profiles.CHEAPEST)
+   >>> result.status.value
+   'verified'
+   >>> manager.active_parameters == profiles.CHEAPEST
+   True
+
+
 Exceptions
 ----------
 
@@ -99,6 +137,8 @@ Exceptions
 .. autoexception:: argon2.exceptions.InvalidHash
 
 .. autoexception:: argon2.exceptions.UnsupportedParametersError
+
+.. autoexception:: argon2.exceptions.ProfileNotVerifiedError
 
 
 

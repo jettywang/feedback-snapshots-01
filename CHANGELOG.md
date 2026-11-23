@@ -20,6 +20,11 @@ You can find our backwards-compatibility policy [here](https://github.com/hynek/
 - Official support for Python 3.15.
   No code changes were necessary.
 
+- `argon2.ProfileManager` for runtime management of self-checked Argon2 parameter profiles.
+  A plan is only adopted after a backend hash-and-verify self-check succeeds; a failed re-check preserves the previously confirmed plan.
+  Explicit profiles, the running environment's default profile, read-only candidate probes, and the `argon2.ProfileStatus` / `argon2.VerificationResult` failure-state conventions are supported.
+  The new `argon2.exceptions.ProfileNotVerifiedError` is raised when no plan has been confirmed yet.
+
 
 ### Removed
 

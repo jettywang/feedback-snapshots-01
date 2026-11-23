@@ -56,6 +56,19 @@ class UnsupportedParametersError(ValueError):
     """
 
 
+class ProfileNotVerifiedError(Argon2Error):
+    """
+    Raised if no parameter profile has been self-checked successfully.
+
+    The runtime only adopts a verification plan after it has been probed
+    against the active backend.  If initialization or a profile switch fails
+    and there is no previously confirmed plan to fall back to, the manager is
+    in a failed state without any active profile.
+
+    .. versionadded:: 26.1.0
+    """
+
+
 InvalidHash = InvalidHashError
 """
 Deprecated alias for :class:`InvalidHashError`.

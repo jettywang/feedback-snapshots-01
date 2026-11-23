@@ -14,6 +14,7 @@ from ._password_hasher import (
     DEFAULT_TIME_COST,
     PasswordHasher,
 )
+from ._runtime import ProfileManager, ProfileStatus, VerificationResult
 from ._utils import Parameters, extract_parameters
 from .low_level import Type
 
@@ -33,7 +34,10 @@ __all__ = [
     "DEFAULT_TIME_COST",
     "Parameters",
     "PasswordHasher",
+    "ProfileManager",
+    "ProfileStatus",
     "Type",
+    "VerificationResult",
     "exceptions",
     "extract_parameters",
     "hash_password",
