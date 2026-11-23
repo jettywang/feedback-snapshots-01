@@ -131,6 +131,18 @@ Parameters:
      a string.Template object containing a content fragment in HTML
      that frames the explanation and further detail
 
+   ``public_error_contract``
+     an optional :class:`PublicErrorContract` enabling sanitized public
+     error representations; when set, generated responses copy approved
+     values only, keep the effective ``WWW-Authenticate``/``Retry-After``
+     headers and the original status, and log internal details to the
+     contract's trusted logger under a correlation reference
+
+   ``public_detail``
+     a plain-text message explicitly approved for public display when a
+     ``public_error_contract`` is in effect (unlike ``detail``, which is
+     treated as internal)
+
 To override the template (which is HTML content) or the plain-text
 explanation, one must subclass the given exception; or customize it
 after it has been created.  This particular breakdown of a message
@@ -166,9 +178,11 @@ References:
 """
 
 import json
+import logging
 import re
 from string import Template
 import sys
+import uuid
 
 from webob.acceptparse import create_accept_header
 from webob.request import Request
@@ -228,6 +242,117 @@ class HTTPException(Exception):
         return self.wsgi_response(environ, start_response)
 
 
+class PublicErrorContract:
+    """
+    Optional opt-in contract for sanitized public error representations.
+
+    When attached to a :class:`WSGIHTTPException` (via the
+    ``public_error_contract`` class attribute or the same-named
+    constructor keyword), generated error responses are synthesized from
+    approved values only:
+
+    * ``detail`` and ``comment`` may carry protected identifiers and are
+      never copied into the response.  A business may approve a
+      client-safe message by setting ``public_detail`` on the exception.
+    * Environ values are copied only when their key is listed in
+      ``allowed_environ`` (a mapping of public name -> environ key, or an
+      iterable of keys copied under their own name).
+    * Response headers are copied only when listed in
+      ``allowed_headers``; ``WWW-Authenticate`` and ``Retry-After``
+      always pass through so authentication challenges and retry
+      semantics keep working.  The original HTTP status is preserved.
+    * The full internal details (status, detail, comment) are emitted to
+      the trusted ``logger`` under a correlation ``error_ref`` that is
+      also shown to the client, so reports can be correlated without
+      exposing internals.
+
+    When no contract is attached, the legacy formatters are used
+    unchanged.
+    """
+
+    #: Headers that always pass through because they carry protocol
+    #: semantics the client must be able to rely on (authentication
+    #: challenges and retry hints).
+    PASSTHROUGH_HEADERS = frozenset(("www-authenticate", "retry-after"))
+
+    def __init__(
+        self,
+        allowed_environ=(),
+        allowed_headers=(),
+        logger=None,
+        error_ref_factory=None,
+    ):
+        self.allowed_environ = allowed_environ
+        self.allowed_headers = tuple(name.lower() for name in allowed_headers)
+        self.logger = logger
+        self.error_ref_factory = error_ref_factory
+
+    def make_error_ref(self, environ):
+        if self.error_ref_factory is not None:
+            return str(self.error_ref_factory(environ))
+
+        return uuid.uuid4().hex
+
+    def approved_environ(self, environ):
+        allowed = self.allowed_environ
+
+        if hasattr(allowed, "items"):
+            pairs = allowed.items()
+        else:
+            pairs = ((name, name) for name in allowed)
+
+        return {
+            public_name: text_(environ[source])
+            for public_name, source in pairs
+            if source in environ
+        }
+
+    def public_detail(self, exc):
+        # Only an explicitly approved detail is public.
+        return getattr(exc, "public_detail", None)
+
+    def public_values(self, exc, environ, error_ref):
+        values = {
+            "status": exc.status,
+            "title": exc.title,
+            "explanation": exc.explanation,
+            "error_ref": error_ref,
+        }
+        detail = self.public_detail(exc)
+
+        if detail is not None:
+            values["detail"] = detail
+        values.update(self.approved_environ(environ))
+
+        return values
+
+    def filter_headers(self, headerlist):
+        approved = self.PASSTHROUGH_HEADERS | frozenset(self.allowed_headers)
+
+        return [
+            (name, value)
+            for name, value in headerlist
+            if name.lower() in approved
+        ]
+
+    def log_internal(self, exc, environ, error_ref):
+        logger = self.logger
+
+        if logger is None:
+            logger = logging.getLogger("webob.exc")
+        logger.error(
+            "error_ref=%s status=%s detail=%r comment=%r",
+            error_ref,
+            exc.status,
+            exc.detail,
+            exc.comment,
+            extra={"error_ref": error_ref},
+        )
+
+    def format_json(self, values):
+        return values
+
+
 class WSGIHTTPException(Response, HTTPException):
     # You should set in subclasses:
     # code = 200
@@ -262,6 +387,10 @@ ${body}""")
     # Set this to True for responses that should have no request body
     empty_body = False
 
+    # Set this to a PublicErrorContract to generate sanitized public
+    # error representations; None keeps the legacy formatters.
+    public_error_contract = None
+
     def __init__(
         self,
         detail=None,
@@ -269,6 +398,8 @@ ${body}""")
         comment=None,
         body_template=None,
         json_formatter=None,
+        public_error_contract=None,
+        public_detail=None,
         **kw,
     ):
         Response.__init__(self, status=f"{self.code} {self.title}", **kw)
@@ -289,6 +420,12 @@ ${body}""")
 
         if json_formatter is not None:
             self.json_formatter = json_formatter
+
+        if public_error_contract is not None:
+            self.public_error_contract = public_error_contract
+
+        if public_detail is not None:
+            self.public_detail = public_detail
 
     def __str__(self):
         return self.detail or self.explanation
@@ -346,6 +483,12 @@ ${body}""")
         if self.content_length is not None:
             del self.content_length
         headerlist = list(self.headerlist)
+        contract = self.public_error_contract
+
+        if contract is not None:
+            return self._generate_public_response(
+                contract, environ, headerlist, start_response
+            )
         accept_value = environ.get("HTTP_ACCEPT", "")
         accept_header = create_accept_header(header_value=accept_value)
         acceptable_offers = accept_header.acceptable_offers(
@@ -368,6 +511,82 @@ ${body}""")
         resp.content_type = content_type
 
         return resp(environ, start_response)
+
+    def _generate_public_response(self, contract, environ, headerlist, start_response):
+        try:
+            error_ref = contract.make_error_ref(environ)
+        except Exception:
+            error_ref = uuid.uuid4().hex
+
+        try:
+            contract.log_internal(self, environ, error_ref)
+        except Exception:
+            # A failing trusted log must not break the error response.
+            pass
+        values = contract.public_values(self, environ, error_ref)
+
+        try:
+            content_type, body = self._select_public_body(contract, environ, values)
+        except Exception:
+            # Format selection or synthesis failed; the fallback must not
+            # render the raw exception, only the status and the
+            # correlation reference.
+            content_type = "text/plain"
+            body = "%s\n\nError reference: %s" % (self.status, error_ref)
+
+        if isinstance(body, str):
+            body = body.encode("utf-8")
+        resp = Response(
+            body,
+            status=self.status,
+            headerlist=contract.filter_headers(headerlist),
+            content_type=content_type,
+        )
+        resp.content_type = content_type
+
+        return resp(environ, start_response)
+
+    def _select_public_body(self, contract, environ, values):
+        accept_value = environ.get("HTTP_ACCEPT", "")
+        accept_header = create_accept_header(header_value=accept_value)
+        acceptable_offers = accept_header.acceptable_offers(
+            offers=["text/html", "application/json"]
+        )
+        match = acceptable_offers[0][0] if acceptable_offers else None
+
+        if match == "text/html":
+            return "text/html", self._public_html_body(contract, values)
+        elif match == "application/json":
+            return "application/json", self._public_json_body(contract, values)
+        else:
+            return "text/plain", self._public_plain_body(contract, values)
+
+    def _public_json_body(self, contract, values):
+        return json.dumps(contract.format_json(dict(values)))
+
+    def _public_html_body(self, contract, values):
+        parts = [html_escape(values["explanation"] or values["title"])]
+        detail = values.get("detail")
+
+        if detail:
+            parts.append(html_escape(detail))
+        parts.append("Error reference: %s" % html_escape(values["error_ref"]))
+        body = "<br /><br />\n".join(parts)
+
+        return self.html_template_obj.substitute(status=self.status, body=body)
+
+    def _public_plain_body(self, contract, values):
+        parts = [values["explanation"] or values["title"]]
+        detail = values.get("detail")
+
+        if detail:
+            parts.append(detail)
+        parts.append("Error reference: %s" % values["error_ref"])
+        body = "\n".join(part for part in parts if part)
+
+        return self.plain_template_obj.substitute(
+            status=self.status, title=self.title, body=body
+        )
 
     def __call__(self, environ, start_response):
         is_head = environ["REQUEST_METHOD"] == "HEAD"
@@ -1322,7 +1541,7 @@ class HTTPExceptionMiddleware:
             return parent_exc_info[1](environ, repl_start_response)
 
 
-__all__ = ["HTTPExceptionMiddleware", "status_map"]
+__all__ = ["HTTPExceptionMiddleware", "PublicErrorContract", "status_map"]
 status_map = {}
 
 for name, value in list(globals().items()):

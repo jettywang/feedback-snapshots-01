@@ -8,6 +8,7 @@ HTTP Exceptions
 
 .. autoexception:: HTTPException
 .. autoexception:: WSGIHTTPException
+.. autoexception:: PublicErrorContract
 .. autoexception:: HTTPError
 .. autoexception:: HTTPRedirection
 .. autoexception:: HTTPOk

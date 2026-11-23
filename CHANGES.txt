@@ -47,6 +47,19 @@ Security Fix
 Feature
 ~~~~~~~
 
+- Add ``webob.exc.PublicErrorContract``, an opt-in public error
+  representation contract for ``WSGIHTTPException``. When attached (via
+  the ``public_error_contract`` attribute or constructor keyword),
+  generated error responses are synthesized from approved values only:
+  ``detail``/``comment`` and non-approved environ or header values are
+  treated as protected identifiers and kept out of the response, while
+  the effective ``WWW-Authenticate``/``Retry-After`` headers and the
+  original HTTP status are preserved. Internal details are logged to the
+  contract's trusted logger under a correlation ``error_ref`` that is
+  also shown to the client. Format selection or synthesis failures fall
+  back to a minimal body that never renders the raw exception. When no
+  contract is attached, the legacy formatters are used unchanged.
+
 - Rename "master" git branch to "main"
 
 - Add support for Python 3.12.

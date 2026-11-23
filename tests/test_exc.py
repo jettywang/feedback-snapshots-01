@@ -674,3 +674,176 @@ def test_status_map_is_deterministic():
         (511, webob_exc.HTTPNetworkAuthenticationRequired),
     ):
         assert webob_exc.status_map[code] == cls
+
+
+class _ListLogger:
+    """Trusted log sink capturing internal correlation records."""
+
+    def __init__(self):
+        self.records = []
+
+    def error(self, msg, *args, **kwargs):
+        if args:
+            msg = msg % args
+        self.records.append((msg, kwargs.get("extra", {})))
+
+
+def _drive_wsgi(app, environ):
+    captured = {}
+
+    def start_response(status, headers, exc_info=None):
+        captured["status"] = status
+        captured["headers"] = list(headers)
+
+    body = b"".join(app(environ, start_response))
+
+    return captured["status"], captured["headers"], body
+
+
+def _public_environ(accept="application/json"):
+    return {
+        "wsgi.url_scheme": "http",
+        "SERVER_NAME": "localhost",
+        "SERVER_PORT": "80",
+        "REQUEST_METHOD": "GET",
+        "HTTP_ACCEPT": accept,
+        "HTTP_X_REQUEST_ID": "req-789",
+    }
+
+
+def test_public_error_contract_json_response():
+    logger = _ListLogger()
+    contract = webob_exc.PublicErrorContract(
+        allowed_environ={"request_id": "HTTP_X_REQUEST_ID"},
+        logger=logger,
+        error_ref_factory=lambda environ: "ref-abc123",
+    )
+    exc = webob_exc.HTTPUnauthorized(
+        detail="bad credentials for token=sekret-123",
+        headers=[
+            ("WWW-Authenticate", 'Bearer realm="api"'),
+            ("X-Internal-Trace", "trace-internal-456"),
+        ],
+        comment="internal note: lockout counter=3",
+        public_error_contract=contract,
+    )
+    status, headers, body = _drive_wsgi(exc, _public_environ("application/json"))
+    text = body.decode("utf-8")
+    header_names = [name.lower() for name, value in headers]
+
+    # original status and effective auth challenge are preserved
+    assert status == "401 Unauthorized"
+    assert ("WWW-Authenticate", 'Bearer realm="api"') in headers
+    assert ("Content-Type", "application/json") in headers
+    # non-approved extra headers are not copied
+    assert "x-internal-trace" not in header_names
+
+    payload = json.loads(text)
+    assert payload["status"] == "401 Unauthorized"
+    assert payload["title"] == "Unauthorized"
+    assert payload["error_ref"] == "ref-abc123"
+    # approved environ value is copied under its public name
+    assert payload["request_id"] == "req-789"
+    # protected identifiers never reach the public body
+    assert "sekret-123" not in text
+    assert "lockout counter" not in text
+    assert "trace-internal-456" not in text
+
+    # internal correlation record carries the protected identifiers
+    assert len(logger.records) == 1
+    message, extra = logger.records[0]
+    assert extra == {"error_ref": "ref-abc123"}
+    assert "ref-abc123" in message
+    assert "sekret-123" in message
+    assert "lockout counter=3" in message
+
+
+def test_public_error_contract_html_response():
+    logger = _ListLogger()
+    contract = webob_exc.PublicErrorContract(logger=logger)
+    exc = webob_exc.HTTPForbidden(
+        detail="user uid=42 hit acl deny on /admin",
+        public_detail="You are not allowed to access this resource.",
+        public_error_contract=contract,
+    )
+    status, headers, body = _drive_wsgi(exc, _public_environ("text/html"))
+    text = body.decode("utf-8")
+
+    assert status == "403 Forbidden"
+    assert ("Content-Type", "text/html; charset=UTF-8") in headers
+    assert "You are not allowed to access this resource." in text
+    assert "uid=42" not in text
+    # synthesis marker shows up in the public body and the trusted log
+    error_ref = logger.records[0][1]["error_ref"]
+    assert "Error reference: %s" % error_ref in text
+
+
+def test_public_error_contract_synthesis_failure_falls_back():
+    class BrokenContract(webob_exc.PublicErrorContract):
+        def format_json(self, values):
+            raise ValueError("cannot synthesize")
+
+    logger = _ListLogger()
+    contract = BrokenContract(
+        logger=logger, error_ref_factory=lambda environ: "ref-fallback"
+    )
+    exc = webob_exc.HTTPInternalServerError(
+        detail="database dsn=postgres://internal-host/db exploded",
+        public_error_contract=contract,
+    )
+    status, headers, body = _drive_wsgi(exc, _public_environ("application/json"))
+    text = body.decode("utf-8")
+
+    # the fallback does not present the raw exception
+    assert status == "500 Internal Server Error"
+    assert ("Content-Type", "text/plain; charset=UTF-8") in headers
+    assert "500 Internal Server Error" in text
+    assert "Error reference: ref-fallback" in text
+    assert "postgres://internal-host" not in text
+    # the internal correlation record was still written
+    assert logger.records[0][1] == {"error_ref": "ref-fallback"}
+    assert "postgres://internal-host" in logger.records[0][0]
+
+
+def test_public_error_contract_preserves_retry_after():
+    contract = webob_exc.PublicErrorContract(logger=_ListLogger())
+    exc = webob_exc.HTTPTooManyRequests(
+        detail="rate bucket b-99 exceeded",
+        headers=[("Retry-After", "30"), ("X-RateLimit-Internal", "bucket-b-99")],
+        public_error_contract=contract,
+    )
+    status, headers, body = _drive_wsgi(exc, _public_environ("application/json"))
+
+    assert status == "429 Too Many Requests"
+    assert ("Retry-After", "30") in headers
+    assert "x-ratelimit-internal" not in [name.lower() for name, _ in headers]
+    assert b"bucket-b-99" not in body
+
+
+def test_public_error_contract_allowed_headers():
+    contract = webob_exc.PublicErrorContract(
+        allowed_headers=["X-Request-Id"], logger=_ListLogger()
+    )
+    exc = webob_exc.HTTPBadRequest(
+        headers=[("X-Request-Id", "req-1"), ("X-Internal", "no")],
+        public_error_contract=contract,
+    )
+    status, headers, body = _drive_wsgi(exc, _public_environ("text/plain"))
+
+    assert ("X-Request-Id", "req-1") in headers
+    assert ("X-Internal", "no") not in headers
+
+
+def test_public_error_contract_disabled_uses_legacy_formatter():
+    exc = webob_exc.HTTPBadRequest(detail='Attribute "xyz" is invalid.')
+    status, headers, body = _drive_wsgi(exc, _public_environ("application/json"))
+    payload = json.loads(body.decode("utf-8"))
+
+    assert status == "400 Bad Request"
+    assert payload == {
+        "code": "400 Bad Request",
+        "title": "Bad Request",
+        "message": "The server could not comply with the request since it is "
+        "either malformed or otherwise incorrect.<br /><br />\n"
+        'Attribute "xyz" is invalid.\n\n',
+    }
