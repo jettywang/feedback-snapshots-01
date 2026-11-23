@@ -1,0 +1,134 @@
+[
+  {
+    "worker": "primary",
+    "sample_id": "compliant-at-target",
+    "verified": true,
+    "action": "keep",
+    "compliant": true,
+    "differs_from_worker_default": false,
+    "default_only_difference": false,
+    "digest_before": "$argon2id$v=19$m=64,t=2,p=4$dGFyZ2V0LXNhbHQtMDAwMQ$BIH0shgP+ZA",
+    "digest_after": null
+  },
+  {
+    "worker": "primary",
+    "sample_id": "legacy-v18-argon2i",
+    "verified": true,
+    "action": "upgrade",
+    "compliant": false,
+    "differs_from_worker_default": true,
+    "default_only_difference": false,
+    "digest_before": "$argon2i$v=18$m=64,t=2,p=1$bGVnYWN5LXNhbHQtMDAwMQ$XmpaHNq4dkU",
+    "digest_after": "$argon2id$v=19$m=64,t=2,p=4$bGVnYWN5LW5ldy0wMDAwMQ$+WK2X4UBv3g"
+  },
+  {
+    "worker": "primary",
+    "sample_id": "matches-edge-defaults",
+    "verified": true,
+    "action": "upgrade",
+    "compliant": false,
+    "differs_from_worker_default": true,
+    "default_only_difference": false,
+    "digest_before": "$argon2id$v=19$m=64,t=2,p=1$ZGVmYXVsdC1zYWx0LTAwMQ$0ecF48VazxY",
+    "digest_after": "$argon2id$v=19$m=64,t=2,p=4$ZGVmYXVsdC1uZXctMDAwMQ$WtJaCl/egnY"
+  },
+  {
+    "worker": "primary",
+    "sample_id": "stronger-than-target",
+    "verified": true,
+    "action": "keep",
+    "compliant": true,
+    "differs_from_worker_default": true,
+    "default_only_difference": false,
+    "digest_before": "$argon2id$v=19$m=64,t=3,p=4$c3Ryb25nLXNhbHQtMDAwMQ$WvQvll6gXL4",
+    "digest_after": null
+  },
+  {
+    "worker": "primary",
+    "sample_id": "needs-cost-upgrade",
+    "verified": true,
+    "action": "upgrade",
+    "compliant": false,
+    "differs_from_worker_default": true,
+    "default_only_difference": false,
+    "digest_before": "$argon2id$v=19$m=32,t=1,p=1$d2Vhay1zYWx0LTAwMDAwMQ$TYSnjG99ZUI",
+    "digest_after": "$argon2id$v=19$m=64,t=2,p=4$Y29zdC11cGdyYWRlLTAwMQ$oe3JXZEjRmw"
+  },
+  {
+    "worker": "primary",
+    "sample_id": "short-salt",
+    "verified": true,
+    "action": "upgrade",
+    "compliant": false,
+    "differs_from_worker_default": true,
+    "default_only_difference": false,
+    "digest_before": "$argon2id$v=19$m=64,t=2,p=4$c2hvcnQtc2w$nKkGKNYQjTQ",
+    "digest_after": "$argon2id$v=19$m=64,t=2,p=4$c2FsdHktbmV3LTAwMDAwMQ$9QCN8WQItGY"
+  },
+  {
+    "worker": "edge",
+    "sample_id": "compliant-at-target",
+    "verified": true,
+    "action": "keep",
+    "compliant": true,
+    "differs_from_worker_default": true,
+    "default_only_difference": true,
+    "digest_before": "$argon2id$v=19$m=64,t=2,p=4$dGFyZ2V0LXNhbHQtMDAwMQ$BIH0shgP+ZA",
+    "digest_after": null
+  },
+  {
+    "worker": "edge",
+    "sample_id": "legacy-v18-argon2i",
+    "verified": true,
+    "action": "defer",
+    "compliant": false,
+    "differs_from_worker_default": true,
+    "default_only_difference": false,
+    "digest_before": "$argon2i$v=18$m=64,t=2,p=1$bGVnYWN5LXNhbHQtMDAwMQ$XmpaHNq4dkU",
+    "digest_after": null
+  },
+  {
+    "worker": "edge",
+    "sample_id": "matches-edge-defaults",
+    "verified": true,
+    "action": "defer",
+    "compliant": false,
+    "differs_from_worker_default": false,
+    "default_only_difference": false,
+    "digest_before": "$argon2id$v=19$m=64,t=2,p=1$ZGVmYXVsdC1zYWx0LTAwMQ$0ecF48VazxY",
+    "digest_after": null
+  },
+  {
+    "worker": "edge",
+    "sample_id": "stronger-than-target",
+    "verified": true,
+    "action": "keep",
+    "compliant": true,
+    "differs_from_worker_default": true,
+    "default_only_difference": false,
+    "digest_before": "$argon2id$v=19$m=64,t=3,p=4$c3Ryb25nLXNhbHQtMDAwMQ$WvQvll6gXL4",
+    "digest_after": null
+  },
+  {
+    "worker": "edge",
+    "sample_id": "needs-cost-upgrade",
+    "verified": true,
+    "action": "defer",
+    "compliant": false,
+    "differs_from_worker_default": true,
+    "default_only_difference": false,
+    "digest_before": "$argon2id$v=19$m=32,t=1,p=1$d2Vhay1zYWx0LTAwMDAwMQ$TYSnjG99ZUI",
+    "digest_after": null
+  },
+  {
+    "worker": "edge",
+    "sample_id": "short-salt",
+    "verified": true,
+    "action": "defer",
+    "compliant": false,
+    "differs_from_worker_default": true,
+    "default_only_difference": false,
+    "digest_before": "$argon2id$v=19$m=64,t=2,p=4$c2hvcnQtc2w$nKkGKNYQjTQ",
+    "digest_after": null
+  }
+]

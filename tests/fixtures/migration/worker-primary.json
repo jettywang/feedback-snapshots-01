@@ -1,0 +1,22 @@
+{
+  "name": "primary",
+  "comment": "Server-side worker. Its defaults are the application target.",
+  "defaults": {
+    "type": "id",
+    "version": 19,
+    "salt_len": 16,
+    "hash_len": 8,
+    "time_cost": 2,
+    "memory_cost": 64,
+    "parallelism": 4
+  },
+  "capacity": {
+    "type": "id",
+    "version": 19,
+    "salt_len": 16,
+    "hash_len": 8,
+    "time_cost": 2,
+    "memory_cost": 64,
+    "parallelism": 4
+  }
+}

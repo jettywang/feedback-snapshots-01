@@ -1,0 +1,108 @@
+[
+  {
+    "sample_id": "compliant-at-target",
+    "comment": "Exactly the application target; must never be rewritten.",
+    "password_utf8": "synthetic-compliant",
+    "salt_b64": "dGFyZ2V0LXNhbHQtMDAwMQ==",
+    "digest": "$argon2id$v=19$m=64,t=2,p=4$dGFyZ2V0LXNhbHQtMDAwMQ$BIH0shgP+ZA",
+    "migration_salt_b64": "dGFyZ2V0LW5ldy0wMDAwMQ==",
+    "parameters": {
+      "type": "id",
+      "version": 19,
+      "salt_len": 16,
+      "hash_len": 8,
+      "time_cost": 2,
+      "memory_cost": 64,
+      "parallelism": 4
+    }
+  },
+  {
+    "sample_id": "legacy-v18-argon2i",
+    "comment": "Readable but obsolete variant and version; below target on type, version and parallelism.",
+    "password_utf8": "synthetic-legacy-v18",
+    "salt_b64": "bGVnYWN5LXNhbHQtMDAwMQ==",
+    "digest": "$argon2i$v=18$m=64,t=2,p=1$bGVnYWN5LXNhbHQtMDAwMQ$XmpaHNq4dkU",
+    "migration_salt_b64": "bGVnYWN5LW5ldy0wMDAwMQ==",
+    "migrated_target_digest": "$argon2id$v=19$m=64,t=2,p=4$bGVnYWN5LW5ldy0wMDAwMQ$+WK2X4UBv3g",
+    "parameters": {
+      "type": "i",
+      "version": 18,
+      "salt_len": 16,
+      "hash_len": 8,
+      "time_cost": 2,
+      "memory_cost": 64,
+      "parallelism": 1
+    }
+  },
+  {
+    "sample_id": "matches-edge-defaults",
+    "comment": "Below target but identical to the edge worker's defaults; check_needs_rehash() alone would keep it there forever.",
+    "password_utf8": "synthetic-defaults",
+    "salt_b64": "ZGVmYXVsdC1zYWx0LTAwMQ==",
+    "digest": "$argon2id$v=19$m=64,t=2,p=1$ZGVmYXVsdC1zYWx0LTAwMQ$0ecF48VazxY",
+    "migration_salt_b64": "ZGVmYXVsdC1uZXctMDAwMQ==",
+    "migrated_target_digest": "$argon2id$v=19$m=64,t=2,p=4$ZGVmYXVsdC1uZXctMDAwMQ$WtJaCl/egnY",
+    "parameters": {
+      "type": "id",
+      "version": 19,
+      "salt_len": 16,
+      "hash_len": 8,
+      "time_cost": 2,
+      "memory_cost": 64,
+      "parallelism": 1
+    }
+  },
+  {
+    "sample_id": "stronger-than-target",
+    "comment": "Compliant but differs from both workers' defaults; stronger time cost must not be lowered.",
+    "password_utf8": "synthetic-stronger",
+    "salt_b64": "c3Ryb25nLXNhbHQtMDAwMQ==",
+    "digest": "$argon2id$v=19$m=64,t=3,p=4$c3Ryb25nLXNhbHQtMDAwMQ$WvQvll6gXL4",
+    "migration_salt_b64": "c3Ryb25nZXItbmV3LTAwMQ==",
+    "parameters": {
+      "type": "id",
+      "version": 19,
+      "salt_len": 16,
+      "hash_len": 8,
+      "time_cost": 3,
+      "memory_cost": 64,
+      "parallelism": 4
+    }
+  },
+  {
+    "sample_id": "needs-cost-upgrade",
+    "comment": "Verifiable but below target on time, memory and parallelism; upgradable on either worker.",
+    "password_utf8": "synthetic-needs-cost",
+    "salt_b64": "d2Vhay1zYWx0LTAwMDAwMQ==",
+    "digest": "$argon2id$v=19$m=32,t=1,p=1$d2Vhay1zYWx0LTAwMDAwMQ$TYSnjG99ZUI",
+    "migration_salt_b64": "Y29zdC11cGdyYWRlLTAwMQ==",
+    "migrated_target_digest": "$argon2id$v=19$m=64,t=2,p=4$Y29zdC11cGdyYWRlLTAwMQ$oe3JXZEjRmw",
+    "parameters": {
+      "type": "id",
+      "version": 19,
+      "salt_len": 16,
+      "hash_len": 8,
+      "time_cost": 1,
+      "memory_cost": 32,
+      "parallelism": 1
+    }
+  },
+  {
+    "sample_id": "short-salt",
+    "comment": "Verifiable but below target only in salt length; must wait for a capable worker instead of being rewritten with the short salt.",
+    "password_utf8": "synthetic-short-salt",
+    "salt_b64": "c2hvcnQtc2w=",
+    "digest": "$argon2id$v=19$m=64,t=2,p=4$c2hvcnQtc2w$nKkGKNYQjTQ",
+    "migration_salt_b64": "c2FsdHktbmV3LTAwMDAwMQ==",
+    "migrated_target_digest": "$argon2id$v=19$m=64,t=2,p=4$c2FsdHktbmV3LTAwMDAwMQ$9QCN8WQItGY",
+    "parameters": {
+      "type": "id",
+      "version": 19,
+      "salt_len": 8,
+      "hash_len": 8,
+      "time_cost": 2,
+      "memory_cost": 64,
+      "parallelism": 4
+    }
+  }
+]

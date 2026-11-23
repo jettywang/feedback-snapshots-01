@@ -1,0 +1,22 @@
+{
+  "name": "edge",
+  "comment": "Single-threaded worker. Differs from the primary worker only locally, in parallelism.",
+  "defaults": {
+    "type": "id",
+    "version": 19,
+    "salt_len": 16,
+    "hash_len": 8,
+    "time_cost": 2,
+    "memory_cost": 64,
+    "parallelism": 1
+  },
+  "capacity": {
+    "type": "id",
+    "version": 19,
+    "salt_len": 16,
+    "hash_len": 8,
+    "time_cost": 2,
+    "memory_cost": 64,
+    "parallelism": 1
+  }
+}

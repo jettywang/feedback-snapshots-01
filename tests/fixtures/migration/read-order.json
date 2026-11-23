@@ -1,0 +1,8 @@
+[
+  "compliant-at-target",
+  "legacy-v18-argon2i",
+  "matches-edge-defaults",
+  "stronger-than-target",
+  "needs-cost-upgrade",
+  "short-salt"
+]
