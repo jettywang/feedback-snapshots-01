@@ -122,6 +122,28 @@ class CacheSupport:
             )
         return True
 
+    def enforce_ex_with_attributes(self, *rvals, attributes=None):
+        """evaluates against a caller-supplied attribute view, never from the cache.
+
+        A cached decision is keyed on the request values, and the cache cannot
+        tell one version of an attribute bag from another.  Serving a decision
+        made against an older view would defeat the point of asking for a
+        consistent one, so this entry point always evaluates.
+        """
+        return self._enforce_ex_with_view(rvals, attributes)
+
+    def enforce_with_attributes(self, *rvals, attributes=None):
+        """decides one request against a caller-supplied attribute view."""
+        return self.enforce_ex_with_attributes(*rvals, attributes=attributes)[0]
+
+    def enforce_with_attribute_view(self, *rvals, attributes=None):
+        """alias of enforce_with_attributes()."""
+        return self.enforce_with_attributes(*rvals, attributes=attributes)
+
+    def enforce_ex_with_attribute_view(self, *rvals, attributes=None):
+        """alias of enforce_ex_with_attributes()."""
+        return self.enforce_ex_with_attributes(*rvals, attributes=attributes)
+
     def enforce_ex(self, *rvals):
         """decides whether a "subject" can access a "object" with the operation "action",
         serving the answer from the cache when the same request was decided before.

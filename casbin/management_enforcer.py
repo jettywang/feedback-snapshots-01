@@ -344,4 +344,7 @@ class ManagementEnforcer(InternalEnforcer):
 
     def add_function(self, name, func):
         """adds a customized function."""
+        # A callback may mutate the attribute value it is given; decisions made
+        # through an attribute view then isolate the values per policy row.
+        self._has_custom_functions = True
         self.fm.add_function(name, func)

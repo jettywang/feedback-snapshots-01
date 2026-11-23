@@ -281,6 +281,26 @@ class SyncedEnforcer:
         with self._rl:
             return self._e.enforce_ex(*rvals)
 
+    def enforce_with_attributes(self, *rvals, attributes=None):
+        """decides one request against a caller-supplied attribute view."""
+        with self._rl:
+            return self._e.enforce_with_attributes(*rvals, attributes=attributes)
+
+    def enforce_ex_with_attributes(self, *rvals, attributes=None):
+        """evaluates one request against one consistent attribute view."""
+        with self._rl:
+            return self._e.enforce_ex_with_attributes(*rvals, attributes=attributes)
+
+    def enforce_with_attribute_view(self, *rvals, attributes=None):
+        """alias of enforce_with_attributes()."""
+        with self._rl:
+            return self._e.enforce_with_attributes(*rvals, attributes=attributes)
+
+    def enforce_ex_with_attribute_view(self, *rvals, attributes=None):
+        """alias of enforce_ex_with_attributes()."""
+        with self._rl:
+            return self._e.enforce_ex_with_attributes(*rvals, attributes=attributes)
+
     def batch_enforce(self, rvals):
         """batch_enforce enforce in batches,
         input parameters are usually: [(sub, obj, act), (sub, obj, act), ...].

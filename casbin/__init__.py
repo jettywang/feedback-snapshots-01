@@ -12,6 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from .attribute import (
+    AttributeDecision,
+    AttributeExplanation,
+    AttributeView,
+    capture_attributes,
+    current_attribute_view,
+    current_attributes,
+)
 from .enforcer import *
 from .policy_index import PolicyIndex
 from .synced_enforcer import SyncedEnforcer

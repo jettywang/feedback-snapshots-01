@@ -40,6 +40,8 @@ class AsyncInternalEnforcer(CoreEnforcer):
         self.model = m
         self.model.print_model()
         self.fm = FunctionMap.load_function_map()
+        self._default_functions = dict(self.fm.get_functions())
+        self._has_custom_functions = False
 
         self._initialize()
 

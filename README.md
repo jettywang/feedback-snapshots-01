@@ -42,6 +42,7 @@ Casbin is a powerful and efficient open-source access control library for Python
 - [Policy management](#policy-management)
 - [Policy persistence](#policy-persistence)
 - [Role manager](#role-manager)
+- [One attribute view per decision](#one-attribute-view-per-decision)
 - [Async Enforcer](#async-enforcer)
 - [Benchmarks](#benchmarks)
 - [Logging](#logging)
@@ -210,6 +211,51 @@ https://casbin.apache.org/docs/adapters/
 ## Role manager
 
 https://casbin.apache.org/docs/role-managers/
+
+## One attribute view per decision
+
+ABAC requests pass ordinary Python objects to the matcher, and applications often
+keep updating those objects. `enforce_with_attributes()` and
+`enforce_ex_with_attributes()` evaluate one decision against one captured version
+of the request attributes: every policy row, every matcher (including named
+matchers selected with an `EnforceContext`) and every registered custom function
+sees the same version.
+
+```python
+from casbin import AttributeView
+
+document = load_document()  # a mutable object with an Owner attribute
+view = AttributeView.capture("alice", document, "read")
+
+document.Owner = "bob"  # a later update must not change this decision
+
+allowed = e.enforce_with_attributes(view)
+allowed, explanation = e.enforce_ex_with_attributes(view)
+print(explanation.attributes["r.obj"].Owner)  # "alice"
+print(explanation.attributes.version)         # which version this decision used
+```
+
+Without a view the new entry points capture the values themselves, so a later
+call observes updates:
+
+```python
+e.enforce_with_attributes("alice", document, "read")  # captures now
+```
+
+`AttributeView.from_mapping({...})` binds values by request token name, and
+`AttributeView.live(*rvals)` opts out of copying when the caller has already
+frozen the objects.
+
+The plain `enforce()` / `enforce_ex()` entry points keep receiving the caller's
+objects unchanged, so old requests and existing custom functions keep working.
+A custom function registered with `add_function()` keeps its usual arguments; on
+the attribute-view path those arguments are values from the view. Functions that
+need to inspect the view explicitly can call `casbin.current_attribute_view()`,
+which returns `None` outside the attribute-view entry point. Functions that rely
+on object identity are outside the consistency guarantee, and a function that
+mutates its argument sees only its own copy: on the attribute-view path each
+policy row is evaluated with a fresh copy of the captured values, so one callback
+cannot affect the next row or the caller's objects.
 
 ## Async Enforcer
 

@@ -29,6 +29,12 @@ from casbin.persist.adapters import FileAdapter
 from casbin.policy_index import PolicyIndex, policy_matches_bucket
 from casbin.rbac import default_role_manager
 from casbin.util import generate_g_function, SimpleEval, util, generate_conditional_g_function, key_match
+from casbin.attribute import (
+    AttributeDecision,
+    AttributeExplanation,
+    AttributeView,
+    use_attribute_view,
+)
 from casbin.util.log import configure_logging, disabled_logging
 
 
@@ -70,6 +76,8 @@ class CoreEnforcer:
         self.logger = logging.getLogger("casbin.enforcer")
         self._policy_indexes = {}
         self._policy_deny_cache = {}
+        self._has_custom_functions = False
+        self._default_functions = None
         if isinstance(model, str):
             if isinstance(adapter, str):
                 self.init_with_file(model, adapter)
@@ -110,6 +118,7 @@ class CoreEnforcer:
         self.model = m
         self.model.print_model()
         self.fm = FunctionMap.load_function_map()
+        self._default_functions = dict(self.fm.get_functions())
 
         self._initialize()
 
@@ -152,6 +161,8 @@ class CoreEnforcer:
         self.model.load_model(self.model_path)
         self.model.print_model()
         self.fm = FunctionMap.load_function_map()
+        self._default_functions = dict(self.fm.get_functions())
+        self._has_custom_functions = False
         self._reset_policy_caches()
 
     def get_model(self):
@@ -164,6 +175,8 @@ class CoreEnforcer:
 
         self.model = m
         self.fm = FunctionMap.load_function_map()
+        self._default_functions = dict(self.fm.get_functions())
+        self._has_custom_functions = False
         self._reset_policy_caches()
 
     def get_adapter(self):
@@ -504,19 +517,169 @@ class CoreEnforcer:
         result, _ = self.enforce_ex(*rvals)
         return result
 
+    def enforce_with_attributes(self, *rvals, attributes=None):
+        """decides one request against a caller-supplied attribute view.
+
+        The view is the single version of the request attributes used by the
+        whole decision.  Either pass an :class:`casbin.AttributeView` as the
+        first argument, pass one (or a ``{token: value}`` mapping) through
+        ``attributes``, or pass ordinary request values and let the enforcer
+        capture them before it evaluates the first policy row.  A later call
+        captures a new view, so updates to the caller's objects are observed
+        by the next decision.
+        """
+        result, _ = self.enforce_ex_with_attributes(*rvals, attributes=attributes)
+        return result
+
+    def enforce_ex_with_attributes(self, *rvals, attributes=None):
+        """evaluates one request against one consistent attribute view.
+
+        Returns an :class:`casbin.AttributeDecision`, which unpacks like the
+        historical ``(allowed, explanation)`` pair.  The explanation carries
+        the same view in ``explanation.attributes``, and the decision exposes
+        it as ``decision.attributes``.
+        """
+        return self._enforce_ex_with_view(rvals, attributes)
+
+    # The naming below is kept as an explicit alias: an "attribute view" is the
+    # object the caller holds, so both spellings describe the same entry point.
+    def enforce_with_attribute_view(self, *rvals, attributes=None):
+        """alias of enforce_with_attributes()."""
+        return self.enforce_with_attributes(*rvals, attributes=attributes)
+
+    def enforce_ex_with_attribute_view(self, *rvals, attributes=None):
+        """alias of enforce_ex_with_attributes()."""
+        return self.enforce_ex_with_attributes(*rvals, attributes=attributes)
+
     def enforce_ex(self, *rvals):
         """decides whether a "subject" can access a "object" with the operation "action",
         input parameters are usually: (sub, obj, act).
         return judge result with reason
+
+        This is the historical entry point: request objects are passed through
+        as they are.  When the first argument is an AttributeView the call is
+        routed to enforce_ex_with_attributes(), which is the only entry point
+        that promises a frozen attribute version.
         """
-
-        rtype = "r"
-        ptype = "p"
-        etype = "e"
-        mtype = "m"
-
         if not self.enabled:
             return [True, []]
+
+        _, embedded, _ = self._split_attribute_inputs(rvals)
+        if embedded is not None:
+            decision = self.enforce_ex_with_attributes(*rvals)
+            return decision[0], decision[1]
+
+        result, explain, _ = self._enforce_ex(rvals, None)
+        return result, explain
+
+    def _enforce_ex_with_view(self, rvals, attributes):
+        """resolves the caller's inputs and evaluates one decision on one view."""
+        context, embedded, rvals = self._split_attribute_inputs(rvals)
+
+        view = embedded if attributes is None else self._coerce_attribute_view(attributes)
+        if view is None:
+            view = AttributeView.capture(*rvals)
+        elif rvals and len(view) != len(rvals):
+            # With an explicit view, the view is the request.  The values are
+            # not compared with the live arguments: the whole point is that the
+            # caller's objects may already have moved on.
+            raise RuntimeError("invalid request size")
+
+        return self._evaluate_with_view(context, view)
+
+    @staticmethod
+    def _split_attribute_inputs(rvals):
+        """pops a leading EnforceContext and AttributeView, in either order.
+
+        Every other value stays in ``rvals``.  This is what lets the default
+        entry points keep receiving the caller's objects unchanged.
+        """
+        context = None
+        view = None
+        rvals = tuple(rvals)
+        while rvals:
+            first = rvals[0]
+            if context is None and isinstance(first, EnforceContext):
+                context = first
+            elif view is None and isinstance(first, AttributeView):
+                view = first
+            else:
+                break
+            rvals = rvals[1:]
+        return context, view, rvals
+
+    def _evaluate_with_view(self, context, view):
+        """binds a view to the request definition and decides one request."""
+        rtype = context.rtype if context is not None else "r"
+        ptype = context.ptype if context is not None else "p"
+        etype = context.etype if context is not None else "e"
+        mtype = context.mtype if context is not None else "m"
+
+        tokens = self.model["r"][rtype].tokens
+        if view.tokens != tuple(tokens):
+            # Mapping-based views may be ordered differently, and a view built
+            # for another request definition needs its values relabelled.  A
+            # capture already bound to this definition is used as it is.
+            view = view.bind(tokens)
+
+        result, explain, _ = self._enforce_ex((), view, rtype=rtype, ptype=ptype, etype=etype, mtype=mtype)
+        return AttributeDecision(result, AttributeExplanation(explain, view), view)
+
+    @staticmethod
+    def _isolate_row_values(values):
+        """a copy of the captured values for one policy row.
+
+        A custom function can write into the argument it receives.  Giving each
+        row its own copy keeps that write out of the next row and out of the
+        caller's objects.  If the values cannot be copied, the captured values
+        are used; ``AttributeView.isolated`` reports the same limitation for the
+        view as a whole.
+        """
+        try:
+            return copy.deepcopy(values)
+        except Exception:
+            return values
+
+    def _uses_custom_functions(self):
+        """reports whether the function map differs from the built-in one.
+
+        ``add_function()`` sets the flag; comparing against the map captured
+        at load time also notices a function installed directly on ``fm`` or a
+        built-in name that was replaced.  A custom function may mutate the
+        value it is given, so the attribute-view path isolates each row then.
+        """
+        if getattr(self, "_has_custom_functions", False):
+            return True
+        default = getattr(self, "_default_functions", None)
+        if default is None or self.fm is None:
+            return False
+        return self.fm.get_functions() != default
+
+    @staticmethod
+    def _coerce_attribute_view(attributes):
+        """turns the supported attribute inputs into one AttributeView."""
+        if attributes is None:
+            return None
+        if isinstance(attributes, AttributeView):
+            return attributes
+        if hasattr(attributes, "keys") and hasattr(attributes, "__getitem__"):
+            return AttributeView.from_mapping(attributes)
+        raise TypeError("attributes must be an AttributeView or a mapping of request tokens to values")
+
+    def _enforce_ex(self, rvals, view=None, rtype="r", ptype="p", etype="e", mtype="m"):
+        """the shared evaluation path.
+
+        With ``view`` None this is the historical behaviour: the request values
+        are used as supplied.  With a view, every policy row reads the captured
+        values.  When the model has custom functions, each row gets a fresh
+        copy, so a callback that writes into an argument cannot make a later
+        row disagree with an earlier one.
+        """
+
+        if not self.enabled:
+            if view is None:
+                return True, [], None
+            return True, [], view
 
         functions = self.fm.get_functions()
 
@@ -527,7 +690,13 @@ class CoreEnforcer:
                 if ast.cond_rm is not None:
                     functions[key] = generate_conditional_g_function(ast.cond_rm)
 
-        if len(rvals) != 0:
+        if view is not None:
+            r_tokens = self.model["r"][rtype].tokens
+            if view.tokens != tuple(r_tokens):
+                view = view.bind(r_tokens)
+            # The view is the request; there is no separate context value in it.
+            rvals = view.values
+        elif len(rvals) != 0:
             if isinstance(rvals[0], EnforceContext):
                 enforce_context = rvals[0]
                 rtype = enforce_context.rtype
@@ -575,6 +744,24 @@ class CoreEnforcer:
 
         explain_index = -1
         allow_index = -1
+        # A custom function may write into the value it is given.  With a view,
+        # each policy row gets a fresh copy so that the next row, and the next
+        # matcher, still see the captured version rather than a mutation made
+        # while deciding an unrelated rule.
+        branch_values = view.values if view is not None else None
+        custom_functions = self._uses_custom_functions()
+        isolate_rows = branch_values is not None and custom_functions
+
+        def build_parameters():
+            if branch_values is None or not isolate_rows:
+                return dict(r_parameters, **p_parameters)
+            return dict(zip(r_tokens, self._isolate_row_values(branch_values)), **p_parameters)
+
+        def isolate_parameters():
+            if view is None or not custom_functions:
+                return r_parameters.copy()
+            return dict(zip(r_tokens, self._isolate_row_values(view.values)))
+
         if not 0 == policy_len:
             for i, pvals in enumerate(self.model["p"][ptype].policy):
                 if len(p_tokens) != len(pvals):
@@ -584,13 +771,17 @@ class CoreEnforcer:
                     continue
 
                 p_parameters = dict(zip(p_tokens, pvals))
-                parameters = dict(r_parameters, **p_parameters)
+                parameters = build_parameters()
 
                 if exp_has_eval:
                     rules = tuple(p_parameters[rule_name] for rule_name in rule_names)
                     expression.set_expr(self._get_eval_expression(exp_string, rules))
 
-                result = expression.eval(parameters)
+                if view is not None:
+                    with use_attribute_view(view):
+                        result = expression.eval(parameters)
+                else:
+                    result = expression.eval(parameters)
 
                 if isinstance(result, bool):
                     if not result:
@@ -630,12 +821,16 @@ class CoreEnforcer:
             if exp_has_eval:
                 raise RuntimeError("please make sure rule exists in policy when using eval() in matcher")
 
-            parameters = r_parameters.copy()
+            parameters = isolate_parameters()
 
             for token in self.model["p"][ptype].tokens:
                 parameters[token] = ""
 
-            result = expression.eval(parameters)
+            if view is not None:
+                with use_attribute_view(view):
+                    result = expression.eval(parameters)
+            else:
+                result = expression.eval(parameters)
 
             if result:
                 policy_effects.add(Effector.ALLOW)
@@ -665,7 +860,7 @@ class CoreEnforcer:
         if explain_index != -1 and explain_index < policy_len:
             explain_rule = list(self.model["p"][ptype].policy[explain_index])
 
-        return result, explain_rule
+        return result, explain_rule, view
 
     def batch_enforce(self, rvals):
         """batch_enforce enforce in batches"""

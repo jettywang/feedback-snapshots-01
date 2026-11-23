@@ -305,4 +305,5 @@ class AsyncManagementEnforcer(AsyncInternalEnforcer):
 
     def add_function(self, name, func):
         """adds a customized function."""
+        self._has_custom_functions = True
         self.fm.add_function(name, func)
