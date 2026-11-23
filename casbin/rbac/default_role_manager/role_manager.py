@@ -423,17 +423,29 @@ class ConditionalRoleManager(RoleManager, CRM):
             link_condition_func = self.get_link_condition_func(current_role.name, next_role.name)
             if link_condition_func is not None:
                 params = self.get_link_condition_func_params(current_role.name, next_role.name)
-                pass_link_condition_func = link_condition_func(*params)
+                pass_link_condition_func = self._link_condition_passed(link_condition_func(*params))
         else:
             link_condition_func = self.get_domain_link_condition_func(current_role.name, next_role.name, domains[0])
             if link_condition_func is not None:
                 params = self.get_link_condition_func_params(current_role.name, next_role.name, domains)
-                pass_link_condition_func = link_condition_func(*params)
+                pass_link_condition_func = self._link_condition_passed(link_condition_func(*params))
 
         if pass_link_condition_func:
             next_roles.append(next_role)
 
         return next_roles
+
+    @staticmethod
+    def _link_condition_passed(result):
+        """Interprets the return value of a link condition function.
+
+        Only a real boolean True opens the link. False, None or any other value means
+        the condition did not reach a conclusion, so the link stays closed instead of
+        being treated as a grant. Exceptions raised by the function itself are not
+        caught here: they propagate so that a broken condition cannot be mistaken for
+        a deliberate denial.
+        """
+        return result is True
 
     def get_link_condition_func(self, user_name, role_name):
         """get_link_condition_func get link_condition_func based on userName, roleName"""

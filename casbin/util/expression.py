@@ -52,6 +52,39 @@ class SimpleEval(EvalWithCompoundTypes):
 
         return self._eval(self.ast_parsed_value)
 
+    def _eval_boolop(self, node):
+        """Evaluate ``&&``/``||`` the way a boolean matcher should.
+
+        Both operands must be real booleans. Python's truthiness would accept a
+        non-empty string, a number or any other object as a grant, and because
+        ``and`` short-circuits, that could also skip a later explicit deny rule.
+        A non-boolean operand has not reached a conclusion, so it is treated as
+        false here; exceptions raised by a callback still propagate unchanged.
+        """
+        if isinstance(node.op, ast.And):
+            for value in node.values:
+                if self._eval(value) is not True:
+                    return False
+            return True
+        if isinstance(node.op, ast.Or):
+            for value in node.values:
+                if self._eval(value) is True:
+                    return True
+            return False
+        return super(SimpleEval, self)._eval_boolop(node)
+
+    def _eval_unaryop(self, node):
+        """Negate only real booleans; a value that never reached a conclusion
+        cannot become a grant just because it is falsy under Python truthiness."""
+        if isinstance(node.op, ast.Not):
+            value = self._eval(node.operand)
+            if value is True:
+                return False
+            if value is False:
+                return True
+            return False
+        return super(SimpleEval, self)._eval_unaryop(node)
+
     def _eval_name(self, node):
         try:
             return super(SimpleEval, self)._eval_name(node)

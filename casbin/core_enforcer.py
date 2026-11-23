@@ -592,16 +592,9 @@ class CoreEnforcer:
 
                 result = expression.eval(parameters)
 
-                if isinstance(result, bool):
-                    if not result:
-                        policy_effects.add(Effector.INDETERMINATE)
-                        continue
-                elif isinstance(result, float):
-                    if 0 == result:
-                        policy_effects.add(Effector.INDETERMINATE)
-                        continue
-                else:
-                    raise RuntimeError("matcher result should be bool, int or float")
+                if not self._matcher_result_is_true(result):
+                    policy_effects.add(Effector.INDETERMINATE)
+                    continue
 
                 p_eft_key = ptype + "_eft"
                 if p_eft_key in parameters.keys():
@@ -637,7 +630,8 @@ class CoreEnforcer:
 
             result = expression.eval(parameters)
 
-            if result:
+            is_allow = self._matcher_result_is_true(result)
+            if is_allow:
                 policy_effects.add(Effector.ALLOW)
             else:
                 policy_effects.add(Effector.INDETERMINATE)
@@ -679,6 +673,21 @@ class CoreEnforcer:
     def configure_logging(logging_config=None):
         """configure_logging configure the default logger for casbin"""
         configure_logging(logging_config)
+
+    @staticmethod
+    def _matcher_result_is_true(result):
+        """Turns the value produced by the matcher into a grant or no conclusion.
+
+        Only a real boolean True grants access; False means the rule did not match.
+        A float is kept as a score for backwards compatibility with older matchers.
+        Anything else did not reach a conclusion and keeps the existing error
+        interface rather than being read as either an allow or a denial.
+        """
+        if isinstance(result, bool):
+            return result
+        if isinstance(result, float):
+            return result != 0
+        raise RuntimeError("matcher result should be bool, int or float")
 
     @staticmethod
     def _get_expression(expr, functions=None):
