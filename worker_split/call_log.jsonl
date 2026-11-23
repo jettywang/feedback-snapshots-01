@@ -1,0 +1,13 @@
+{"ts": 1795453223.561, "worker": "online-verify", "call": "verify", "touches_secret": true, "outcome": "VerifyMismatchError", "detail": "The password does not match the supplied hash"}
+{"ts": 1795453223.562, "worker": "offline-audit", "call": "extract_parameters", "touches_secret": false, "outcome": "ok", "detail": ""}
+{"ts": 1795453223.562, "worker": "offline-audit", "call": "check_needs_rehash", "touches_secret": false, "outcome": "ok:True", "detail": ""}
+{"ts": 1795453223.562, "worker": "offline-audit", "call": "check_needs_rehash", "touches_secret": false, "outcome": "ok:True", "detail": ""}
+{"ts": 1795453223.601, "worker": "online-verify", "call": "verify", "touches_secret": true, "outcome": "ok", "detail": ""}
+{"ts": 1795453223.601, "worker": "offline-audit", "call": "extract_parameters", "touches_secret": false, "outcome": "ok", "detail": ""}
+{"ts": 1795453223.601, "worker": "offline-audit", "call": "check_needs_rehash", "touches_secret": false, "outcome": "ok:False", "detail": ""}
+{"ts": 1795453223.601, "worker": "offline-audit", "call": "check_needs_rehash", "touches_secret": false, "outcome": "ok:False", "detail": ""}
+{"ts": 1795453223.601, "worker": "online-verify", "call": "verify", "touches_secret": true, "outcome": "ok", "detail": ""}
+{"ts": 1795453223.601, "worker": "offline-audit", "call": "extract_parameters", "touches_secret": false, "outcome": "ok", "detail": ""}
+{"ts": 1795453223.601, "worker": "offline-audit", "call": "check_needs_rehash", "touches_secret": false, "outcome": "ok:True", "detail": ""}
+{"ts": 1795453223.601, "worker": "offline-audit", "call": "check_needs_rehash", "touches_secret": false, "outcome": "ok:True", "detail": ""}
+{"ts": 1795453223.672, "worker": "upgrade-job", "call": "hash", "touches_secret": true, "outcome": "ok", "detail": ""}
