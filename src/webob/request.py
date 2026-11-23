@@ -38,6 +38,7 @@ from webob.descriptors import (
 from webob.etag import AnyETag, IfRange, NoETag, etag_property
 from webob.headers import EnvironHeaders
 from webob.multidict import GetDict, MultiDict, NestedMultiDict, NoVars
+from webob.trustedproxy import TrustedExternalView, TrustedProxyPolicy
 from webob.util import bytes_, parse_qsl_text, text_, url_unquote, urljoin
 
 try:
@@ -502,6 +503,37 @@ class BaseRequest:
         # leading/trailing C0 control and space characters before parsing.
 
         return urljoin(url, other_url)
+
+    def external_view(self, policy=None):
+        """
+        Return the trusted external address view of this request.
+
+        This is an optional view for applications behind managed
+        proxies: the ``policy`` (a
+        :class:`webob.trustedproxy.TrustedProxyPolicy`) decides the
+        public scheme, host, and prefix from the proxy attestations the
+        WSGI server confirmed in the environ.  If ``policy`` is not
+        given, the policy stored under
+        ``environ['webob.trusted_proxy.policy']`` is used.
+
+        The view never modifies ``SCRIPT_NAME``/``PATH_INFO``; internal
+        routing keeps its local address semantics.  Resolving the view's
+        URLs may raise
+        :class:`webob.trustedproxy.IncompleteProxyAttestation` when the
+        confirmation result is incomplete, letting the application
+        explicitly refuse to generate public links.
+        """
+        if policy is None:
+            policy = TrustedProxyPolicy.from_environ(self.environ)
+
+        if policy is None:
+            raise ValueError(
+                "No trusted proxy policy configured: pass a "
+                "TrustedProxyPolicy or set environ[%r]"
+                % TrustedProxyPolicy.policy_environ_key
+            )
+
+        return TrustedExternalView(self, policy)
 
     def path_info_pop(self, pattern=None):
         """

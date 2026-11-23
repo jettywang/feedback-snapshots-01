@@ -1,6 +1,23 @@
 Unreleased
 ----------
 
+Feature
+~~~~~~~
+
+- Added an optional trusted external address view
+  (``webob.trustedproxy``).  A WSGI server or adapter confirms the proxy
+  hops a request traversed by placing synthetic ``ProxyAttestation``
+  objects into ``environ['webob.trusted_proxy.attestations']``; an
+  integrator-supplied ``TrustedProxyPolicy`` then decides the public
+  scheme, host, and prefix via ``Request.external_view()``.  Fields are
+  only combined within a single approved attestation, direct connections
+  resolve to the local origin, and incomplete confirmation results raise
+  ``IncompleteProxyAttestation`` (with a diagnostic ``category``) so the
+  application can explicitly refuse to generate public links.  When the
+  policy is stored under ``environ['webob.trusted_proxy.policy']``,
+  relative ``Location`` headers are also resolved against the trusted
+  external address.
+
 Security Fix
 ~~~~~~~~~~~~
 

@@ -34,6 +34,7 @@ from webob.descriptors import (
 )
 from webob.headers import ResponseHeaders
 from webob.request import BaseRequest
+from webob.trustedproxy import TrustedProxyPolicy
 from webob.util import (
     bytes_,
     status_generic_reasons,
@@ -1380,7 +1381,19 @@ class Response:
         # as " //evil.example" into protocol-relative URLs, bypassing the
         # checks above. Use WebOb's own RFC 3986 urljoin(), which resolves
         # the value exactly as given. See GHSA-6hx8-3wjj-gr8g.
-        new_location = urljoin(_request_uri(environ), value)
+        policy = TrustedProxyPolicy.from_environ(environ)
+
+        if policy is not None:
+            # A trusted proxy policy is in effect: resolve the relative
+            # Location against the trusted external request URI. This may
+            # raise IncompleteProxyAttestation if the proxy confirmation
+            # result is incomplete, letting the application refuse to
+            # generate a public link.
+            base = policy.request_uri(environ)
+        else:
+            base = _request_uri(environ)
+
+        new_location = urljoin(base, value)
 
         return new_location
 
