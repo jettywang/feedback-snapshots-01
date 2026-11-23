@@ -135,6 +135,213 @@ RSpec.describe "RelyingParty" do
     end
   end
 
+  describe 'authentication operations' do
+    let(:admin_credential) { create_credential(client: admin_fake_client, relying_party: admin_rp) }
+
+    let(:stored_credential_finder) do
+      ->(webauthn_credential) { user.credentials.find { |c| c.webauthn_id == webauthn_credential.id } }
+    end
+
+    before do
+      user.credentials << credential_klass.new(
+        webauthn_id: admin_credential.first,
+        public_key: admin_rp.encoder.encode(admin_credential[1]),
+        sign_count: 0
+      )
+    end
+
+    describe '#begin_authentication' do
+      it "records the user verification requirement approved at issuance time" do
+        operation = admin_rp.begin_authentication(
+          allow: user.credentials.map(&:webauthn_id),
+          user_verification: "required",
+          context: :finance_confirmation
+        )
+
+        expect(operation).to be_pending
+        expect(operation.options.challenge).to eq(operation.challenge)
+        expect(operation.user_verification).to eq("required")
+        expect(operation).to be_user_verification_required
+        expect(operation.context).to eq(:finance_confirmation)
+      end
+
+      it "does not require user verification when the caller did not approve it" do
+        operation = admin_rp.begin_authentication(allow: user.credentials.map(&:webauthn_id))
+
+        expect(operation.user_verification).to be_nil
+        expect(operation).not_to be_user_verification_required
+      end
+    end
+
+    context "with a daily login and a finance confirmation pending on the same authenticator" do
+      let!(:login_operation) do
+        admin_rp.begin_authentication(
+          allow: user.credentials.map(&:webauthn_id),
+          context: :daily_login
+        )
+      end
+
+      let!(:finance_operation) do
+        admin_rp.begin_authentication(
+          allow: user.credentials.map(&:webauthn_id),
+          user_verification: "required",
+          context: :finance_confirmation
+        )
+      end
+
+      it "lets both operations wait in parallel and keeps the finance requirement after a policy change" do
+        expect(login_operation).to be_pending
+        expect(finance_operation).to be_pending
+
+        # The caller adjusts the daily policy after the finance confirmation was issued.
+        relaxed_login_operation = admin_rp.begin_authentication(
+          allow: user.credentials.map(&:webauthn_id),
+          user_verification: "discouraged",
+          context: :daily_login
+        )
+
+        expect(finance_operation.user_verification).to eq("required")
+        expect(finance_operation).to be_user_verification_required
+        expect(relaxed_login_operation).not_to be_user_verification_required
+      end
+
+      it "processes responses last-issued-first and enforces each operation's own requirement" do
+        # Last-issued-first: the finance confirmation is answered before the login.
+        # The authenticator only provides user presence evidence, which the
+        # finance operation explicitly rejects while staying pending.
+        finance_assertion_without_verification = admin_fake_client.get(
+          challenge: finance_operation.challenge,
+          rp_id: admin_rp.id,
+          user_verified: false,
+          sign_count: 1
+        )
+
+        expect do
+          admin_rp.verify_authentication_operation(
+            finance_operation,
+            finance_assertion_without_verification,
+            &stored_credential_finder
+          )
+        end.to raise_error(WebAuthn::UserVerifiedVerificationError)
+
+        expect(finance_operation).to be_pending
+
+        # The daily login accepts the legitimate user-presence-only response.
+        login_assertion = admin_fake_client.get(
+          challenge: login_operation.challenge,
+          rp_id: admin_rp.id,
+          user_verified: false,
+          sign_count: 1
+        )
+
+        verified_credential, stored_credential =
+          admin_rp.verify_authentication_operation(login_operation, login_assertion, &stored_credential_finder)
+
+        expect(verified_credential.id).to eq(admin_credential.first)
+        expect(stored_credential.webauthn_id).to eq(admin_credential.first)
+        expect(login_operation).to be_consumed
+        expect(login_operation.context).to eq(:daily_login)
+
+        # The finance confirmation completes once its own requirement is met.
+        finance_assertion_with_verification = admin_fake_client.get(
+          challenge: finance_operation.challenge,
+          rp_id: admin_rp.id,
+          user_verified: true,
+          sign_count: 2
+        )
+
+        verified_credential, stored_credential =
+          admin_rp.verify_authentication_operation(
+            finance_operation,
+            finance_assertion_with_verification,
+            &stored_credential_finder
+          )
+
+        expect(verified_credential.id).to eq(admin_credential.first)
+        expect(stored_credential.webauthn_id).to eq(admin_credential.first)
+        expect(finance_operation).to be_consumed
+        expect(finance_operation.context).to eq(:finance_confirmation)
+      end
+
+      it "distinguishes a consumed operation from a failed verification" do
+        login_assertion = admin_fake_client.get(
+          challenge: login_operation.challenge,
+          rp_id: admin_rp.id,
+          sign_count: 1
+        )
+
+        admin_rp.verify_authentication_operation(login_operation, login_assertion, &stored_credential_finder)
+
+        expect do
+          admin_rp.verify_authentication_operation(login_operation, login_assertion, &stored_credential_finder)
+        end.to raise_error(WebAuthn::OperationConsumedError)
+      end
+
+      it "distinguishes an actively revoked operation from failure and consumption" do
+        admin_rp.revoke_authentication(finance_operation)
+
+        expect(finance_operation).to be_revoked
+
+        finance_assertion = admin_fake_client.get(
+          challenge: finance_operation.challenge,
+          rp_id: admin_rp.id,
+          user_verified: true,
+          sign_count: 1
+        )
+
+        expect do
+          admin_rp.verify_authentication_operation(finance_operation, finance_assertion, &stored_credential_finder)
+        end.to raise_error(WebAuthn::OperationRevokedError)
+      end
+
+      it "cannot revoke an already consumed operation" do
+        login_assertion = admin_fake_client.get(
+          challenge: login_operation.challenge,
+          rp_id: admin_rp.id,
+          sign_count: 1
+        )
+
+        admin_rp.verify_authentication_operation(login_operation, login_assertion, &stored_credential_finder)
+
+        expect do
+          admin_rp.revoke_authentication(login_operation)
+        end.to raise_error(WebAuthn::OperationConsumedError)
+      end
+
+      it "rejects a response that does not match the operation challenge" do
+        login_assertion = admin_fake_client.get(
+          challenge: login_operation.challenge,
+          rp_id: admin_rp.id,
+          sign_count: 1
+        )
+
+        expect do
+          admin_rp.verify_authentication_operation(finance_operation, login_assertion, &stored_credential_finder)
+        end.to raise_error(WebAuthn::ChallengeVerificationError)
+
+        expect(finance_operation).to be_pending
+      end
+    end
+
+    it "keeps the old calling style working when no operation record is used" do
+      options = admin_rp.options_for_authentication(allow: user.credentials.map(&:webauthn_id))
+
+      raw_credential = admin_fake_client.get(
+        challenge: options.challenge,
+        rp_id: admin_rp.id,
+        sign_count: 1
+      )
+
+      verified_credential, stored_credential =
+        admin_rp.verify_authentication(raw_credential, options.challenge) do |webauthn_credential|
+          user.credentials.find { |c| c.webauthn_id == webauthn_credential.id }
+        end
+
+      expect(verified_credential.id).to eq(admin_credential.first)
+      expect(stored_credential.webauthn_id).to eq(admin_credential.first)
+    end
+  end
+
   describe '#origin' do
     subject do
       old_verbose, $VERBOSE = $VERBOSE, nil # Silence warnings to avoid deprecation warnings

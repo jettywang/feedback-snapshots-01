@@ -2,6 +2,10 @@
 
 ## [Unreleased](https://github.com/cedarcode/webauthn-ruby/compare/v3.5.1...master/)
 
+### Added
+
+- Add `WebAuthn::RelyingParty#begin_authentication`, which issues authentication options and records them as a `WebAuthn::AuthenticationOperation` capturing the user verification requirement approved at issuance time. Pending operations can be verified with `#verify_authentication_operation` (verified against the recorded terms and consumed on success) or actively cancelled with `#revoke_authentication`. Reusing a consumed operation raises `WebAuthn::OperationConsumedError` and verifying a revoked one raises `WebAuthn::OperationRevokedError`, so callers can distinguish those from `WebAuthn::VerificationError` failures.
+
 ## [v3.5.1](https://github.com/cedarcode/webauthn-ruby/compare/v3.5.0...v3.5.1/) - 2026-11-10
 
 ### Changed

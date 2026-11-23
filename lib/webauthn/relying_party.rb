@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require "openssl"
+require "webauthn/authentication_operation"
 require "webauthn/credential"
 require "webauthn/encoder"
 require "webauthn/error"
@@ -102,6 +103,59 @@ module WebAuthn
         **keyword_arguments,
         relying_party: self
       )
+    end
+
+    # Issues authentication options and records the terms approved for this
+    # operation (e.g. the user verification requirement), so the ceremony is
+    # later verified against those terms even if the caller's policy changes
+    # while the operation is still pending. Multiple operations may be pending
+    # at the same time, each is consumed by its own challenge.
+    def begin_authentication(context: nil, **keyword_arguments)
+      AuthenticationOperation.new(
+        options_for_authentication(**keyword_arguments),
+        context: context
+      )
+    end
+
+    # Verifies a response against a recorded authentication operation.
+    # The user verification requirement is taken from the operation record,
+    # while the user verification result comes from the authenticator data.
+    #
+    # Raises WebAuthn::OperationConsumedError or WebAuthn::OperationRevokedError
+    # when the operation is no longer pending, WebAuthn::VerificationError
+    # subclasses when the response does not satisfy the recorded terms (the
+    # operation stays pending and may be retried), and consumes the operation
+    # upon successful verification.
+    def verify_authentication_operation(
+      operation,
+      raw_credential,
+      user_presence: nil,
+      public_key: nil,
+      sign_count: nil
+    )
+      operation.ensure_pending!
+
+      webauthn_credential = WebAuthn::Credential.from_get(raw_credential, relying_party: self)
+
+      stored_credential = yield(webauthn_credential) if block_given?
+
+      if webauthn_credential.verify(
+        operation.challenge,
+        public_key: public_key || stored_credential.public_key,
+        sign_count: sign_count || stored_credential.sign_count,
+        user_presence: user_presence,
+        user_verification: operation.user_verification_required?
+      )
+        operation.consume!
+
+        block_given? ? [webauthn_credential, stored_credential] : webauthn_credential
+      end
+    end
+
+    # Actively revokes a pending authentication operation, e.g. when the
+    # finance department cancels a not-yet-completed confirmation.
+    def revoke_authentication(operation)
+      operation.revoke!
     end
 
     def verify_authentication(
