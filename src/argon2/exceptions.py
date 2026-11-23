@@ -37,6 +37,42 @@ class HashingError(Argon2Error):
     """
 
 
+class VerificationTimeout(Argon2Error, TimeoutError):  # noqa: N818
+    """
+    Waiting for a verification share or result timed out.
+
+    The verification was not started if the timeout happened while waiting
+    for a share.  If it happened while waiting for a result, the backend may
+    still be running and keeps holding its share until it finishes.
+
+    .. versionadded:: 25.2.0
+    """
+
+    def __init__(
+        self,
+        message: str = "Timed out waiting for the verification budget.",
+    ) -> None:
+        super().__init__(message)
+
+
+class VerificationCancelled(Argon2Error):  # noqa: N818
+    """
+    A verification was abandoned before its backend started.
+
+    No share of the budget was consumed.
+
+    .. versionadded:: 25.2.0
+    """
+
+    def __init__(
+        self,
+        message: str = (
+            "The verification was abandoned before the backend started."
+        ),
+    ) -> None:
+        super().__init__(message)
+
+
 class InvalidHashError(ValueError):
     """
     Raised if the hash is invalid before passing it to Argon2.

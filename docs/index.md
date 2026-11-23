@@ -24,6 +24,7 @@ If you don't know where to start, learn {doc}`argon2` and take it from there!
 argon2
 installation
 howto
+budgets
 api
 parameters
 cli

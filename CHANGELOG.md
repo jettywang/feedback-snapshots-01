@@ -17,6 +17,23 @@ You can find our backwards-compatibility policy [here](https://github.com/hynek/
 
 ### Added
 
+- Optional shared verification budgets: :class:`argon2.VerificationLimiter`
+  can be passed to :class:`argon2.PasswordHasher` so multiple verifications
+  share a capacity.  In-flight shares, waiting callers, and whether the next
+  verification can enter are observable through
+  :meth:`argon2.VerificationLimiter.snapshot`.
+  A share is held until the Argon2 call really returns -- also when the
+  caller times out or is cancelled while waiting for a result.
+
+  :meth:`argon2.PasswordHasher.verify` gained *wait_timeout* and
+  *cancel_event* for bounded, cancellable waiting without creating a
+  background task.  :meth:`argon2.PasswordHasher.start_verify` and
+  :class:`argon2.VerificationTask` are opt-in handles for callers that
+  cannot block on the Argon2 call.
+
+  New exceptions: :exc:`argon2.exceptions.VerificationTimeout` and
+  :exc:`argon2.exceptions.VerificationCancelled`.
+
 - Official support for Python 3.15.
   No code changes were necessary.
 

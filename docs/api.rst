@@ -4,7 +4,16 @@ API Reference
 .. module:: argon2
 
 .. autoclass:: PasswordHasher
-  :members: from_parameters, hash, verify, check_needs_rehash
+  :members: from_parameters, hash, verify, start_verify, check_needs_rehash
+
+.. autoclass:: VerificationLimiter
+  :members: acquire, release, snapshot, capacity, in_flight, waiting, available, can_enter
+
+.. autoclass:: VerificationBudget
+  :members: available, can_enter, exhausted
+
+.. autoclass:: VerificationTask
+  :members: wait, result, cancel, done, started, cancelled
 
 If you don't specify any parameters, the following constants are used:
 
@@ -89,6 +98,10 @@ Exceptions
 ----------
 
 .. autoexception:: argon2.exceptions.VerificationError
+
+.. autoexception:: argon2.exceptions.VerificationTimeout
+
+.. autoexception:: argon2.exceptions.VerificationCancelled
 
 .. autoexception:: argon2.exceptions.VerifyMismatchError
 

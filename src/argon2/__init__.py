@@ -6,6 +6,11 @@ Argon2 for Python
 
 from . import exceptions, low_level, profiles
 from ._legacy import hash_password, hash_password_raw, verify_password
+from ._limiter import (
+    VerificationBudget,
+    VerificationLimiter,
+    VerificationTask,
+)
 from ._password_hasher import (
     DEFAULT_HASH_LENGTH,
     DEFAULT_MEMORY_COST,
@@ -34,6 +39,9 @@ __all__ = [
     "Parameters",
     "PasswordHasher",
     "Type",
+    "VerificationBudget",
+    "VerificationLimiter",
+    "VerificationTask",
     "exceptions",
     "extract_parameters",
     "hash_password",

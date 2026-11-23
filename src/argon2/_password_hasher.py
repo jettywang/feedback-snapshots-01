@@ -3,16 +3,23 @@
 from __future__ import annotations
 
 import os
+import threading
 
 from typing import ClassVar, Literal
 
+from ._limiter import (
+    VerificationLimiter,
+    VerificationTask,
+    _validate_wait_timeout,
+)
 from ._utils import (
+    NoneType,
     Parameters,
     _check_types,
     extract_parameters,
     validate_params_for_platform,
 )
-from .exceptions import InvalidHashError
+from .exceptions import InvalidHashError, VerificationCancelled
 from .low_level import Type, hash_secret, verify_secret
 from .profiles import get_default_parameters
 
@@ -70,6 +77,16 @@ class PasswordHasher:
             Argon2 type to use.  Only change for interoperability with legacy
             systems.
 
+        limiter:
+            An optional :class:`argon2.VerificationLimiter` that all
+            verifications of this instance share with other instances.  If
+            given, :meth:`verify` waits for a share of the limiter's budget
+            before it calls into Argon2 and holds that share until the call
+            really returns.  Ordinary verification still runs inline; no
+            background task is created.
+
+            .. versionadded:: 25.2.0
+
     .. versionadded:: 16.0.0
     .. versionchanged:: 18.2.0
        Switch from Argon2i to Argon2id based on the recommendation by the
@@ -86,8 +103,9 @@ class PasswordHasher:
     .. _kibibytes: https://en.wikipedia.org/wiki/Binary_prefix#kibi
     """
 
-    __slots__ = ["_parameters", "encoding"]
+    __slots__ = ["_limiter", "_parameters", "encoding"]
 
+    _limiter: VerificationLimiter | None
     _parameters: Parameters
     encoding: str
 
@@ -100,6 +118,8 @@ class PasswordHasher:
         salt_len: int = DEFAULT_RANDOM_SALT_LENGTH,
         encoding: str = "utf-8",
         type: Type = Type.ID,
+        *,
+        limiter: VerificationLimiter | None = None,
     ):
         e = _check_types(
             time_cost=(time_cost, int),
@@ -109,6 +129,7 @@ class PasswordHasher:
             salt_len=(salt_len, int),
             encoding=(encoding, str),
             type=(type, Type),
+            limiter=(limiter, (VerificationLimiter, NoneType)),
         )
         if e:
             raise TypeError(e)
@@ -127,12 +148,23 @@ class PasswordHasher:
 
         # Cache a Parameters object for check_needs_rehash.
         self._parameters = params
+        self._limiter = limiter
         self.encoding = encoding
 
     @classmethod
-    def from_parameters(cls, params: Parameters) -> PasswordHasher:
+    def from_parameters(
+        cls, params: Parameters, *, limiter: VerificationLimiter | None = None
+    ) -> PasswordHasher:
         """
         Construct a `PasswordHasher` from *params*.
+
+        Args:
+            params: Parameters to use.
+
+            limiter:
+                An optional shared :class:`argon2.VerificationLimiter`.
+
+                .. versionadded:: 25.2.0
 
         Returns:
             A `PasswordHasher` instance with the parameters from *params*.
@@ -147,6 +179,7 @@ class PasswordHasher:
             hash_len=params.hash_len,
             salt_len=params.salt_len,
             type=params.type,
+            limiter=limiter,
         )
 
     @property
@@ -172,6 +205,15 @@ class PasswordHasher:
     @property
     def type(self) -> Type:
         return self._parameters.type
+
+    @property
+    def limiter(self) -> VerificationLimiter | None:
+        """
+        The shared :class:`argon2.VerificationLimiter`, if any.
+
+        .. versionadded:: 25.2.0
+        """
+        return self._limiter
 
     def hash(self, password: str | bytes, *, salt: bytes | None = None) -> str:
         """
@@ -213,10 +255,20 @@ class PasswordHasher:
     }
 
     def verify(
-        self, hash: str | bytes, password: str | bytes
+        self,
+        hash: str | bytes,
+        password: str | bytes,
+        *,
+        wait_timeout: float | None = None,
+        cancel_event: threading.Event | None = None,
     ) -> Literal[True]:
         """
         Verify that *password* matches *hash*.
+
+        If this instance has a *limiter*, one share of its budget is taken
+        before the backend is called and released only after the backend
+        really returns.  Verification runs inline -- no background task or
+        thread is created.
 
         .. warning::
 
@@ -228,6 +280,18 @@ class PasswordHasher:
             hash: An encoded hash as returned from :meth:`PasswordHasher.hash`.
 
             password: The password to verify.
+
+            wait_timeout:
+                Maximum number of seconds to wait for a free share of the
+                limiter's budget.  `None` waits indefinitely.  It requires
+                a *limiter*.  A value of ``0`` does not wait.
+
+            cancel_event:
+                An optional :class:`threading.Event`.  If it is set while
+                this call is still waiting for a share, the call raises
+                :exc:`argon2.exceptions.VerificationCancelled` without
+                starting the backend.  Once the backend has started, setting
+                the event has no effect on the running verification.
 
         Raises:
             argon2.exceptions.VerifyMismatchError:
@@ -241,6 +305,12 @@ class PasswordHasher:
                 If *hash* is so clearly invalid, that it couldn't be passed to
                 Argon2.
 
+            argon2.exceptions.VerificationTimeout:
+                If *wait_timeout* expires before a share is available.
+
+            argon2.exceptions.VerificationCancelled:
+                If *cancel_event* is set before a share is available.
+
         Returns:
             ``True`` on success, otherwise an exception is raised.
 
@@ -248,16 +318,91 @@ class PasswordHasher:
             Raise :exc:`~argon2.exceptions.VerifyMismatchError` on mismatches
             instead of its more generic superclass.
         .. versionadded:: 18.2.0 Hash type agility.
+        .. versionadded:: 25.2.0 *wait_timeout* and *cancel_event*.
         """
+        _validate_wait_timeout(wait_timeout)
+        if self._limiter is None and wait_timeout is not None:
+            msg = "'wait_timeout' requires a PasswordHasher with a limiter."
+            raise ValueError(msg)
+
+        hash, hash_type, secret = self._prepare_verification(hash, password)
+
+        if self._limiter is None:
+            if cancel_event is not None and cancel_event.is_set():
+                raise VerificationCancelled
+            return verify_secret(hash, secret, hash_type)
+
+        self._limiter.acquire(
+            wait_timeout=wait_timeout, cancel_event=cancel_event
+        )
+        try:
+            return verify_secret(hash, secret, hash_type)
+        finally:
+            self._limiter.release()
+
+    def start_verify(
+        self,
+        hash: str | bytes,
+        password: str | bytes,
+        *,
+        wait_timeout: float | None = None,
+    ) -> VerificationTask:
+        """
+        Start a verification and return a handle to its result.
+
+        This is the asynchronous counterpart to :meth:`verify` and is only
+        needed if the caller wants to keep the event loop or request thread
+        free while Argon2 runs.  It requires this instance to have a
+        *limiter*; ordinary verification does not create background work.
+
+        The backend runs on one daemon thread.  If the caller stops waiting
+        for the result -- for example because its own timeout expires -- the
+        task keeps running and keeps its share until the backend really
+        ends.  Cancelling the task before the backend starts gives the share
+        back without running Argon2.
+
+        Args:
+            hash: An encoded hash as returned from :meth:`PasswordHasher.hash`.
+
+            password: The password to verify.
+
+            wait_timeout:
+                Maximum number of seconds the task may wait for a share of
+                the limiter's budget before it fails with
+                :exc:`argon2.exceptions.VerificationTimeout`.  `None` waits
+                indefinitely.
+
+        Raises:
+            ValueError: If this instance has no *limiter*.
+
+        Returns:
+            A :class:`argon2.VerificationTask`.
+
+        .. versionadded:: 25.2.0
+        """
+        if self._limiter is None:
+            msg = "'start_verify' requires a PasswordHasher with a limiter."
+            raise ValueError(msg)
+
+        _validate_wait_timeout(wait_timeout)
+        hash, hash_type, secret = self._prepare_verification(hash, password)
+
+        return VerificationTask(
+            lambda: verify_secret(hash, secret, hash_type),
+            limiter=self._limiter,
+            wait_timeout=wait_timeout,
+        )
+
+    def _prepare_verification(
+        self, hash: str | bytes, password: str | bytes
+    ) -> tuple[bytes, Type, bytes]:
         hash = _ensure_bytes(hash, "ascii")
         try:
             hash_type = self._header_to_type[hash[:9]]
         except LookupError:
             raise InvalidHashError from None
 
-        return verify_secret(
-            hash, _ensure_bytes(password, self.encoding), hash_type
-        )
+        return hash, hash_type, _ensure_bytes(password, self.encoding)
 
     def check_needs_rehash(self, hash: str | bytes) -> bool:
         """
