@@ -1,0 +1,30 @@
+GEM
+  remote: https://rubygems.org/
+  specs:
+    base64 (0.3.0)
+    logger (1.7.0)
+    minitest (5.27.0)
+    minitest-display (0.3.1)
+      minitest (~> 5.0)
+    simpleidn (0.3.0)
+
+PLATFORMS
+  arm64-darwin-25
+  ruby
+
+DEPENDENCIES
+  base64
+  logger
+  minitest (~> 5.25)
+  minitest-display
+  simpleidn
+
+CHECKSUMS
+  base64 (0.3.0) sha256=27337aeabad6ffae05c265c450490628ef3ebd4b67be58257393227588f5a97b
+  logger (1.7.0) sha256=196edec7cc44b66cfb40f9755ce11b392f21f7967696af15d274dde7edff0203
+  minitest (5.27.0) sha256=2d3b17f8a36fe7801c1adcffdbc38233b938eb0b4966e97a6739055a45fa77d5
+  minitest-display (0.3.1) sha256=a097506c24fdfa69d2ef9703fbbf4e1ed933c4610f3413c3f2869951edddedcf
+  simpleidn (0.3.0) sha256=12ca730bed2f3db04d11e9bfd1bca3e11fb37f55b21eb2e9793fb5814bf54d03
+
+BUNDLED WITH
+  4.0.20
