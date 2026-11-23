@@ -27,8 +27,22 @@ module Warden
 
     def initialize(env, manager) #:nodoc:
       @env, @users, @winning_strategies, @locked = env, {}, {}, false
-      @manager, @config = manager, manager.config.dup
+      @manager, @config = manager, manager.config.dup.freeze
       @strategies = Hash.new { |h,k| h[k] = {} }
+      @callback_chains = build_callback_chains(manager)
+    end
+
+    # The frozen, per-request callback chain for +kind+. It is resolved once,
+    # when the proxy is created, so another application removing a callback or
+    # changing its registration while this request is in flight has no effect.
+    def callback_chain(kind)
+      @callback_chains.fetch(kind) { [] }
+    end
+
+    # Runs the callbacks of +kind+ against the chain captured for this request.
+    # The conditions (scope/event) attached to each callback are still applied.
+    def run_callbacks(kind, *args)
+      Warden::Hooks._run_callback_chain(callback_chain(kind), args)
     end
 
     # Run the on_request callbacks
@@ -324,6 +338,14 @@ module Warden
     end
 
     private
+
+    # Global (shared, operations approved) callbacks run first, then the
+    # application's own callbacks - both in their order of declaration.
+    def build_callback_chains(manager)
+      Warden::Manager::CALLBACK_KINDS.each_with_object({}) do |kind, chains|
+        chains[kind] = manager.callback_chain(kind).freeze
+      end
+    end
 
     def _perform_authentication(*args)
       scope, opts = _retrieve_scope_and_opts(args)

@@ -2,6 +2,7 @@
 # frozen_string_literal: true
 require 'warden/hooks'
 require 'warden/config'
+require 'warden/callback_registry'
 
 module Warden
   # The middleware for Rack Authentication
@@ -13,6 +14,14 @@ module Warden
 
     attr_accessor :config
 
+    # Callbacks registered for this application only. Global callbacks
+    # registered directly on Warden::Manager stay shared across applications.
+    attr_reader :callbacks
+
+    # The callback kinds warden knows how to dispatch during a request.
+    CALLBACK_KINDS = %i(on_request after_set_user after_failed_fetch
+                        before_logout before_failure).freeze
+
     # Initialize the middleware. If a block is given, a Warden::Config is yielded so you can properly
     # configure the Warden::Manager.
     # :api: public
@@ -20,6 +29,8 @@ module Warden
       default_strategies = options.delete(:default_strategies)
 
       @app, @config = app, Warden::Config.new(options)
+      @config.manager = self
+      @callbacks = Warden::CallbackRegistry.new
       @config.default_strategies(*default_strategies) if default_strategies
       yield @config if block_given?
     end
@@ -47,12 +58,36 @@ module Warden
       end
     end
 
+    # Runs the callbacks of +kind+ for the current request. The effective
+    # chain is captured (frozen) when the request starts and always runs the
+    # globally registered, shared callbacks first followed by the callbacks
+    # local to this application - each in their order of declaration.
+    # Keeping this method on the manager preserves the public contract used by
+    # Warden::Proxy and existing integrations.
     # :api: private
-    def _run_callbacks(*args) #:nodoc:
-      self.class._run_callbacks(*args)
+    def _run_callbacks(kind, *args) #:nodoc:
+      proxy = current_proxy(kind, args)
+      chain = proxy ? proxy.callback_chain(kind) : callback_chain(kind)
+      @callbacks._run_callback_chain(chain, args)
+    end
+
+    # Builds the effective callback chain for +kind+ outside of a request
+    # context: global (shared) callbacks first, then this application's own.
+    # :api: private
+    def callback_chain(kind) #:nodoc:
+      self.class.public_send("_#{kind}") + @callbacks.snapshot(kind)
     end
 
     class << self
+      # The global, cross-application callback registry. Only callbacks
+      # declared here (the historical Warden::Manager registration) are shared
+      # between mounted applications; an application cannot promote its own
+      # callbacks into the shared set. Treat anything registered here as
+      # explicitly approved for cross-application use.
+      def shared_callbacks
+        self
+      end
+
       # Prepares the user to serialize into the session.
       # Any object that can be serialized into the session in some way can be used as a "user" object
       # Generally however complex object should not be stored in the session.
@@ -93,6 +128,20 @@ module Warden
     end
 
   private
+
+    # Resolves the proxy whose frozen callback chains should be used. The
+    # proxy is always one of the callback arguments, except for before_failure
+    # where only the rack env is available. When no proxy can be found (for
+    # example a direct call outside of a request) a fresh chain is built.
+    def current_proxy(kind, args)
+      if kind == :before_failure
+        env = args.first
+        proxy = env && env['warden']
+        proxy.is_a?(Proxy) ? proxy : nil
+      else
+        args.find { |arg| arg.is_a?(Proxy) }
+      end
+    end
 
     def handle_chain_result(status, result, env)
       if status == 401 && intercept_401?(env)

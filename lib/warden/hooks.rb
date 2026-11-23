@@ -5,15 +5,28 @@ module Warden
 
     # Hook to _run_callbacks asserting for conditions.
     def _run_callbacks(kind, *args) #:nodoc:
+      Warden::Hooks._run_callback_chain(send("_#{kind}"), args)
+    end
+
+    # Runs an explicit, already resolved callback chain while asserting for
+    # conditions. The chain is the list captured for the current request, so
+    # later mutations of any registry cannot alter the running request.
+    def self._run_callback_chain(chain, args) #:nodoc:
       options = args.last # Last callback arg MUST be a Hash
 
-      send("_#{kind}").each do |callback, conditions|
+      chain.each do |callback, conditions|
         invalid = conditions.find do |key, value|
           value.is_a?(Array) ? !value.include?(options[key]) : (value != options[key])
         end
 
         callback.call(*args) unless invalid
       end
+    end
+
+    # Instance-level entry point delegating to the shared implementation so
+    # registries and proxies can run an arbitrary chain.
+    def _run_callback_chain(chain, args) #:nodoc:
+      Warden::Hooks._run_callback_chain(chain, args)
     end
 
     # A callback hook set to run every time after a user is set.

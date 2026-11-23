@@ -5,6 +5,11 @@ module Warden
   # This class is yielded inside Warden::Manager. If you have a plugin and want to
   # add more configuration to warden, you just need to extend this class.
   class Config < Hash
+    # The manager this configuration belongs to. Used to route callbacks
+    # declared inside the configuration block to the application's own
+    # registry instead of the global one.
+    attr_accessor :manager
+
     # Creates an accessor that simply sets and reads a key in the hash:
     #
     #   class Config < Hash
@@ -100,6 +105,33 @@ module Warden
     # :api: public
     def serialize_from_session(*args, &block)
       Warden::Manager.serialize_from_session(*args, &block)
+    end
+
+    # Authentication callbacks that belong only to this application. They are
+    # stored on the manager's own registry and run after the globally
+    # registered (operations approved and shared) callbacks.
+    #
+    # The method names and options mirror the hooks on Warden::Manager.
+    #
+    # Example:
+    #   use Warden::Manager do |config|
+    #     config.on_request do |proxy|
+    #       # runs only for requests handled by this manager
+    #     end
+    #   end
+    %w(after_set_user after_authentication after_fetch on_request
+       before_failure before_logout after_failed_fetch).each do |hook|
+      define_method(hook) do |options = {}, method = :push, &block|
+        manager.callbacks.public_send(hook, options, method, &block)
+      end
+    end
+
+    # Prepend variants for every hook that supports them on Warden::Manager.
+    %w(after_set_user after_authentication after_fetch on_request
+       before_failure before_logout).each do |hook|
+      define_method("prepend_#{hook}") do |options = {}, &block|
+        manager.callbacks.public_send("prepend_#{hook}", options, &block)
+      end
     end
 
   protected
