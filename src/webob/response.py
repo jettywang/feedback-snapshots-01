@@ -49,7 +49,7 @@ except ImportError:
     import json
 
 
-__all__ = ["Response"]
+__all__ = ["Response", "CACHE_POLICY_PRIVATE"]
 
 _PARAM_RE = re.compile(r'([a-z0-9]+)=(?:"([^"]*)"|([a-z0-9_.-]*))', re.I)
 _OK_PARAM_RE = re.compile(r"^[a-z0-9_.-]+$", re.I)
@@ -57,6 +57,61 @@ _OK_PARAM_RE = re.compile(r"^[a-z0-9_.-]+$", re.I)
 _gzip_header = b"\x1f\x8b\x08\x00\x00\x00\x00\x00\x02\xff"
 
 _marker = object()
+
+# Cache policies accepted by Response.conditional_response_app().
+#
+# ``CACHE_POLICY_PRIVATE`` forces a private cache policy on a single
+# response: directives that would let a shared (intermediary) cache store
+# the output are removed and ``private`` is guaranteed to be present.
+CACHE_POLICY_PRIVATE = "private"
+
+_cache_policies = frozenset((CACHE_POLICY_PRIVATE,))
+
+# Response Cache-Control directives that make a response reusable by a
+# shared/intermediary cache. They must not survive a private policy.
+_shared_cache_directives = frozenset(("public", "s-maxage"))
+
+
+def _enforce_cache_policy(headerlist, cache_policy):
+    """
+    Return a copy of ``headerlist`` on which the per-request
+    ``cache_policy`` has been enforced.
+
+    The response object's own headers are never mutated: the policy is a
+    constraint of this invocation only, so a later public request reusing
+    the same Response keeps whatever the application originally set. The
+    response body (``app_iter``) is never read while deciding this.
+    """
+    if cache_policy is None:
+        return headerlist
+
+    if cache_policy not in _cache_policies:
+        raise ValueError("Unknown cache policy: %r" % (cache_policy,))
+
+    enforced = []
+
+    for name, value in headerlist:
+        if name.lower() != "cache-control":
+            enforced.append((name, value))
+            continue
+
+        cache_control = CacheControl.parse(value, type="response")
+
+        for directive in _shared_cache_directives:
+            if directive in cache_control.properties:
+                del cache_control.properties[directive]
+
+        if cache_policy == CACHE_POLICY_PRIVATE:
+            cache_control.properties["private"] = None
+
+        enforced.append((name, str(cache_control)))
+
+    if cache_policy == CACHE_POLICY_PRIVATE and not any(
+        name.lower() == "cache-control" for name, _value in enforced
+    ):
+        enforced.append(("Cache-Control", "private"))
+
+    return enforced
 
 
 class Response:
@@ -1421,7 +1476,7 @@ class Response:
 
     _safe_methods = ("GET", "HEAD")
 
-    def conditional_response_app(self, environ, start_response):
+    def conditional_response_app(self, environ, start_response, cache_policy=None):
         """
         Like the normal ``__call__`` interface, but checks conditional headers:
 
@@ -1431,10 +1486,23 @@ class Response:
               ``HEAD``)
             * ``Range``               (``406 Partial Content``; only on ``GET``,
               ``HEAD``)
+
+        Pass ``cache_policy=CACHE_POLICY_PRIVATE`` to force the site's
+        private cache policy onto this single response, for example when an
+        authenticated report is being downloaded. Public caching directives
+        set by the application (``public`` and ``s-maxage``) are stripped and
+        ``private`` is guaranteed on the negotiated response. The constraint
+        is applied to a copy of the headers before any conditional
+        negotiation, so it covers the ordinary ``200`` response as well as
+        ``206``, ``304`` and ``HEAD`` responses; the stored Response object and
+        its ``app_iter`` are left untouched and the body is never read to
+        decide the policy.
         """
         req = BaseRequest(environ)
 
-        headerlist = self._abs_headerlist(environ)
+        headerlist = _enforce_cache_policy(
+            self._abs_headerlist(environ), cache_policy
+        )
 
         method = environ.get("REQUEST_METHOD", "GET")
 

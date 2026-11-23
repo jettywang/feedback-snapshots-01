@@ -47,6 +47,17 @@ Security Fix
 Feature
 ~~~~~~~
 
+- Add an optional per-request ``cache_policy`` argument to
+  ``Response.conditional_response_app``. Passing
+  ``cache_policy=CACHE_POLICY_PRIVATE`` (also exported from the ``webob``
+  package) enforces the site's private cache policy on a single response:
+  the application's public directives (``public`` and ``s-maxage``) are
+  removed and ``private`` is guaranteed, even on negotiated ``206`` and
+  ``304`` responses and on ``HEAD`` requests. The constraint is applied to
+  a copy of the headers before negotiation, so the stored Response and its
+  iterator are never mutated or read to decide the policy and a later
+  public request keeps its original, intermediary-cache-friendly headers.
+
 - Rename "master" git branch to "main"
 
 - Add support for Python 3.12.

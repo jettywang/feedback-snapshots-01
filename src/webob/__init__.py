@@ -9,13 +9,14 @@ from webob.datetime_utils import (
     year,
 )
 from webob.request import BaseRequest, Request
-from webob.response import Response
+from webob.response import CACHE_POLICY_PRIVATE, Response
 from webob.util import html_escape
 
 __all__ = [
     "BaseRequest",
     "Request",
     "Response",
+    "CACHE_POLICY_PRIVATE",
     "UTC",
     "day",
     "week",
