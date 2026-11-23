@@ -11,6 +11,7 @@ from cfn_policy_validator.validation.reporter import Reporter
 from cfn_policy_validator.application_error import ApplicationError
 
 from cfn_policy_validator.canonical_user_id import client
+from cfn_policy_validator.parsers.evidence import permission_set_display_names
 from cfn_policy_validator.parsers.output import Output, PermissionSet, Role, User, Group
 
 LOGGER = logging.getLogger("cfn-policy-validator")
@@ -120,12 +121,16 @@ class PolicyAnalysis:
 		# parser_output.PermissionSets, parser_output.Users, parser_output.Roles and parser_output.Group are array of PermissionSet,
 		# array of User, array of Role and array of Group, all these objects inherit from the same base IdentityWithPolicies class
 
+		# permission sets from different templates can share a display name, so qualify those to keep findings distinct
+		display_names = permission_set_display_names(parser_output.PermissionSets)
+
 		for identity_resources in [parser_output.PermissionSets, parser_output.Users, parser_output.Roles, parser_output.Groups]:
 			for identity_resource in identity_resources:
 				for policy in identity_resource.Policies:
 						policy_str = json.dumps(policy.Policy)
 						identity_resource_type_name = get_identity_resource_type_name(identity_resource)
-						identity_resource_name = get_identity_resource_name(identity_resource)
+						identity_resource_name = display_names.get(id(identity_resource)) or \
+							get_identity_resource_name(identity_resource)
 						# if this identity policy has not been run against the check(not in the cache)
 						if policy_str not in self.identity_policy_cache:
 							LOGGER.info(f'Checking identity policy for {identity_resource_type_name} {identity_resource_name} with policy name {policy.Name}')

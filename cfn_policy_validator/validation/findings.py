@@ -28,6 +28,7 @@ class Findings:
 		self.security_warnings = []
 		self.warnings = []
 		self.suggestions = []
+		self.permission_set_analysis = []
 
 	def add_trust_policy_finding(self, findings, resource_name):
 		for raw_finding in findings:

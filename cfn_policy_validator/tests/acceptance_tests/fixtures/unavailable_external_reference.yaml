@@ -1,0 +1,36 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Acceptance stack B. The permission set has a reviewed inline policy and two external references the library cannot
+  fully evidence: a customer-managed policy whose document lookup is denied, a customer-managed policy reference that
+  is never fetched, and a permissions boundary that is not evaluated.
+
+Resources:
+  PublisherPendingPermissionSet:
+    Type: AWS::SSO::PermissionSet
+    Properties:
+      Name: PublisherPending
+      InstanceArn: arn:aws:sso:::instance/ssoins-111222333444
+      InlinePolicy:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action:
+              - s3:ListBucket
+            Resource: '*'
+      ManagedPolicies:
+        - arn:aws:iam::111222333444:policy/NeedsEvidence
+      CustomerManagedPolicyReferences:
+        - Name: AnotherCustomerManaged
+          Path: /team/
+      PermissionsBoundary:
+        ManagedPolicyArn: arn:aws:iam::111222333444:policy/PublisherBoundary
+
+  PublisherPendingAssignment:
+    Type: AWS::SSO::Assignment
+    Properties:
+      InstanceArn: arn:aws:sso:::instance/ssoins-111222333444
+      PermissionSetArn: !Ref PublisherPendingPermissionSet
+      PrincipalId: 0a1b2c3d4e5f60718293a4b5c6d7e8f9
+      PrincipalType: USER
+      TargetId: '111222333444'
+      TargetType: AWS_ACCOUNT

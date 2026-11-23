@@ -1,0 +1,57 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Acceptance stack A. One permission set carries both an inline policy and an attached managed policy that the library
+  can resolve from the template, plus an AWS-managed policy resolved from the simulated IAM endpoint. Two permission
+  sets deliberately share the same display name.
+
+Resources:
+  AttachedManagedPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: AttachedManagedPolicy
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action:
+              - sqs:SendMessage
+            Resource: '*'
+
+  ReadOnlyPermissionSet:
+    Type: AWS::SSO::PermissionSet
+    Properties:
+      Name: SharedAccess
+      InstanceArn: arn:aws:sso:::instance/ssoins-111222333444
+      InlinePolicy:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action:
+              - s3:GetObject
+            Resource: '*'
+      ManagedPolicies:
+        - !Ref AttachedManagedPolicy
+        - arn:aws:iam::aws:policy/ReadOnlyAccess
+
+  AdminPermissionSet:
+    Type: AWS::SSO::PermissionSet
+    Properties:
+      Name: SharedAccess
+      InstanceArn: arn:aws:sso:::instance/ssoins-111222333444
+      InlinePolicy:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action:
+              - iam:ListRoles
+            Resource: '*'
+
+  ReadOnlyAssignment:
+    Type: AWS::SSO::Assignment
+    Properties:
+      InstanceArn: arn:aws:sso:::instance/ssoins-111222333444
+      PermissionSetArn: !Ref ReadOnlyPermissionSet
+      PrincipalId: 91f2c3d4e5a6b7c8d9e0f1a2b3c4d5e6
+      PrincipalType: GROUP
+      TargetId: '111222333444'
+      TargetType: AWS_ACCOUNT

@@ -9,6 +9,8 @@ import time
 import uuid
 
 from cfn_policy_validator.canonical_user_id import client, get_canonical_user
+from cfn_policy_validator.parsers.evidence import permission_set_display_names, policy_document_digest, \
+	finalize_permission_set_evidence, render_acceptance_notes, verify_document_backed_analysis
 from cfn_policy_validator.validation.findings import Findings, create_custom_error_finding
 from cfn_policy_validator.validation import InvalidPolicyException
 from cfn_policy_validator.validation.reporter import Reporter
@@ -26,7 +28,27 @@ def validate(parser_output, findings_to_ignore, finding_types_that_are_errors, a
 	findings = validate_parser_output(parser_output)
 
 	reporter = Reporter(findings_to_ignore, finding_types_that_are_errors, allowed_external_principals)
-	return reporter.build_report_from(findings)
+	report = reporter.build_report_from(findings)
+	# Attach the acceptance ledger so a report consumer can see which policy documents were analyzed and which
+	# deployment facts still require publisher evidence.  A successful policy analysis is not, by itself, proof that a
+	# principal in the target account can exercise the permission.
+	evidence = finalize_permission_set_evidence(
+		getattr(parser_output, 'PermissionSetEvidence', []),
+		getattr(findings, 'permission_set_analysis', []),
+		findings
+	)
+	violations = verify_document_backed_analysis(evidence, getattr(findings, 'permission_set_analysis', []))
+	if violations:
+		raise ApplicationError(
+			'Permission set evidence is inconsistent with the documents sent to the policy analyzer: ' +
+			'; '.join(violations)
+		)
+	report.attach_permission_set_evidence(evidence)
+	report.attach_source_boundaries(getattr(parser_output, 'EvidenceSourceBoundaries', []))
+	report.attach_acceptance_notes(render_acceptance_notes(
+		evidence, getattr(parser_output, 'EvidenceSourceBoundaries', [])
+	))
+	return report
 
 
 def validate_parser_output(parser_output):
@@ -42,6 +64,9 @@ def validate_parser_output(parser_output):
 	validator.validate_permission_sets(parser_output.PermissionSets)
 	validator.validate_resources(parser_output.Resources)
 
+	# expose the exact permission set documents that were submitted to the analyzer so callers can reconcile the
+	# acceptance ledger against what was actually analyzed rather than against display names alone
+	validator.findings.permission_set_analysis = validator.permission_set_analysis
 	return validator.findings
 
 
@@ -53,6 +78,7 @@ class Validator:
 		self.findings = Findings()
 		self.access_analyzer_name = 'AnalyzerCreatedByCfnIAMPolicyValidator'
 		self.analyzer_arn = None
+		self.permission_set_analysis = []
 
 		self.client = client.build('accessanalyzer', region)
 
@@ -150,11 +176,24 @@ class Validator:
 		"""
 		Validate policies attached to permission sets
 		"""
+		display_names = permission_set_display_names(permission_sets)
 		for permission_set in permission_sets:
+			display_name = display_names.get(id(permission_set), permission_set.Name)
 			for policy in permission_set.Policies:
 				LOGGER.info(f'Validating identity policy for permission set {permission_set.Name} with policy name {policy.Name}')
 				validation_findings = self._validate_policy(policy.Policy, self.IDENTITY_POLICY_TYPE, policy.IsAWSManagedPolicy)
-				self.findings.add_validation_finding(validation_findings, permission_set.Name, policy.Name)
+				self.findings.add_validation_finding(validation_findings, display_name, policy.Name)
+				self.permission_set_analysis.append({
+					'Name': permission_set.Name,
+					'LogicalId': permission_set.LogicalId,
+					'ReportedResourceName': display_name,
+					'PolicyName': policy.Name,
+					'Source': policy.Source,
+					'IsAWSManagedPolicy': policy.IsAWSManagedPolicy,
+					'Operation': 'ValidatePolicy',
+					'PolicyType': self.IDENTITY_POLICY_TYPE,
+					'DocumentDigest': policy_document_digest(policy.Policy)
+				})
 
 	def validate_resources(self, resources):
 		"""

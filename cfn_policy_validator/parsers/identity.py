@@ -6,15 +6,16 @@ import logging
 
 from abc import ABC
 
-from botocore.exceptions import ClientError
+from botocore.exceptions import ClientError, BotoCoreError
 
 from cfn_policy_validator import client
 from cfn_policy_validator.application_error import ApplicationError
 from cfn_policy_validator.parsers.identity_schemas import groups_schema, managed_policy_schema, \
 	roles_schema, inline_policy_schema, users_schema, permission_set_schema, role_policy_schema, group_policy_schema, \
-	user_policy_schema
+	user_policy_schema, permission_set_assignment_schema
 from cfn_policy_validator.parsers.utils.arn_generator import ArnGenerator
-from cfn_policy_validator.parsers.output import Role, User, Policy, Group, PermissionSet
+from cfn_policy_validator.parsers.output import Role, User, Policy, Group, PermissionSet, \
+	INLINE_POLICY_SOURCE, MANAGED_POLICY_TEMPLATE_SOURCE, MANAGED_POLICY_EXTERNAL_SOURCE
 from cfn_policy_validator.parsers.utils.topological_sorter import TopologicalSorter
 
 
@@ -29,6 +30,8 @@ class IdentityParser:
 
 	@classmethod
 	def parse(cls, template, account_config, excluded_resource_types={}):
+		PermissionSetAssignmentParser.reset()
+
 		parsers = {
 			'AWS::IAM::Role': RoleParser(account_config.region),
 			'AWS::IAM::Policy': InlinePolicyParser(),
@@ -38,7 +41,8 @@ class IdentityParser:
 			'AWS::IAM::ManagedPolicy': ManagedPolicyParser(account_config),
 			'AWS::IAM::User': UserParser(account_config.region),
 			'AWS::IAM::Group': GroupParser(account_config.region),
-			'AWS::SSO::PermissionSet': PermissionSetParser(account_config.region)
+			'AWS::SSO::PermissionSet': PermissionSetParser(account_config),
+			'AWS::SSO::Assignment': PermissionSetAssignmentParser()
 		}
 
 		# topologically sort which allows us to process dependent resources first
@@ -60,6 +64,11 @@ class IdentityParser:
 			list(GroupParser.groups.values()), \
 			list(PermissionSetParser.permission_sets.values()), \
 			orphaned_policies
+
+	@classmethod
+	def get_permission_set_assignments(cls):
+		""" Deployment-time assignments found in the template.  These are intent, not proven access. """
+		return list(PermissionSetAssignmentParser.assignments)
 
 	@classmethod
 	def get_orphaned_policies(cls):
@@ -99,41 +108,104 @@ class AttachedPolicyParser:
 			policy_name = inline_policy['PolicyName']
 			policy_document = inline_policy['PolicyDocument']
 
-			policy = Policy(policy_name, policy_document)
+			policy = Policy(policy_name, policy_document, source=INLINE_POLICY_SOURCE)
 			principal.add_policy(policy)
 
-	def parse_managed_policies(self, principal, properties, property_name='ManagedPolicyArns'):
+	def parse_managed_policies(self, principal, properties, property_name='ManagedPolicyArns',
+							   unresolved_reference_handler=None):
 		managed_policy_arns = properties.get(property_name, [])
 		for arn in managed_policy_arns:
 			policy = ManagedPolicyParser.managed_policies.get(arn)
 			if policy is not None:
 				principal.add_policy(policy)
+				if unresolved_reference_handler is not None:
+					unresolved_reference_handler(
+						arn,
+						resolved=True,
+						policy=policy,
+						reason=None,
+						resolved_from_template=True
+					)
+				continue
+
+			policy_name, default_version_id, policy_path, is_aws_managed_policy = self._lookup_policy(
+				arn, unresolved_reference_handler
+			)
+			if policy_name is None:
+				# the reference was recorded as unresolved; keep any already-reviewed inline policy attached
 				continue
 
 			try:
-				# if the ARN is not a managed policy in the template, pull it from the environment
-				response = self.client.get_policy(PolicyArn=arn)
-			except ClientError as e:
-				if e.response['Error']['Code'] == 'NoSuchEntity':
-					raise ApplicationError(f'Could not find managed policy with {arn} in template or in environment.')
-				else:
-					raise
+				response = self.client.get_policy_version(PolicyArn=arn, VersionId=default_version_id)
+			except (ClientError, BotoCoreError):
+				if unresolved_reference_handler is not None:
+					unresolved_reference_handler(
+						arn,
+						resolved=False,
+						reason='CUSTOMER_MANAGED_POLICY_VERSION_UNAVAILABLE'
+					)
+					continue
+				raise
 
-			policy_name = response['Policy']['PolicyName']
-			default_version_id = response['Policy']['DefaultVersionId']
-			policy_path = response['Policy']['Path']
-
-			response = self.client.get_policy_version(PolicyArn=arn, VersionId=default_version_id)
 			policy_document = response['PolicyVersion']['Document']
 
-			# it must be a valid ARN if we made it this far
-			arn_parts = arn.split(':')
-			account_id = arn_parts[4]
-			# record whether this is an AWS managed policy because we may treat them slightly different for validation
-			is_aws_managed_policy = account_id.lower() == 'aws'
-
-			policy = Policy(policy_name, policy_document, policy_path, is_aws_managed_policy)
+			# the template attaches the policy by ARN but does not pin a version; the document read from IAM is what we
+			# audit, and any later version can differ
+			policy = Policy(policy_name, policy_document, policy_path, is_aws_managed_policy,
+							source=MANAGED_POLICY_EXTERNAL_SOURCE)
 			principal.add_policy(policy)
+			if unresolved_reference_handler is not None:
+				unresolved_reference_handler(
+					arn,
+					resolved=True,
+					policy=policy,
+					reason='CUSTOMER_MANAGED_POLICY_VERSION_NOT_PINNED' if not is_aws_managed_policy else None
+				)
+
+	def _lookup_policy(self, arn, unresolved_reference_handler):
+		try:
+			response = self.client.get_policy(PolicyArn=arn)
+		except ClientError as e:
+			if e.response['Error']['Code'] == 'NoSuchEntity':
+				if unresolved_reference_handler is not None:
+					unresolved_reference_handler(
+						arn,
+						resolved=False,
+						reason='CUSTOMER_MANAGED_POLICY_NOT_FOUND_IN_TEMPLATE_OR_ENVIRONMENT'
+					)
+					return None, None, None, False
+				raise ApplicationError(f'Could not find managed policy with {arn} in template or in environment.')
+			if unresolved_reference_handler is not None:
+				# AccessDenied and similar stop us from reading the document.  That is an evidence gap, not a reason to
+				# throw away the policy review that already succeeded for the rest of the permission set.
+				unresolved_reference_handler(
+					arn,
+					resolved=False,
+					reason='CUSTOMER_MANAGED_POLICY_LOOKUP_FAILED'
+				)
+				return None, None, None, False
+			raise
+		except BotoCoreError:
+			if unresolved_reference_handler is not None:
+				unresolved_reference_handler(
+					arn,
+					resolved=False,
+					reason='CUSTOMER_MANAGED_POLICY_UNAVAILABLE'
+				)
+				return None, None, None, False
+			raise
+
+		policy_name = response['Policy']['PolicyName']
+		default_version_id = response['Policy']['DefaultVersionId']
+		policy_path = response['Policy']['Path']
+
+		# it must be a valid ARN if we made it this far
+		arn_parts = arn.split(':')
+		account_id = arn_parts[4]
+		# record whether this is an AWS managed policy because we may treat them slightly different for validation
+		is_aws_managed_policy = account_id.lower() == 'aws'
+
+		return policy_name, default_version_id, policy_path, is_aws_managed_policy
 
 
 class RoleParser:
@@ -256,8 +328,9 @@ class PermissionSetParser:
 
 	permission_sets = {}
 
-	def __init__(self, region):
-		self.attached_policy_parser = AttachedPolicyParser(region)
+	def __init__(self, account_config):
+		self.attached_policy_parser = AttachedPolicyParser(account_config.region)
+		self.arn_generator = ArnGenerator(account_config)
 		PermissionSetParser.permission_sets = {}
 
 	def parse(self, resource_name, resource):
@@ -266,13 +339,63 @@ class PermissionSetParser:
 		properties = evaluated_resource['Properties']
 
 		name = properties['Name']
+		instance_arn = properties.get('InstanceArn')
+		permission_set_arn = self.arn_generator.try_generate_arn(resource_name, resource, 'PermissionSetArn')
 
-		permission_set = PermissionSet(name)
+		permission_set = PermissionSet(name, logical_id=resource_name, instance_arn=instance_arn,
+									   permission_set_arn=permission_set_arn)
+
+		def handle_managed_policy_reference(reference, resolved, policy=None, reason=None,
+											resolved_from_template=False):
+			# A policy resolved from the template is audited as written.  A policy read from IAM is audited, but its
+			# version is not pinned by the template, so the publisher still owes version evidence for customer-managed
+			# policies.
+			if policy is not None and policy.Source == MANAGED_POLICY_EXTERNAL_SOURCE and not policy.IsAWSManagedPolicy:
+				reason = reason or 'CUSTOMER_MANAGED_POLICY_VERSION_NOT_PINNED'
+
+			requires_publisher_evidence = not resolved or reason is not None
+			permission_set.add_managed_policy_reference(
+				reference,
+				resolved=resolved,
+				policy_name=policy.Name if policy is not None else None,
+				policy_path=policy.Path if policy is not None else None,
+				source=policy.Source if policy is not None else None,
+				reason=reason,
+				requires_publisher_evidence=requires_publisher_evidence
+			)
 
 		self.parse_inline_policy(permission_set, properties)
-		self.attached_policy_parser.parse_managed_policies(permission_set, properties, property_name="ManagedPolicies")
+		self.attached_policy_parser.parse_managed_policies(
+			permission_set,
+			properties,
+			property_name="ManagedPolicies",
+			unresolved_reference_handler=handle_managed_policy_reference
+		)
+		self.parse_customer_managed_policy_references(permission_set, properties)
+		self.parse_permissions_boundary(permission_set, properties)
 
 		self.permission_sets[resource_name] = permission_set
+
+	@staticmethod
+	def parse_customer_managed_policy_references(permission_set, properties):
+		""" Customer-managed policies are referenced by name/path and are not fetched from the environment.
+
+		They must be supplied by the publisher as reviewed evidence.  The reference itself is still recorded so the
+		permission set keeps an auditable link to policies the library deliberately did not read.
+		"""
+		for reference in properties.get('CustomerManagedPolicyReferences', []):
+			name = reference['Name']
+			path = reference.get('Path', '/')
+			permission_set.add_customer_managed_policy_reference(f'{path}{name}')
+
+	@staticmethod
+	def parse_permissions_boundary(permission_set, properties):
+		boundary = properties.get('PermissionsBoundary')
+		if boundary is None:
+			return
+
+		reference = boundary.get('ManagedPolicyArn') or boundary.get('CustomerManagedPolicyReference')
+		permission_set.set_permissions_boundary(reference)
 
 	@staticmethod
 	def parse_inline_policy(permission_set, properties):
@@ -282,8 +405,43 @@ class PermissionSetParser:
 		if inline_policy is None:
 			return
 
-		policy = Policy('InlinePolicy', inline_policy)
+		policy = Policy('InlinePolicy', inline_policy, source=INLINE_POLICY_SOURCE)
 		permission_set.add_policy(policy)
+
+
+class PermissionSetAssignmentParser:
+	""" Parser for AWS::SSO::Assignment.
+
+	An assignment is deployment intent, not evidence that the principal can actually use the permission set in the
+	target account.  We record it verbatim so the acceptance report can name the exact bindings that still require
+	publisher evidence.
+	"""
+
+	assignments = []
+
+	def __init__(self):
+		PermissionSetAssignmentParser.assignments = []
+
+	@classmethod
+	def reset(cls):
+		cls.assignments = []
+
+	def parse(self, resource_name, resource):
+		evaluated_resource = resource.eval(permission_set_assignment_schema)
+		properties = evaluated_resource['Properties']
+
+		permission_set_arn = properties['PermissionSetArn']
+		assignment = {
+			'LogicalId': resource_name,
+			'InstanceArn': properties['InstanceArn'],
+			'PermissionSetArn': permission_set_arn,
+			'PrincipalId': properties['PrincipalId'],
+			'PrincipalType': properties['PrincipalType'],
+			'TargetId': properties['TargetId'],
+			'TargetType': properties['TargetType'],
+			'RequiresPublisherEvidence': True
+		}
+		self.assignments.append(assignment)
 
 
 class PolicyParser(ABC):
@@ -443,7 +601,7 @@ class ManagedPolicyParser(PolicyParser):
 		policy_document = properties['PolicyDocument']
 		path = properties.get('Path', '/')
 
-		policy = Policy(policy_name, policy_document, path)
+		policy = Policy(policy_name, policy_document, path, source=MANAGED_POLICY_TEMPLATE_SOURCE)
 
 		# attempt to see if this managed policy is attached to any roles, users or groups in the template
 		self.parse_roles(policy, properties)

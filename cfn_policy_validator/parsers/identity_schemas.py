@@ -102,12 +102,64 @@ permission_set_schema = {
 				'Name': {
 					'type': 'string'
 				},
+				'InstanceArn': {
+					'type': 'string'
+				},
 				'InlinePolicy': {
 					'type': 'object'
 				},
-				'ManagedPolicies': managed_policy_arns_schema
+				'ManagedPolicies': managed_policy_arns_schema,
+				'CustomerManagedPolicyReferences': {
+					'type': 'array',
+					'items': {
+						'type': 'object',
+						'properties': {
+							'Name': {
+								'type': 'string'
+							},
+							'Path': {
+								'type': 'string'
+							}
+						},
+						'required': ['Name']
+					}
+				},
+				'PermissionsBoundary': {
+					'type': 'object'
+				}
 			},
 			'required': ['Name']
+		}
+	},
+	'required': ['Properties']
+}
+
+permission_set_assignment_schema = {
+	'type': 'object',
+	'properties': {
+		'Properties': {
+			'type': 'object',
+			'properties': {
+				'InstanceArn': {
+					'type': 'string'
+				},
+				'PermissionSetArn': {
+					'type': 'string'
+				},
+				'PrincipalId': {
+					'type': 'string'
+				},
+				'PrincipalType': {
+					'type': 'string'
+				},
+				'TargetId': {
+					'type': 'string'
+				},
+				'TargetType': {
+					'type': 'string'
+				}
+			},
+			'required': ['InstanceArn', 'PermissionSetArn', 'PrincipalId', 'PrincipalType', 'TargetId', 'TargetType']
 		}
 	},
 	'required': ['Properties']

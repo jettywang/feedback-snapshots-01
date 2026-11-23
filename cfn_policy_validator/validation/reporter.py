@@ -165,6 +165,18 @@ class Report:
 	def __init__(self, blocking_findings, nonblocking_findings):
 		self.blocking_findings = blocking_findings
 		self.nonblocking_findings = nonblocking_findings
+		self.PermissionSetEvidence = []
+		self.EvidenceSourceBoundaries = []
+		self.AcceptanceNotes = ''
+
+	def attach_permission_set_evidence(self, evidence):
+		self.PermissionSetEvidence = evidence
+
+	def attach_source_boundaries(self, boundaries):
+		self.EvidenceSourceBoundaries = boundaries
+
+	def attach_acceptance_notes(self, notes):
+		self.AcceptanceNotes = notes
 
 	def has_blocking_findings(self):
 		return len(self.blocking_findings) > 0
@@ -172,7 +184,10 @@ class Report:
 	def to_json(self):
 		return {
 			'BlockingFindings': [vars(finding) for finding in self.blocking_findings],
-			'NonBlockingFindings': [vars(finding) for finding in self.nonblocking_findings]
+			'NonBlockingFindings': [vars(finding) for finding in self.nonblocking_findings],
+			'PermissionSetEvidence': self.PermissionSetEvidence,
+			'EvidenceSourceBoundaries': self.EvidenceSourceBoundaries,
+			'AcceptanceNotes': self.AcceptanceNotes
 		}
 
 	def print(self):

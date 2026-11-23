@@ -390,7 +390,7 @@ class WhenParsingManagedPolicyAttachedToAPermissionSetAndThePolicyDoesNotExistIn
 			)
 		]
 	)
-	def test_throws_exception(self):
+	def test_records_the_unavailable_reference_instead_of_discarding_the_permission_set(self):
 		template = load({
 			'Resources': {
 				'PermissionSet': {
@@ -405,8 +405,15 @@ class WhenParsingManagedPolicyAttachedToAPermissionSetAndThePolicyDoesNotExistIn
 			}
 		})
 
-		with self.assertRaises(ApplicationError) as cm:
-			IdentityParser.parse(template, account_config)
+		_, _, _, permission_sets, _ = IdentityParser.parse(template, account_config)
 
-		self.assertEqual('Could not find managed policy with arn:aws:iam::aws:policy/DoesNotExist in template '
-						 'or in environment.', str(cm.exception))
+		self.assertEqual(1, len(permission_sets))
+		permission_set = permission_sets[0]
+		self.assertEqual('MyPermissionSet', permission_set.Name)
+		self.assertEqual(0, len(permission_set.Policies))
+		self.assertEqual(1, len(permission_set.ManagedPolicyReferences))
+
+		reference = permission_set.ManagedPolicyReferences[0]
+		self.assertEqual('arn:aws:iam::aws:policy/DoesNotExist', reference['Reference'])
+		self.assertFalse(reference['Resolved'])
+		self.assertTrue(reference['RequiresPublisherEvidence'])

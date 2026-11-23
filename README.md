@@ -193,6 +193,51 @@ Parses IAM identity-based and resource-based policies from AWS CloudFormation te
 | AWS::CloudTrail::EventDataStore | | | x |
 | AWS::S3Express::AccessPoint | | | x |
 
+### AWS IAM Identity Center permission sets
+
+`AWS::SSO::PermissionSet` resources are parsed as identity resources and their inline policy and attached managed
+policies are validated like IAM policies. In addition, `parse` and `validate` return a permission set acceptance ledger
+so a release gate can tell what was actually audited from what the publisher still has to evidence.
+
+Each permission set in the output is identified by its CloudFormation logical ID (`LogicalId`) as well as its display
+name (`Name`). Two templates, or two resources in one template, can use the same display name; findings and ledger
+entries are qualified with the logical ID when a name collision exists, for example `SharedAccess (AdminPermissionSet)`.
+
+Each `PermissionSetEvidence` entry contains:
+
+- `Coverage` — `ALL_POLICIES_AUDITED`, `PARTIAL_POLICIES_AUDITED`, or `NO_POLICIES_AUDITED`. Coverage is partial when any
+  referenced policy, permissions boundary, or assignment still requires publisher evidence.
+- `AnalysisOutcome` — `ANALYSIS_NOT_RUN`, `NO_POLICIES_ANALYZED`, `ANALYZED_NO_FINDINGS`, or `ANALYZED_WITH_FINDINGS`.
+  A clean `validate` result is `ANALYZED_NO_FINDINGS`, never an empty ledger.
+- `AuditedPolicies` — every policy document attached to the permission set, with its `Source`
+  (`INLINE_POLICY`, `MANAGED_POLICY_TEMPLATE`, or `MANAGED_POLICY_EXTERNAL`) and a `sha256` digest of the document.
+- `AnalyzedDocuments` — the documents actually submitted to IAM Access Analyzer, with the same digest so the ledger can
+  be reconciled against the request body. A policy name alone is never recorded as an analyzed document.
+- `EvidenceRequired` — the specific pieces the library cannot prove: unresolved or unpinned managed policy references,
+  `CustomerManagedPolicyReferences`, a permissions boundary, and `AWS::SSO::Assignment` resources.
+
+`PermissionSetAssignments` lists `AWS::SSO::Assignment` resources found in the template; `UnmatchedPermissionSetAssignments`
+lists assignments whose permission set is not defined in the template. Both are intent, not proof that the principal can
+use the permission set.
+
+#### Evidence source boundaries
+
+A successful parse or a clean policy analysis does not mean the target account has the permission. The report includes
+`EvidenceSourceBoundaries` and human-readable `AcceptanceNotes` that name the limits of the evidence, including:
+
+- Only policy documents resolvable from the supplied template are audited. A managed policy ARN that resolves to no
+  document is recorded as an evidence gap.
+- AWS-managed policies attached by ARN are read from IAM at analysis time; the template does not pin their version.
+- Customer-managed policies referenced by name, path, or account-local ARN may not be fetched; the publisher must supply
+  the reviewed document and the deployed version.
+- A permissions boundary is recorded but not evaluated against effective permissions.
+- `AWS::SSO::Assignment` bindings, identity store membership, principal `TargetId` enablement, organization SCPs / RCPs,
+  and the effective account permission are all outside what a CloudFormation template can evidence.
+
+If a permission set's inline policy is already reviewed but an external managed policy reference cannot be resolved, the
+parse keeps the inline policy attached to its permission set and records the unresolved reference in `EvidenceRequired`
+instead of discarding the whole permission set.
+
 ### Intrinsic function and Pseudo parameter support
 
 The functions in the following list can be used within IAM identity-based or resource-based policies.  The tool only attempts to evaluate intrinsic functions within policies, so you can still use intrinsic functions not on this list elsewhere in your template.

@@ -12,6 +12,7 @@ from cfn_policy_validator.argument_actions import parse_findings_to_ignore, pars
 from cfn_policy_validator.cfn_tools import cfn_loader
 from cfn_policy_validator.parameters import validate_finding_types
 from cfn_policy_validator.parsers.account_config import AccountConfig
+from cfn_policy_validator.parsers.evidence import build_permission_set_evidence, describe_source_boundaries
 from cfn_policy_validator.parsers.identity import IdentityParser
 from cfn_policy_validator.parsers.output import Output
 from cfn_policy_validator.parsers.resource.parser import ResourceParser
@@ -154,6 +155,11 @@ def _parse_template_output(template, account_config, excluded_resource_types={})
     LOGGER.info(f'Not parsing resources: {excluded_resource_types}' if excluded_resource_types else 'Parsing all resources')
     output.Roles, output.Users, output.Groups, output.PermissionSets, output.OrphanedPolicies = \
         IdentityParser.parse(template, account_config, excluded_resource_types)
+    output.PermissionSetAssignments = IdentityParser.get_permission_set_assignments()
+    output.PermissionSetEvidence, output.UnmatchedPermissionSetAssignments = build_permission_set_evidence(
+        output.PermissionSets, output.PermissionSetAssignments
+    )
+    output.EvidenceSourceBoundaries = describe_source_boundaries()
     output.Resources = ResourceParser.parse(template, account_config, excluded_resource_types)
 
     return output

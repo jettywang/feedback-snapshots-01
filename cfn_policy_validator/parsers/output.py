@@ -6,6 +6,11 @@ import datetime
 import json
 
 
+INLINE_POLICY_SOURCE = 'INLINE_POLICY'
+MANAGED_POLICY_TEMPLATE_SOURCE = 'MANAGED_POLICY_TEMPLATE'
+MANAGED_POLICY_EXTERNAL_SOURCE = 'MANAGED_POLICY_EXTERNAL'
+
+
 class Output:
     """
     Parser output representation.  Populated by identity and resource parsers.
@@ -21,6 +26,10 @@ class Output:
         self.Groups = []
         self.Resources = []
         self.OrphanedPolicies = []
+        self.PermissionSetAssignments = []
+        self.UnmatchedPermissionSetAssignments = []
+        self.PermissionSetEvidence = []
+        self.EvidenceSourceBoundaries = []
 
     def print(self):
         as_json_string = json.dumps(self, default=self.default_to_json, indent=4)
@@ -54,8 +63,21 @@ class Output:
         groups_are_equal = sorted(self.Groups) == sorted(other.Groups)
         resources_are_equal = sorted(self.Resources) == sorted(other.Resources)
         policies_are_equal = sorted(self.OrphanedPolicies) == sorted(other.OrphanedPolicies)
+        assignments_are_equal = self._assignments_as_comparable(self.PermissionSetAssignments) == \
+            self._assignments_as_comparable(other.PermissionSetAssignments)
+        evidence_are_equal = self._evidence_as_comparable(self.PermissionSetEvidence) == \
+            self._evidence_as_comparable(other.PermissionSetEvidence)
         return roles_are_equal and users_are_equal and groups_are_equal and \
-               resources_are_equal and policies_are_equal and permission_sets_are_equal
+               resources_are_equal and policies_are_equal and permission_sets_are_equal and \
+               assignments_are_equal and evidence_are_equal
+
+    @staticmethod
+    def _assignments_as_comparable(assignments):
+        return sorted(assignments, key=lambda assignment: assignment.get('LogicalId', ''))
+
+    @staticmethod
+    def _evidence_as_comparable(evidence):
+        return sorted(evidence, key=lambda record: (record.get('Name', ''), record.get('LogicalId') or ''))
 
     def __hash__(self):
         return hash((self.Roles, self.Users, self.Groups, self.Resources, self.OrphanedPolicies))
@@ -143,30 +165,78 @@ class Role(IdentityWithPolicies):
 
 
 class PermissionSet(IdentityWithPolicies):
-    def __init__(self, name):
+    def __init__(self, name, logical_id=None, instance_arn=None, permission_set_arn=None):
         self.Name = name
+        self.LogicalId = logical_id
+        self.InstanceArn = instance_arn
+        self.PermissionSetArn = permission_set_arn
+        self.ManagedPolicyReferences = []
+        self.CustomerManagedPolicyReferences = []
+        self.PermissionsBoundary = None
         super(PermissionSet, self).__init__()
+
+    def add_managed_policy_reference(self, reference, resolved, policy_name=None, policy_path=None,
+                                     source=None, reason=None, requires_publisher_evidence=None):
+        if requires_publisher_evidence is None:
+            requires_publisher_evidence = not resolved
+
+        entry = {
+            'Reference': reference,
+            'PolicyName': policy_name,
+            'PolicyPath': policy_path,
+            'Resolved': resolved,
+            'Source': source,
+            'RequiresPublisherEvidence': requires_publisher_evidence,
+            'Reason': reason
+        }
+        self.ManagedPolicyReferences.append(entry)
+        return entry
+
+    def add_customer_managed_policy_reference(self, reference):
+        entry = {
+            'Reference': reference,
+            'Resolved': False,
+            'RequiresPublisherEvidence': True,
+            'Reason': 'CUSTOMER_MANAGED_POLICY_LOOKUP_NOT_PERFORMED'
+        }
+        self.CustomerManagedPolicyReferences.append(entry)
+        return entry
+
+    def set_permissions_boundary(self, boundary):
+        self.PermissionsBoundary = {
+            'Reference': boundary,
+            'Evaluated': False,
+            'RequiresPublisherEvidence': True,
+            'Reason': 'PERMISSIONS_BOUNDARY_NOT_EVALUATED'
+        }
 
     def __eq__(self, other):
         if not isinstance(other, PermissionSet):
             return False
 
         return self.Name == other.Name and\
+            self.LogicalId == other.LogicalId and\
+            self.InstanceArn == other.InstanceArn and\
+            self.PermissionSetArn == other.PermissionSetArn and\
+            self.ManagedPolicyReferences == other.ManagedPolicyReferences and\
+            self.CustomerManagedPolicyReferences == other.CustomerManagedPolicyReferences and\
+            self.PermissionsBoundary == other.PermissionsBoundary and\
             super().__eq__(other)
 
     def __lt__(self, other):
-        return self.Name < other.Name
+        return (self.Name, self.LogicalId or '') < (other.Name, other.LogicalId or '')
 
     def __hash__(self):
-        return hash((self.Name, super().__hash__()))
+        return hash((self.Name, self.LogicalId, super().__hash__()))
 
 
 class Policy:
-    def __init__(self, name, document, path="/", is_aws_managed_policy=False):
+    def __init__(self, name, document, path="/", is_aws_managed_policy=False, source=None):
         self.Name = name
         self.Policy = document
         self.Path = path
         self.IsAWSManagedPolicy = is_aws_managed_policy
+        self.Source = source
 
     def __eq__(self, other):
         if not isinstance(other, Policy):
@@ -176,8 +246,10 @@ class Policy:
         paths_are_equal = self.Path == other.Path
         policies_are_equal = self.Policy == other.Policy
         is_managed_policy_is_equal = self.IsAWSManagedPolicy == other.IsAWSManagedPolicy
+        sources_are_equal = self.Source == other.Source
 
-        return names_are_equal and paths_are_equal and policies_are_equal and is_managed_policy_is_equal
+        return names_are_equal and paths_are_equal and policies_are_equal and \
+            is_managed_policy_is_equal and sources_are_equal
 
     def __lt__(self, other):
         return self.Name < other.Name
