@@ -13,3 +13,21 @@
 # limitations under the License.
 
 from .role_manager import RoleManager, ConditionalRoleManager
+from .versioned_role_graph import (
+    Link,
+    ChangeKind,
+    ChangeStatus,
+    DistributionState,
+    RoleChange,
+    RoleGraphSnapshot,
+    VersionedRoleGraph,
+    ChangeReceipt,
+    RoleGraphDispatcher,
+    InMemoryRoleGraphDispatcher,
+    DistributionError,
+    RoleGraphStore,
+    InMemoryRoleGraphStore,
+    AdapterRoleGraphStore,
+    PersistError,
+    RoleGraphCoordinator,
+)

@@ -23,6 +23,24 @@ from .synced_cached_enforcer import SyncedCachedEnforcer
 from .async_cached_enforcer import AsyncCachedEnforcer
 from .cache import Cache, DefaultCache
 from . import util
+from .rbac.versioned_role_graph import (
+    Link,
+    ChangeKind,
+    ChangeStatus,
+    DistributionState,
+    RoleChange,
+    RoleGraphSnapshot,
+    VersionedRoleGraph,
+    ChangeReceipt,
+    RoleGraphDispatcher,
+    InMemoryRoleGraphDispatcher,
+    DistributionError,
+    RoleGraphStore,
+    InMemoryRoleGraphStore,
+    AdapterRoleGraphStore,
+    PersistError,
+    RoleGraphCoordinator,
+)
 from .persist import *
 from .effect import *
 from .model import *
