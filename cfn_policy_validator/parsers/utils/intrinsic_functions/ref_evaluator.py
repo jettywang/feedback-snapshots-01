@@ -104,6 +104,10 @@ class RefEvaluator:
 			# if the parameter exists in the template, make sure a value was passed in for it
 			parameter_value = self.parameter_values.get(resource_logical_name_or_param)
 			if parameter_value is None:
+				# hosted templates are allowed to provide default values for everyday configuration,
+				# so fall back to the declared default when the deployer did not supply a value
+				parameter_value = parameter.get('Default')
+			if parameter_value is None:
 				raise ApplicationError(f'No value passed for referenced parameter: {resource_logical_name_or_param}.\n'
 									   f'Parameters are passed using the --parameters flag.')
 

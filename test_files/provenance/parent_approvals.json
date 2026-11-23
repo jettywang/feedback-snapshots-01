@@ -1,0 +1,10 @@
+{
+  "Approvals": [
+    {
+      "Parameter": "DataClassification",
+      "Value": "internal",
+      "ApprovedBy": "security-ops@example.com",
+      "Reference": "SEC-2026-1187"
+    }
+  ]
+}

@@ -1,0 +1,51 @@
+{
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Description": "Hosted parent template. Ships defaults for everyday configuration; permission parameters are evidenced by external approval material.",
+  "Parameters": {
+    "DataClassification": {
+      "Type": "String",
+      "Default": "internal",
+      "AllowedValues": ["internal", "public"]
+    },
+    "LogRetentionDays": {
+      "Type": "Number",
+      "Default": 14
+    }
+  },
+  "Resources": {
+    "ParentRole": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "RoleName": {"Fn::Sub": "hosted-${DataClassification}-role"},
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [{
+            "Effect": "Allow",
+            "Principal": {"Service": "lambda.amazonaws.com"},
+            "Action": "sts:AssumeRole"
+          }]
+        },
+        "Policies": [{
+          "PolicyName": "DataAccess",
+          "PolicyDocument": {
+            "Version": "2012-10-17",
+            "Statement": [{
+              "Effect": "Allow",
+              "Action": ["s3:GetObject", "s3:ListBucket"],
+              "Resource": [
+                {"Fn::Sub": "arn:aws:s3:::${DataClassification}-data"},
+                {"Fn::Sub": "arn:aws:s3:::${DataClassification}-data/*"}
+              ]
+            }]
+          }
+        }]
+      }
+    },
+    "AppLogGroup": {
+      "Type": "AWS::Logs::LogGroup",
+      "Properties": {
+        "RetentionInDays": {"Ref": "LogRetentionDays"}
+      }
+    }
+  }
+}

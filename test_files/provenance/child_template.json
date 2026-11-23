@@ -1,0 +1,133 @@
+{
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Description": "Sub-resource template. DataClassification is legitimately inherited from the approved parent; DefaultClassification only coincides by default value.",
+  "Parameters": {
+    "DataClassification": {
+      "Type": "String",
+      "Default": "internal"
+    },
+    "DefaultClassification": {
+      "Type": "String",
+      "Default": "internal"
+    },
+    "BackupVaultName": {
+      "Type": "String",
+      "Default": "daily-backups"
+    }
+  },
+  "Resources": {
+    "ChildInheritingRole": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "RoleName": {
+          "Fn::Sub": "child-${DataClassification}-role"
+        },
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "lambda.amazonaws.com"
+              },
+              "Action": "sts:AssumeRole"
+            }
+          ]
+        },
+        "Policies": [
+          {
+            "PolicyName": "InheritedDataAccess",
+            "PolicyDocument": {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "s3:GetObject"
+                  ],
+                  "Resource": {
+                    "Fn::Sub": "arn:aws:s3:::${DataClassification}-data/*"
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      }
+    },
+    "ChildDefaultRole": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "RoleName": "child-default-only-role",
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "lambda.amazonaws.com"
+              },
+              "Action": "sts:AssumeRole"
+            }
+          ]
+        },
+        "Policies": [
+          {
+            "PolicyName": "DefaultOnlyDataAccess",
+            "PolicyDocument": {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "s3:GetObject"
+                  ],
+                  "Resource": {
+                    "Fn::Sub": "arn:aws:s3:::${DefaultClassification}-data/*"
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      }
+    },
+    "ChildBackupRole": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "RoleName": "child-backup-role",
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "backup.amazonaws.com"
+              },
+              "Action": "sts:AssumeRole"
+            }
+          ]
+        },
+        "Policies": [
+          {
+            "PolicyName": "BackupAccess",
+            "PolicyDocument": {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "backup:StartBackupJob"
+                  ],
+                  "Resource": {
+                    "Fn::Sub": "arn:aws:backup:::backup-vault:${BackupVaultName}"
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      }
+    }
+  }
+}

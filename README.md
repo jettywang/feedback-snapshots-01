@@ -76,7 +76,7 @@ Exits with a non-zero error code if any findings categorized as blocking are fou
 | --------- | -------- | ---------| ----------- |
 | --template-path | Yes | FILE_NAME | The path to the CloudFormation template. |
 | --region | | REGION | The destination region the resources will be deployed to. If not specified, defaults to the AWS_REGION or AWS_DEFAULT_REGION environment variable. |
-| --parameters | | KEY=VALUE [KEY=VALUE ...] | Keys and values for CloudFormation template parameters.  Only parameters that are referenced by IAM policies in the template are required. |
+| --parameters | | KEY=VALUE [KEY=VALUE ...] | Keys and values for CloudFormation template parameters.  Only parameters that are referenced by IAM policies in the template are required. Parameters that declare a `Default` in the template fall back to that default when no value is supplied. |
 | --template-configuration-file | | FILE_PATH.json | A JSON formatted file that specifies template parameter values. Identical values passed in the --parameters flag override parameters in this file. Supports three formats: the [CodePipeline template configuration file](https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/continuous-delivery-codepipeline-cfn-artifacts.html#w2ab1c21c15c15) format (`{"Parameters": {"Key": "Value"}}`), the [CloudFormation parameter file](https://docs.aws.amazon.com/cli/latest/reference/cloudformation/deploy.html) format (`[{"ParameterKey": "Key", "ParameterValue": "Value"}, ...]`), and a simple Key=Value string array (`["Key1=Value1", "Key2=Value2"]`).
 | --profile | | PROFILE | The named profile to use for AWS API calls. |
 | --enable-logging | | | Enables log output to stdout |
@@ -99,7 +99,7 @@ Parses IAM identity-based and resource-based policies from AWS CloudFormation te
 | --------- | -------- | ---------| ----------- |
 | --template-path | Yes | FILE_NAME | The path to the CloudFormation template. |
 | --region | | REGION | The destination region the resources will be deployed to. If not specified, defaults to the AWS_REGION or AWS_DEFAULT_REGION environment variable. |
-| --parameters | | KEY=VALUE [KEY=VALUE ...] | Keys and values for CloudFormation template parameters.  Only parameters that are referenced by IAM policies in the template are required. |
+| --parameters | | KEY=VALUE [KEY=VALUE ...] | Keys and values for CloudFormation template parameters.  Only parameters that are referenced by IAM policies in the template are required. Parameters that declare a `Default` in the template fall back to that default when no value is supplied. |
 | --template-configuration-file | | FILE_PATH.json | A JSON formatted file that specifies template parameter values. Identical values passed in the --parameters flag override parameters in this file. Supports three formats: the [CodePipeline template configuration file](https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/continuous-delivery-codepipeline-cfn-artifacts.html#w2ab1c21c15c15) format (`{"Parameters": {"Key": "Value"}}`), the [CloudFormation parameter file](https://docs.aws.amazon.com/cli/latest/reference/cloudformation/deploy.html) format (`[{"ParameterKey": "Key", "ParameterValue": "Value"}, ...]`), and a simple Key=Value string array (`["Key1=Value1", "Key2=Value2"]`).
 | --profile | | PROFILE | The named profile to use for AWS API calls. |
 | --enable-logging | | | Enables log output to stdout |
@@ -121,7 +121,7 @@ Parses IAM identity-based and resource-based policies from AWS CloudFormation te
 | --------- | -------- | ---------| ----------- |
 | --template-path | Yes | FILE_NAME | The path to the CloudFormation template. |
 | --region | | REGION | The destination region the resources will be deployed to. If not specified, defaults to the AWS_REGION or AWS_DEFAULT_REGION environment variable. |
-| --parameters | | KEY=VALUE [KEY=VALUE ...] | Keys and values for CloudFormation template parameters.  Only parameters that are referenced by IAM policies in the template are required. |
+| --parameters | | KEY=VALUE [KEY=VALUE ...] | Keys and values for CloudFormation template parameters.  Only parameters that are referenced by IAM policies in the template are required. Parameters that declare a `Default` in the template fall back to that default when no value is supplied. |
 | --template-configuration-file | | FILE_PATH.json | A JSON formatted file that specifies template parameter values. Identical values passed in the --parameters flag override parameters in this file. Supports three formats: the [CodePipeline template configuration file](https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/continuous-delivery-codepipeline-cfn-artifacts.html#w2ab1c21c15c15) format (`{"Parameters": {"Key": "Value"}}`), the [CloudFormation parameter file](https://docs.aws.amazon.com/cli/latest/reference/cloudformation/deploy.html) format (`[{"ParameterKey": "Key", "ParameterValue": "Value"}, ...]`), and a simple Key=Value string array (`["Key1=Value1", "Key2=Value2"]`).
 | --profile | | PROFILE | The named profile to use for AWS API calls. |
 | --enable-logging | | | Enables log output to stdout |
@@ -143,7 +143,7 @@ Parses resource-based policies from AWS CloudFormation templates. Then runs the 
 | --------- | -------- | ---------| ----------- |
 | --template-path | Yes | FILE_NAME | The path to the CloudFormation template. |
 | --region | | REGION | The destination region the resources will be deployed to. If not specified, defaults to the AWS_REGION or AWS_DEFAULT_REGION environment variable. |
-| --parameters | | KEY=VALUE [KEY=VALUE ...] | Keys and values for CloudFormation template parameters.  Only parameters that are referenced by IAM policies in the template are required. |
+| --parameters | | KEY=VALUE [KEY=VALUE ...] | Keys and values for CloudFormation template parameters.  Only parameters that are referenced by IAM policies in the template are required. Parameters that declare a `Default` in the template fall back to that default when no value is supplied. |
 | --template-configuration-file | | FILE_PATH.json | A JSON formatted file that specifies template parameter values. Identical values passed in the --parameters flag override parameters in this file. Supports three formats: the [CodePipeline template configuration file](https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/continuous-delivery-codepipeline-cfn-artifacts.html#w2ab1c21c15c15) format (`{"Parameters": {"Key": "Value"}}`), the [CloudFormation parameter file](https://docs.aws.amazon.com/cli/latest/reference/cloudformation/deploy.html) format (`[{"ParameterKey": "Key", "ParameterValue": "Value"}, ...]`), and a simple Key=Value string array (`["Key1=Value1", "Key2=Value2"]`).
 | --profile | | PROFILE | The named profile to use for AWS API calls. |
 | --enable-logging | | | Enables log output to stdout |
@@ -164,12 +164,56 @@ Parses IAM identity-based and resource-based policies from AWS CloudFormation te
 | --------- | -------- | ---------| ----------- |
 | --template-path | Yes | FILE_NAME | The path to the CloudFormation template. |
 | --region | | REGION | The destination region the resources will be deployed to. If not specified, defaults to the AWS_REGION or AWS_DEFAULT_REGION environment variable. |
-| --parameters | | KEY=VALUE [KEY=VALUE ...] | Keys and values for CloudFormation template parameters.  Only parameters that are referenced by IAM policies in the template are required. |
+| --parameters | | KEY=VALUE [KEY=VALUE ...] | Keys and values for CloudFormation template parameters.  Only parameters that are referenced by IAM policies in the template are required. Parameters that declare a `Default` in the template fall back to that default when no value is supplied. |
 | --template-configuration-file | | FILE_PATH.json | A JSON formatted file that specifies template parameter values. Identical values passed in the --parameters flag override parameters in this file. Supports three formats: the [CodePipeline template configuration file](https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/continuous-delivery-codepipeline-cfn-artifacts.html#w2ab1c21c15c15) format (`{"Parameters": {"Key": "Value"}}`), the [CloudFormation parameter file](https://docs.aws.amazon.com/cli/latest/reference/cloudformation/deploy.html) format (`[{"ParameterKey": "Key", "ParameterValue": "Value"}, ...]`), and a simple Key=Value string array (`["Key1=Value1", "Key2=Value2"]`).
 | --profile | | PROFILE | The named profile to use for AWS API calls. |
 | --enable-logging | | | Enables log output to stdout |
 | --allow-dynamic-ref-without-version | | | Override the default behavior and allow dynamic SSM references without version numbers.  The version number ensures that the SSM parameter value that was validated is the one that is deployed. |
 | --exclude-resource-types | | AWS::SERVICE::RESOURCE, AWS::SERVICE::RESOURCE | List of comma-separated resource types. Resource types should be the same as Cloudformation template resource names such as AWS::IAM::Role, AWS::S3::Bucket |
+
+### Parameter value provenance report
+
+Hosted templates are allowed to ship default values for everyday configuration, but permission-affecting
+parameters (those referenced by `AWS::IAM::*` resources) must be backed by either a deployer-confirmed
+value or external approval evidence. The provenance report validates one or more local templates and
+distinguishes how every parameter value was sourced:
+
+- `deployer-confirmed` — an explicit value supplied for the deployment.
+- `approval-evidence` — the value is backed by an external approval record (a JSON evidence file).
+- `inherited-approval` — a sub-resource (e.g. nested stack) legitimately received the value from an
+  approved ancestor template and retains the ancestor's approval evidence.
+- `template-default` — the value comes only from the template's own `Default`. Allowed for everyday
+  configuration, never sufficient for permission-affecting parameters. A role whose value merely
+  coincides with an approved value via its own default does **not** inherit the approval.
+
+```bash
+python -m cfn_policy_validator.provenance --run-config ./run-config.json
+```
+
+The run config lists the templates to validate in order, their deployer-confirmed parameters, approval
+evidence files, and inheritance bindings:
+
+```json
+{
+  "Region": "us-east-2",
+  "Account": "111222333444",
+  "Partition": "aws",
+  "Templates": [
+    {"Name": "parent", "TemplatePath": "parent.json", "ApprovalEvidenceFiles": ["approvals.json"]},
+    {"Name": "child", "TemplatePath": "child.json", "InheritsFrom": "parent",
+     "ParameterBindings": {"DataClassification": "DataClassification"},
+     "ApprovalEvidenceFiles": ["child-approvals.json"]}
+  ]
+}
+```
+
+The report lists, per template, each parameter's declared source and status, and each role's actual
+permissions (actions and resources from its evaluated policies) and approval status. A missing template
+or approval evidence file is recorded as an error on that template without aborting the run, so results
+for roles that were already approved are preserved. The command exits with a non-zero code if any
+permission-affecting parameter is unapproved or any template has errors. See
+`test_files/provenance/` for a runnable example. This report is built entirely from local files and
+does not call AWS.
 
 ### Supported resource-based policies
 

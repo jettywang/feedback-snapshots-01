@@ -1,0 +1,19 @@
+{
+  "Region": "us-east-2",
+  "Account": "111222333444",
+  "Partition": "aws",
+  "Templates": [
+    {
+      "Name": "parent",
+      "TemplatePath": "parent_template.json",
+      "ApprovalEvidenceFiles": ["parent_approvals.json"]
+    },
+    {
+      "Name": "child",
+      "TemplatePath": "child_template.json",
+      "InheritsFrom": "parent",
+      "ParameterBindings": {"DataClassification": "DataClassification"},
+      "ApprovalEvidenceFiles": ["child_approvals.json"]
+    }
+  ]
+}
