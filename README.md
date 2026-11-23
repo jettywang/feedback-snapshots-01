@@ -171,6 +171,39 @@ Parses IAM identity-based and resource-based policies from AWS CloudFormation te
 | --allow-dynamic-ref-without-version | | | Override the default behavior and allow dynamic SSM references without version numbers.  The version number ensures that the SSM parameter value that was validated is the one that is deployed. |
 | --exclude-resource-types | | AWS::SERVICE::RESOURCE, AWS::SERVICE::RESOURCE | List of comma-separated resource types. Resource types should be the same as Cloudformation template resource names such as AWS::IAM::Role, AWS::S3::Bucket |
 
+**analyze-conditions**
+
+```bash
+cfn-policy-validator analyze-conditions --template-path ./my-template.json --region us-east-1 --parameters DecidedParam=value
+```
+
+Offline, three-scenario analysis for release reviews where some CloudFormation parameters are not decided yet. This command never calls AWS and never requires live credentials; the region is used only to render regional pseudo-parameter values.
+
+Behavior:
+
+- Parameters you supply with `--parameters` (or `--template-configuration-file`) are evaluated normally and run through the same deterministic policy checks.
+- A declared parameter without a supplied value is treated as unresolved. Its `Default` is never substituted. The unresolved value is carried through evaluation as an explicit marker.
+- Every `Condition` whose truth depends on an unresolved parameter is reported as **undecidable**, and each policy that such a condition can change is given status `CONDITIONAL` with the exact condition name(s) listed in `AffectingConditions`.
+- A policy that no undecidable condition can change keeps status `KNOWN` with a single deterministic conclusion, even when an unrelated resource's policy is conditional. Other roles are therefore never downgraded to unknown.
+- The report compares three views side by side for every policy:
+  - `unresolved` - the conservative pre-deployment view; undecidable conditions are not forced and unresolved parameters are kept as markers.
+  - `if_true` - every undecidable condition is forced to `true`.
+  - `if_false` - every undecidable condition is forced to `false`.
+
+Once every parameter is supplied, the undecidable set is empty, every policy returns to `KNOWN`, and the three views converge on the deterministic result.
+
+The top-level report contains `UnknownParameters`, `UndecidableConditions`, a `StatusSummary` count of `KNOWN` versus `CONDITIONAL` policies, and a `Policies` array. Each policy entry exposes the three `Scenarios`, the offline policy `findings` for each (for example `PUBLIC_PRINCIPAL`, `WILDCARD_ACTION`, `FULL_ACCESS`), and an `AuthorisationImpact` block for conditional policies. A branch that resolves to `AWS::NoValue` is reported with `present: false`, meaning that branch grants nothing.
+
+| Arguments | Required |  Options | Description |
+| --------- | -------- | ---------| ----------- |
+| --template-path | Yes | FILE_NAME | The path to the CloudFormation template. |
+| --region | | REGION | Region used only to render regional pseudo-parameter values. Defaults to the AWS_REGION or AWS_DEFAULT_REGION environment variable. |
+| --parameters | | KEY=VALUE [KEY=VALUE ...] | The parameters that have already been decided. Any other declared parameter is kept unresolved rather than defaulted. |
+| --template-configuration-file | | FILE_PATH.json | A JSON formatted file that supplies parameter values (supports the same three formats as the other commands). Values from `--parameters` take precedence. |
+| --account-id | | 123456789012 | Synthetic 12-digit account id used only to render account-scoped ARNs. Defaults to a placeholder. |
+| --partition | | aws | Partition used only to render ARNs. Defaults to `aws`. |
+| --enable-logging | | | Enables log output to stdout |
+
 ### Supported resource-based policies
 
 | CloudFormation Resource Type | Policy best practice checks | Access previews (check for external access) | Custom Policy Check (public access)

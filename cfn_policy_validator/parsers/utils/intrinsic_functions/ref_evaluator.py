@@ -12,10 +12,12 @@ from cfn_policy_validator.parsers.utils.cycle_detection import validate_no_cycle
 from cfn_policy_validator.parsers.utils.intrinsic_functions import name_hints
 from cfn_policy_validator.parsers.utils.intrinsic_functions import aws_url_suffix_evaluator
 from cfn_policy_validator.parsers.utils.intrinsic_functions.aws_no_value_evaluator import NoValue
+from cfn_policy_validator.conditional_analysis.unknown_value import UnknownValue
 
 
 class RefEvaluator:
-	def __init__(self, resources, arn_generator, parameters, parameter_values, account_config, node_evaluator):
+	def __init__(self, resources, arn_generator, parameters, parameter_values, account_config, node_evaluator,
+	             allow_unknown_parameters=False):
 		this_files_directory = os.path.dirname(os.path.realpath(__file__))
 		with open(os.path.join(this_files_directory, '..', 'services_where_ref_returns_arn.json')) as f:
 			services_where_ref_returns_arn = json.load(f)
@@ -27,6 +29,9 @@ class RefEvaluator:
 		self.parameter_values = parameter_values
 		self.account_config = account_config
 		self.node_evaluator = node_evaluator
+		# when True, an unresolved template parameter yields an UnknownValue marker instead of raising an error.
+		# this is used by the offline conditional analysis and never substitutes a guessed default value.
+		self.allow_unknown_parameters = allow_unknown_parameters
 
 		# some resources require custom evaluation logic, but we should only need to care about this for resources that
 		# have resource policies that we want to parse
@@ -104,8 +109,11 @@ class RefEvaluator:
 			# if the parameter exists in the template, make sure a value was passed in for it
 			parameter_value = self.parameter_values.get(resource_logical_name_or_param)
 			if parameter_value is None:
+				if self.allow_unknown_parameters:
+					# carry the unresolved parameter through evaluation rather than guessing a default value
+					return UnknownValue(resource_logical_name_or_param)
 				raise ApplicationError(f'No value passed for referenced parameter: {resource_logical_name_or_param}.\n'
-									   f'Parameters are passed using the --parameters flag.')
+				                       f'Parameters are passed using the --parameters flag.')
 
 			return parameter_value
 

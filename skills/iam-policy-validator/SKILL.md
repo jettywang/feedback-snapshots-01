@@ -31,6 +31,12 @@ and `cfn-policy-validator <command> --help`.
   for it to evaluate.
 - `parse` — print the resolved policies without calling Access Analyzer. Use to
   troubleshoot what the tool extracted and how intrinsics were evaluated.
+- `analyze-conditions` — offline, no-AWS review for templates whose parameters
+  are not all decided yet. Keeps both branches of every condition that depends
+  on an unresolved parameter and compares an `unresolved`, `if_true` and
+  `if_false` view per policy. Decided parameters still run the normal checks;
+  unresolved ones are never defaulted. Only policies an undecidable condition
+  can actually change are marked `CONDITIONAL`; unrelated roles stay `KNOWN`.
 
 ## Preparing input
 

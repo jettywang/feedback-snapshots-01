@@ -117,6 +117,33 @@ def _inner_parse(template_body, region, account_id, partition, template_paramete
     return parser_output.to_json()
 
 
+def analyze_conditions(template_body,
+                       region,
+                       account_id,
+                       partition,
+                       template_parameters=None):
+    """
+    Offline conditional analysis of a CloudFormation template for release review.
+
+    Unlike :func:`validate`, this never calls AWS.  Supplied parameters are evaluated normally; any declared
+    parameter without a supplied value is treated as unresolved instead of being defaulted, and every condition
+    that depends on an unresolved parameter is reported with both its if-true and if-false outcome.  Policies that
+    no undecidable condition can change keep a single deterministic conclusion, so an unrelated role is never
+    downgraded to unknown.
+
+    @param template_body: String containing the body of the CloudFormation template.
+    @param region: region used only to render regional pseudo-parameter values.
+    @param account_id: account id used only to render account-scoped ARNs.
+    @param partition: partition used only to render ARNs.
+    @param template_parameters: key/value dict of the parameters that have already been decided.
+    @return: a JSON-serialisable report comparing the unresolved, if-true and if-false scenarios.
+    """
+    from cfn_policy_validator.conditional_analysis.analyzer import analyze_conditions as _analyze_conditions
+
+    template_parameters = {} if template_parameters is None else template_parameters
+    return _analyze_conditions(template_body, region, account_id, partition, template_parameters)
+
+
 def _parse_template(template_body, account_config, template_parameters, allow_dynamic_ref_without_version: bool):
     stream = io.StringIO(template_body)
 

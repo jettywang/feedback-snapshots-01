@@ -14,7 +14,8 @@ from cfn_policy_validator.parsers.account_config import AccountConfig
 from cfn_policy_validator.parsers.utils.node_evaluator import NodeEvaluator
 
 
-def load(stream: TextIO, account_config: AccountConfig, parameters: dict, allow_dynamic_ref_without_version: bool):
+def load(stream: TextIO, account_config: AccountConfig, parameters: dict, allow_dynamic_ref_without_version: bool,
+         allow_unknown_parameters: bool = False, condition_overrides=None):
 	raw_template = stream.read()
 	try:
 		template = json.loads(raw_template, object_hook=CfnObject)
@@ -22,7 +23,9 @@ def load(stream: TextIO, account_config: AccountConfig, parameters: dict, allow_
 		template = yaml.load(raw_template, Loader=CfnYamlLoader)
 
 	schema_validator.validate(template)
-	node_evaluator = NodeEvaluator(template, account_config, parameters, allow_dynamic_ref_without_version)
+	node_evaluator = NodeEvaluator(template, account_config, parameters, allow_dynamic_ref_without_version,
+	                               allow_unknown_parameters=allow_unknown_parameters,
+	                               condition_overrides=condition_overrides)
 	_populate_cfn_object(template, node_evaluator, [])
 	return template
 

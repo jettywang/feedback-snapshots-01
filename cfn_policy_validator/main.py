@@ -3,12 +3,14 @@ Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 SPDX-License-Identifier: MIT-0
 """
 import argparse
+import json
 import logging
 import os
 import sys
 import traceback
 from cfn_policy_validator.validation import policy_analysis
 
+import cfn_policy_validator
 from cfn_policy_validator.validation import validator
 from cfn_policy_validator.version import __version__
 from cfn_policy_validator import parameters, client, AccountConfig, \
@@ -96,6 +98,24 @@ def parse_from_cli(arguments):
     exit(0)
 
 
+# consumable when running as CLI; fully offline, no AWS account is contacted
+def analyze_conditions_from_cli(arguments):
+    LOGGER.info(f'Offline conditional analysis of template {arguments.template_path}')
+    with open(arguments.template_path, 'r') as stream:
+        template_body = stream.read()
+
+    account_config = AccountConfig(arguments.partition, arguments.region, arguments.account_id)
+    report = cfn_policy_validator.analyze_conditions(
+        template_body,
+        account_config.region,
+        account_config.account_id,
+        account_config.partition,
+        arguments.parameters
+    )
+    print(json.dumps(report, indent=4))
+    exit(0)
+
+
 def _resolve_region(region_from_cli):
     """
     Resolve the region from the CLI argument, or fall back to AWS_DEFAULT_REGION / AWS_REGION environment variables.
@@ -162,6 +182,20 @@ def main(args=None):
                                                        'template and returns a JSON formatted list of IAM policies and '
                                                        'their attached resources.', parents=[parent_parser])
     parse_parser.set_defaults(func=parse_from_cli)
+
+    # offline conditional analysis command
+    analyze_conditions_parser = subparsers.add_parser(
+        'analyze-conditions',
+        help='Offline analysis that keeps both branches of every condition whose parameter is undecided in a '
+             'three-scenario (unresolved, if-true, if-false) report. Does not call AWS.',
+        parents=[parent_parser])
+    analyze_conditions_parser.set_defaults(func=analyze_conditions_from_cli)
+    analyze_conditions_parser.add_argument('--account-id', dest='account_id', default='111222333444',
+                                           help='Synthetic 12-digit account id used only to render account-scoped '
+                                                'ARNs for the offline analysis. Defaults to a placeholder value.')
+    analyze_conditions_parser.add_argument('--partition', dest='partition', default='aws',
+                                           help='Partition used only to render ARNs for the offline analysis. '
+                                                'Defaults to "aws".')
 
     # validate command
     validate_parser = subparsers.add_parser('validate', help='Parses IAM identity-based and resource-based policies from AWS CloudFormation templates '
@@ -271,7 +305,10 @@ def main(args=None):
     try:
         args.region = _resolve_region(args.region)
         client.set_profile(args.profile)
-        validate_credentials(args.region)
+
+        # analyze-conditions is fully offline; never require live credentials or contact an account
+        if args.func is not analyze_conditions_from_cli:
+            validate_credentials(args.region)
 
         configure_logging(args.enable_logging)
         args.parameters = parameters.merge(args.parameters, args.template_configuration_file)
