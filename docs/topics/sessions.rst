@@ -79,6 +79,20 @@ to your session store. If you don't save, the session will still work correctly
 inside the consumer (as it's stored as an instance variable), but other
 connections or HTTP views won't be able to see the changes.
 
+``channels.sessions.save_session(scope)`` is an async helper that saves the
+session in a scope using the same code path (and ``UpdateError`` handling) as
+``SessionMiddleware``:
+
+.. code-block:: python
+
+    from channels.sessions import save_session
+
+    async def receive(self, text_data):
+        await save_session(self.scope)
+
+The WebSocket generic consumers can also do this for you before the first
+frame is handled - see :ref:`connection-confirmation`.
+
 .. note::
 
     If you are in a long-polling HTTP consumer, you might want to save changes

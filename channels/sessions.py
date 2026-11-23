@@ -2,7 +2,6 @@ import datetime
 import time
 from importlib import import_module
 
-import django
 from django.conf import settings
 from django.contrib.sessions.backends.base import UpdateError
 from django.core.exceptions import SuspiciousOperation
@@ -14,6 +13,35 @@ from django.utils.functional import LazyObject
 from django.utils.http import http_date
 
 from channels.db import database_sync_to_async
+
+
+async def save_session(scope):
+    """
+    Save the session stored in ``scope``.
+
+    Uses Django's asynchronous session API when the session backend provides
+    it, otherwise saves in a thread. This is the same code path used by
+    ``InstanceSessionWrapper``, so callers (such as the WebSocket connection
+    confirmation phase) persist exactly the session instance in the scope.
+    """
+    if "session" not in scope:
+        raise ValueError(
+            "Cannot save session: no session in scope. You should wrap your "
+            "consumer in SessionMiddleware."
+        )
+    session = scope["session"]
+    try:
+        asave = getattr(session, "asave", None)
+        if asave is not None:
+            await asave()
+        else:
+            await database_sync_to_async(session.save)()
+    except UpdateError:
+        raise SuspiciousOperation(
+            "The request's session was deleted before the "
+            "request completed. The user may have logged "
+            "out in a concurrent request, for example."
+        )
 
 
 class CookieMiddleware:
@@ -224,17 +252,7 @@ class InstanceSessionWrapper:
         """
         Saves the current session.
         """
-        try:
-            if django.VERSION >= (5, 1):
-                await self.scope["session"].asave()
-            else:
-                await database_sync_to_async(self.scope["session"].save)()
-        except UpdateError:
-            raise SuspiciousOperation(
-                "The request's session was deleted before the "
-                "request completed. The user may have logged "
-                "out in a concurrent request, for example."
-            )
+        await save_session(self.scope)
 
 
 class SessionMiddleware:

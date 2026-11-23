@@ -167,3 +167,9 @@ as we only provide async versions:
     HTTP it is possible that the user will be logged out of their session
     elsewhere while your consumer is running. You can periodically use
     ``get_user(scope)`` to be sure that the user is still logged in.
+
+The generic WebSocket consumers can persist that login for you before any
+message is handled: set ``connection_confirmation = True`` and the session is
+saved once, after ``connect()``, with frames queued until it succeeds. See
+:ref:`connection-confirmation` for details, including the distinct close code
+used when the save fails.

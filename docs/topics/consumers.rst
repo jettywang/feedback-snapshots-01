@@ -258,6 +258,53 @@ layer is configured or the channel layer doesn't support groups, connecting
 to a ``WebsocketConsumer`` with a non-empty ``groups`` attribute will raise
 ``channels.exceptions.InvalidChannelLayerError``. See :ref:`groups` for more.
 
+.. _connection-confirmation:
+
+Connection confirmation
+~~~~~~~~~~~~~~~~~~~~~~~
+
+If your ``connect()`` logs a user in against ``self.scope["session"]``, the
+session is not persisted yet - and frames that arrive immediately afterwards
+could be handled before that login is durable. Set
+``connection_confirmation = True`` to make the consumer perform one explicit
+confirmation step after ``connect()`` (and after any implicit accept) and
+before the first WebSocket frame is dispatched:
+
+.. code-block:: python
+
+    from channels.auth import login
+    from channels.generic.websocket import AsyncWebsocketConsumer
+
+    class ChatConsumer(AsyncWebsocketConsumer):
+        connection_confirmation = True
+
+        async def connect(self):
+            user = await authenticate_token(self.scope["query_string"])
+            await login(self.scope, user)
+            await self.accept()
+
+The default ``confirm_connection()`` saves ``self.scope["session"]`` with
+``channels.sessions.save_session()``, so the login written in ``connect()``
+is persisted before any handler sees it. Override ``confirm_connection()`` to
+add extra checks; raising rejects the connection.
+
+The socket may be accepted first, so an unauthenticated client can finish the
+protocol handshake; frames received while the save is running are held and
+dispatched only after it resolves. The handler then runs against the same
+``scope`` - same session object and ``scope["user"]`` - as the login.
+
+If the save fails, the consumer sends a ``websocket.close`` with
+``connection_confirmation_failed_close_code`` (default ``4401``, in the
+application-defined 4000-4999 range) and a generic reason, then stops without
+calling any message handler. This lets clients distinguish a failed
+confirmation from an ordinary ``1000``/``1001`` disconnect. A cancelled
+confirmation is not a success: nothing is marked confirmed and no handler
+runs.
+
+After confirmation, ``connection_confirmed`` is ``True``; on failure,
+``confirmation_error`` holds the exception. The phase is opt-in, so existing
+consumers keep their current behaviour.
+
 
 AsyncWebsocketConsumer
 ~~~~~~~~~~~~~~~~~~~~~~
