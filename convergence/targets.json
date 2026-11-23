@@ -1,0 +1,45 @@
+{
+  "service_accounts": {
+    "svc_reports": {
+      "keep_role": ["role_reports"],
+      "remove_role": [],
+      "keep_permissions": {"role_reports": ["/reports:read"]},
+      "remove_permissions": {"role_reports": ["/reports:export"]}
+    },
+    "svc_etl": {
+      "keep_role": ["role_etl"],
+      "remove_role": [],
+      "keep_permissions": {"role_etl": ["/ingest:write", "/datasets:read"]},
+      "remove_permissions": {"role_etl": ["/datasets:write", "/backup:read"]}
+    },
+    "svc_billing": {
+      "keep_role": ["role_billing"],
+      "remove_role": [],
+      "keep_permissions": {"role_billing": ["/billing:read"]},
+      "remove_permissions": {"role_billing": ["/invoices:read"]}
+    },
+    "svc_ops": {
+      "keep_role": [],
+      "remove_role": ["role_admin", "role_etl", "role_billing"],
+      "keep_permissions": {},
+      "remove_permissions": {}
+    }
+  },
+  "api_matrix": [
+    ["svc_reports", "/reports", "read"],
+    ["svc_reports", "/reports", "export"],
+    ["svc_etl", "/ingest", "write"],
+    ["svc_etl", "/datasets", "read"],
+    ["svc_etl", "/datasets", "write"],
+    ["svc_etl", "/backup", "read"],
+    ["svc_billing", "/billing", "read"],
+    ["svc_billing", "/invoices", "read"],
+    ["svc_ops", "/admin", "read"],
+    ["svc_ops", "/admin", "write"],
+    ["svc_ops", "/ingest", "write"],
+    ["svc_ops", "/datasets", "write"],
+    ["svc_ops", "/backup", "read"],
+    ["svc_ops", "/billing", "read"],
+    ["svc_ops", "/invoices", "read"]
+  ]
+}

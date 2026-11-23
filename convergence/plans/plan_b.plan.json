@@ -1,0 +1,256 @@
+{
+  "plan_id": "plan_b",
+  "plan_name": "Least-privilege workers",
+  "model_path": "/Users/apple/Documents/用户反馈项目/batches/feedback-20261120-backend-security-280-jettywang/prepared/FB-20261120-SEC-JW-017/workspace/convergence/model.conf",
+  "scope": {
+    "subjects": [
+      "svc_billing",
+      "svc_etl",
+      "svc_reports"
+    ],
+    "managed_roles": [
+      "role_billing",
+      "role_etl",
+      "role_reports"
+    ],
+    "rules_this_plan_changes": [
+      "p: role_billing, /invoices, read",
+      "p: role_etl, /backup, read",
+      "p: role_etl, /datasets, write",
+      "p: role_reports, /reports, export"
+    ],
+    "in_scope_rules": [
+      "g: svc_billing, role_billing",
+      "g: svc_etl, role_etl",
+      "g: svc_reports, role_reports",
+      "p: role_billing, /billing, read",
+      "p: role_billing, /invoices, read",
+      "p: role_etl, /backup, read",
+      "p: role_etl, /datasets, read",
+      "p: role_etl, /datasets, write",
+      "p: role_etl, /ingest, write",
+      "p: role_reports, /reports, export",
+      "p: role_reports, /reports, read"
+    ]
+  },
+  "baseline_fingerprint": "c4ac7bef1779116057671964794c3595d5991b946c6708a5e18cfea373e8c95d",
+  "target_fingerprint": "8ecb93b4cd26e47fe8e7eca1449bb1648b6ca29e91961b7d9bacf4ba4dcd3745",
+  "summary": {
+    "removed_role_edges": 0,
+    "removed_permission_rules": 4,
+    "retained_role_edges": 3,
+    "retained_permission_rules": 6,
+    "flipped_api_decisions": 4
+  },
+  "premises": {
+    "baseline_fingerprint": "c4ac7bef1779116057671964794c3595d5991b946c6708a5e18cfea373e8c95d",
+    "assume_unchanged": [
+      {
+        "rule": "p: role_admin, /admin, read",
+        "kind": "p"
+      },
+      {
+        "rule": "p: role_admin, /admin, write",
+        "kind": "p"
+      },
+      {
+        "rule": "p: role_billing, /billing, read",
+        "kind": "p"
+      },
+      {
+        "rule": "p: role_etl, /datasets, read",
+        "kind": "p"
+      },
+      {
+        "rule": "p: role_etl, /ingest, write",
+        "kind": "p"
+      },
+      {
+        "rule": "p: role_reports, /reports, read",
+        "kind": "p"
+      },
+      {
+        "rule": "g: svc_billing, role_billing",
+        "kind": "g"
+      },
+      {
+        "rule": "g: svc_etl, role_etl",
+        "kind": "g"
+      },
+      {
+        "rule": "g: svc_reports, role_reports",
+        "kind": "g"
+      }
+    ],
+    "assume_removable": [
+      {
+        "rule": "p: role_billing, /invoices, read",
+        "kind": "p"
+      },
+      {
+        "rule": "p: role_etl, /backup, read",
+        "kind": "p"
+      },
+      {
+        "rule": "p: role_etl, /datasets, write",
+        "kind": "p"
+      },
+      {
+        "rule": "p: role_reports, /reports, export",
+        "kind": "p"
+      }
+    ]
+  },
+  "losing_effect": [
+    {
+      "rule": "p: role_billing, /invoices, read",
+      "type": "permission_rule",
+      "reason": "permission revoked by target state"
+    },
+    {
+      "rule": "p: role_etl, /backup, read",
+      "type": "permission_rule",
+      "reason": "permission revoked by target state"
+    },
+    {
+      "rule": "p: role_etl, /datasets, write",
+      "type": "permission_rule",
+      "reason": "permission revoked by target state"
+    },
+    {
+      "rule": "p: role_reports, /reports, export",
+      "type": "permission_rule",
+      "reason": "permission revoked by target state"
+    }
+  ],
+  "must_retain": [
+    {
+      "rule": "g: svc_billing, role_billing",
+      "type": "role_edge",
+      "reason": "svc_billing must keep role role_billing in target state"
+    },
+    {
+      "rule": "g: svc_etl, role_etl",
+      "type": "role_edge",
+      "reason": "svc_etl must keep role role_etl in target state"
+    },
+    {
+      "rule": "g: svc_reports, role_reports",
+      "type": "role_edge",
+      "reason": "svc_reports must keep role role_reports in target state"
+    },
+    {
+      "rule": "p: role_admin, /admin, read",
+      "type": "permission_rule",
+      "reason": "retained: still reachable from a kept role edge"
+    },
+    {
+      "rule": "p: role_admin, /admin, write",
+      "type": "permission_rule",
+      "reason": "retained: still reachable from a kept role edge"
+    },
+    {
+      "rule": "p: role_billing, /billing, read",
+      "type": "permission_rule",
+      "reason": "svc_billing target still requires role_billing /billing read"
+    },
+    {
+      "rule": "p: role_etl, /datasets, read",
+      "type": "permission_rule",
+      "reason": "svc_etl target still requires role_etl /datasets read"
+    },
+    {
+      "rule": "p: role_etl, /ingest, write",
+      "type": "permission_rule",
+      "reason": "svc_etl target still requires role_etl /ingest write"
+    },
+    {
+      "rule": "p: role_reports, /reports, read",
+      "type": "permission_rule",
+      "reason": "svc_reports target still requires role_reports /reports read"
+    }
+  ],
+  "ineffective_retained_permissions": [
+    "p: role_admin, /admin, read",
+    "p: role_admin, /admin, write"
+  ],
+  "missing_target_rules": [],
+  "decision_changes": [
+    {
+      "subject": "svc_reports",
+      "resource": "/reports",
+      "action": "export",
+      "before": "ALLOW",
+      "after": "DENY"
+    },
+    {
+      "subject": "svc_etl",
+      "resource": "/datasets",
+      "action": "write",
+      "before": "ALLOW",
+      "after": "DENY"
+    },
+    {
+      "subject": "svc_etl",
+      "resource": "/backup",
+      "action": "read",
+      "before": "ALLOW",
+      "after": "DENY"
+    },
+    {
+      "subject": "svc_billing",
+      "resource": "/invoices",
+      "action": "read",
+      "before": "ALLOW",
+      "after": "DENY"
+    }
+  ],
+  "target_state": {
+    "permissions": [
+      [
+        "role_admin",
+        "/admin",
+        "read"
+      ],
+      [
+        "role_admin",
+        "/admin",
+        "write"
+      ],
+      [
+        "role_billing",
+        "/billing",
+        "read"
+      ],
+      [
+        "role_etl",
+        "/datasets",
+        "read"
+      ],
+      [
+        "role_etl",
+        "/ingest",
+        "write"
+      ],
+      [
+        "role_reports",
+        "/reports",
+        "read"
+      ]
+    ],
+    "role_edges": [
+      [
+        "svc_billing",
+        "role_billing"
+      ],
+      [
+        "svc_etl",
+        "role_etl"
+      ],
+      [
+        "svc_reports",
+        "role_reports"
+      ]
+    ]
+  }
+}

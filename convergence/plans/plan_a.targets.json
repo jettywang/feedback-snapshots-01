@@ -1,0 +1,23 @@
+{
+  "description": "Plan A: strip svc_ops administrative and data-plane roles (full de-escalation).",
+  "service_accounts": {
+    "svc_ops": {
+      "keep_role": [],
+      "remove_role": ["role_admin", "role_etl", "role_billing"],
+      "keep_permissions": {},
+      "remove_permissions": {}
+    }
+  },
+  "api_matrix": [
+    ["svc_ops", "/admin", "read"],
+    ["svc_ops", "/admin", "write"],
+    ["svc_ops", "/ingest", "write"],
+    ["svc_ops", "/datasets", "write"],
+    ["svc_ops", "/backup", "read"],
+    ["svc_ops", "/billing", "read"],
+    ["svc_ops", "/invoices", "read"],
+    ["svc_reports", "/reports", "read"],
+    ["svc_etl", "/ingest", "write"],
+    ["svc_billing", "/billing", "read"]
+  ]
+}

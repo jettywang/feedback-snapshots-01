@@ -1,0 +1,18 @@
+# Baseline RBAC policy for service-account access convergence.
+# p = permission rule (role edge target -> resource/action); g = role assignment edge (subject -> role).
+p, role_reports, /reports, read
+p, role_reports, /reports, export
+p, role_etl, /ingest, write
+p, role_etl, /datasets, read
+p, role_etl, /datasets, write
+p, role_etl, /backup, read
+p, role_billing, /billing, read
+p, role_billing, /invoices, read
+p, role_admin, /admin, read
+p, role_admin, /admin, write
+g, svc_reports, role_reports
+g, svc_etl, role_etl
+g, svc_billing, role_billing
+g, svc_ops, role_admin
+g, svc_ops, role_etl
+g, svc_ops, role_billing
