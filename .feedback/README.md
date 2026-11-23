@@ -1,10 +1,10 @@
 # Local test setup
 
-From the repository root, install the pinned dependencies and run the focused local baseline.
+From the repository root, install the pinned gems and run the advisory, configuration and report baseline. The shared test helper uses an empty local database fixture for this focused set.
 
 ```sh
 BUNDLE_FROZEN=true .feedback/bundle-env install --quiet
-.feedback/bundle-env exec rspec -Ilib -Ispec --options /dev/null spec/advisory_spec.rb spec/configuration_spec.rb spec/report_spec.rb
+.feedback/bundle-env exec rspec -Ilib -Ispec --options /dev/null -r ./.feedback/offline-spec-helper.rb spec/advisory_spec.rb spec/configuration_spec.rb spec/report_spec.rb
 ```
 
-Measured on macOS in 3.665 seconds. Tests use local fixtures and require no external service.
+Focused baseline reports 60 examples on macOS in 0.845 seconds.
