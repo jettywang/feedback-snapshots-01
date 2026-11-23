@@ -10,3 +10,12 @@ Request
    :members:
 
 
+
+Form Processing Budget
+----------------------
+
+.. autoclass:: webob.request.FormBudget
+   :members:
+.. autoclass:: webob.request.FormBudgetExceeded
+.. autoclass:: webob.request.FormStorageError
+.. autoclass:: webob.request.DisconnectionError

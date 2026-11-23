@@ -1,6 +1,19 @@
 Unreleased
 ----------
 
+Feature
+~~~~~~~
+
+- Added an optional form-processing budget mode: attaching a
+  ``webob.request.FormBudget`` to ``req.form_budget`` caps the cumulative
+  bytes read and the temporary storage used while a single form request
+  is made seekable, parsed, and re-queried.  Budget exhaustion
+  (``FormBudgetExceeded``), truncated input (``DisconnectionError``), and
+  storage backend failures (``FormStorageError``) are reported as
+  distinct outcomes, form parsing publishes its result atomically, and
+  on failure the library closes the temporary objects it created while
+  leaving the caller-provided input stream open.
+
 Security Fix
 ~~~~~~~~~~~~
 

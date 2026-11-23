@@ -223,6 +223,12 @@ class BaseRequest:
                 env["webob._body_file"] = wrapped, r
             r = wrapped
 
+        budget = self.form_budget
+
+        if budget is not None:
+            # Charge all body reads to the request's form budget
+            r = budget.make_reader(r)
+
         return r
 
     @body_file.setter
@@ -802,23 +808,37 @@ class BaseRequest:
             )
         self._check_charset()
 
-        self.make_body_seekable()
-        self.body_file_raw.seek(0)
+        budget = self.form_budget
 
-        fs_environ = env.copy()
-        # FieldStorage assumes a missing CONTENT_LENGTH, but a
-        # default of 0 is better:
-        fs_environ.setdefault("CONTENT_LENGTH", "0")
-        fs_environ["QUERY_STRING"] = ""
-        fs = cgi_FieldStorage(
-            fp=self.body_file,
-            environ=fs_environ,
-            keep_blank_values=True,
-            encoding="utf8",
-        )
+        try:
+            self.make_body_seekable()
+            self.body_file_raw.seek(0)
 
-        self.body_file_raw.seek(0)
-        vars = MultiDict.from_fieldstorage(fs)
+            fs_environ = env.copy()
+            # FieldStorage assumes a missing CONTENT_LENGTH, but a
+            # default of 0 is better:
+            fs_environ.setdefault("CONTENT_LENGTH", "0")
+            fs_environ["QUERY_STRING"] = ""
+            fs = cgi_FieldStorage(
+                fp=self.body_file,
+                environ=fs_environ,
+                keep_blank_values=True,
+                encoding="utf8",
+            )
+
+            self.body_file_raw.seek(0)
+            vars = MultiDict.from_fieldstorage(fs)
+        except Exception:
+            if budget is not None:
+                # A request that failed during form processing must not
+                # publish partial results to the application.
+                env.pop("webob._parsed_post_vars", None)
+                # Temporary objects created by the library are closed by
+                # the library; the caller-provided input stream is left
+                # open and remains the caller's responsibility.
+                budget.close_tempfiles()
+            raise
+
         env["webob._parsed_post_vars"] = (vars, self.body_file_raw)
 
         return vars
@@ -912,6 +932,26 @@ class BaseRequest:
     is_body_seekable = environ_getter("webob.is_body_seekable", False)
 
     @property
+    def form_budget(self):
+        """
+        The :class:`FormBudget` attached to this request, or ``None``.
+
+        Admission-control middleware may attach a budget before the form
+        is parsed to cap the read and temporary-storage budget a single
+        form request may consume.  Setting it to ``None`` detaches the
+        budget again (e.g. once the request has been admitted).
+        """
+
+        return self.environ.get("webob.form_budget")
+
+    @form_budget.setter
+    def form_budget(self, budget):
+        if budget is None:
+            self.environ.pop("webob.form_budget", None)
+        else:
+            self.environ["webob.form_budget"] = budget
+
+    @property
     def is_body_readable(self):
         """
         webob.is_body_readable is a flag that tells us that we can read the
@@ -981,44 +1021,58 @@ class BaseRequest:
             newbody = b""
             fileobj = None
             input = self.body_file
+            budget = self.form_budget
 
-            while todo > 0:
-                data = input.read(min(todo, 65535))
+            try:
+                while todo > 0:
+                    data = input.read(min(todo, 65535))
 
-                if not data and self.content_length is None:
-                    # We attempted to read more data, but got none, break.
-                    # This can happen if for instance we are reading as much as
-                    # we can because we don't have a Content-Length...
+                    if not data and self.content_length is None:
+                        # We attempted to read more data, but got none, break.
+                        # This can happen if for instance we are reading as much as
+                        # we can because we don't have a Content-Length...
 
-                    break
-                elif not data:
-                    # We have a Content-Length and we attempted to read, but
-                    # there was nothing more to read. Oh the humanity! This
-                    # should rarely if never happen because self.body_file
-                    # should be a LimitedLengthFile which should already have
-                    # raised if there was less data than expected.
-                    raise DisconnectionError(
-                        "Client disconnected (%s more bytes were expected)" % todo
-                    )
+                        break
+                    elif not data:
+                        # We have a Content-Length and we attempted to read, but
+                        # there was nothing more to read. Oh the humanity! This
+                        # should rarely if never happen because self.body_file
+                        # should be a LimitedLengthFile which should already have
+                        # raised if there was less data than expected.
+                        raise DisconnectionError(
+                            "Client disconnected (%s more bytes were expected)" % todo
+                        )
 
-                if fileobj:
-                    fileobj.write(data)
-                else:
-                    newbody += data
+                    if fileobj:
+                        fileobj.write(data)
+                    else:
+                        newbody += data
 
-                    # When we have enough data that we need a tempfile, let's
-                    # create one, then clear the temporary variable we were
-                    # using
+                        # When we have enough data that we need a tempfile, let's
+                        # create one, then clear the temporary variable we were
+                        # using
 
-                    if len(newbody) > tempfile_limit:
-                        fileobj = self.make_tempfile()
-                        fileobj.write(newbody)
-                        newbody = b""
+                        if len(newbody) > tempfile_limit:
+                            fileobj = self.make_tempfile()
 
-                # Only decrement todo if Content-Length is set
+                            if budget is not None:
+                                # Account for the temporary object and let the
+                                # library take care of closing it on failure
+                                fileobj = budget.track_tempfile(fileobj)
+                            fileobj.write(newbody)
+                            newbody = b""
 
-                if self.content_length is not None:
-                    todo -= len(data)
+                    # Only decrement todo if Content-Length is set
+
+                    if self.content_length is not None:
+                        todo -= len(data)
+            except Exception:
+                if fileobj is not None and budget is not None:
+                    # The copy failed; the temporary object was created by
+                    # the library, so the library closes it here.  The
+                    # caller's input stream is left untouched.
+                    budget.discard_tempfile(fileobj)
+                raise
 
             if fileobj:
                 # We apparently had enough data to need a file
@@ -1610,6 +1664,209 @@ def environ_add_POST(env, data, content_type=None):
 
 class DisconnectionError(IOError):
     pass
+
+
+class FormBudgetExceeded(IOError):
+    """
+    The read or temporary-storage budget of a :class:`FormBudget` was
+    exhausted while processing a form request.
+    """
+
+
+class FormStorageError(IOError):
+    """
+    The temporary-storage backend raised an I/O error while processing a
+    form request.  The original backend error is available as
+    ``__cause__``.
+    """
+
+
+class FormBudget:
+    """
+    Optional read and temporary-storage budget for processing a single
+    form request.
+
+    Attach one to a request by setting ``req.form_budget`` before the
+    form is parsed (typically done by admission-control middleware)::
+
+        req.form_budget = FormBudget(read_limit=65536, storage_limit=1 << 20)
+
+    While a budget is attached, every byte the library pulls out of the
+    request body is charged against ``read_limit`` -- this covers making
+    the input stream seekable, parsing the form, and repeated access to
+    the request parameters -- and every byte written to temporary
+    objects created through ``req.make_tempfile()`` is charged against
+    ``storage_limit``.  Either limit may be ``None`` to leave that
+    resource unbounded while still accounting for it.  The counters
+    (``bytes_read`` and ``bytes_stored``) are cumulative for the
+    lifetime of the budget object; a limit that is exactly reached is
+    still within budget, only exceeding it fails.
+
+    Three failure outcomes are kept distinct:
+
+    * budget exhausted: :class:`FormBudgetExceeded`
+    * the input stream ends before ``Content-Length`` bytes were read:
+      :class:`DisconnectionError`
+    * the temporary-storage backend fails: :class:`FormStorageError`
+
+    Form parsing publishes its result atomically: a request that entered
+    parsing either exposes the complete parsed variables or none at all.
+
+    Cleanup responsibilities after a failure: temporary objects created
+    by the library are closed by the library (see
+    :meth:`close_tempfiles`), while the caller-provided ``wsgi.input``
+    stream is never closed by the library and remains the caller's
+    responsibility.  On success, ownership of any temporary object that
+    became the request's seekable body passes to the request, and
+    middleware that admits the request may detach the budget by setting
+    ``req.form_budget = None`` so the application can re-read the
+    request freely.
+    """
+
+    def __init__(self, read_limit=None, storage_limit=None):
+        self.read_limit = read_limit
+        self.storage_limit = storage_limit
+        self.bytes_read = 0
+        self.bytes_stored = 0
+        self._temp_files = []
+
+    def __repr__(self):
+        return (
+            f"<{self.__class__.__name__} read={self.bytes_read}/{self.read_limit}"
+            f" stored={self.bytes_stored}/{self.storage_limit}>"
+        )
+
+    def make_reader(self, fileobj):
+        """
+        Wrap ``fileobj`` so that bytes read from it are charged to this
+        budget.  Closing the wrapper never closes the wrapped stream.
+        """
+
+        if isinstance(fileobj, _FormBudgetReader) and fileobj.budget is self:
+            return fileobj
+
+        return _FormBudgetReader(fileobj, self)
+
+    def track_tempfile(self, fileobj):
+        """
+        Wrap a temporary object created by the library so that bytes
+        written to it are charged to this budget, and register it for
+        cleanup in case form processing fails.
+        """
+
+        wrapper = _FormBudgetTempFile(fileobj, self)
+        self._temp_files.append(wrapper)
+
+        return wrapper
+
+    def discard_tempfile(self, tempfile):
+        """Close a tracked temporary object and stop tracking it."""
+
+        try:
+            tempfile.close()
+        except OSError:
+            pass
+
+        if tempfile in self._temp_files:
+            self._temp_files.remove(tempfile)
+
+    def close_tempfiles(self):
+        """Close all tracked temporary objects created by the library."""
+
+        while self._temp_files:
+            tempfile = self._temp_files.pop()
+
+            try:
+                tempfile.close()
+            except OSError:
+                pass
+
+    def _count_read(self, size):
+        self.bytes_read += size
+
+        if self.read_limit is not None and self.bytes_read > self.read_limit:
+            raise FormBudgetExceeded(
+                "form processing read budget of %d bytes was exceeded" % self.read_limit
+            )
+
+    def _count_stored(self, size):
+        self.bytes_stored += size
+
+        if self.storage_limit is not None and self.bytes_stored > self.storage_limit:
+            raise FormBudgetExceeded(
+                "form processing temporary-storage budget of %d bytes was exceeded"
+                % self.storage_limit
+            )
+
+
+class _FormBudgetReader:
+    """
+    Read-side accounting wrapper placed over the request body stream.
+
+    The wrapped stream belongs to the caller: closing the wrapper never
+    closes it.
+    """
+
+    def __init__(self, fileobj, budget):
+        self.fileobj = fileobj
+        self.budget = budget
+
+    def read(self, size=-1):
+        data = self.fileobj.read(size)
+        self.budget._count_read(len(data))
+
+        return data
+
+    def readline(self, size=-1):
+        line = self.fileobj.readline(size)
+        self.budget._count_read(len(line))
+
+        return line
+
+    def close(self):
+        # The wrapped stream is owned by the caller and stays open.
+        pass
+
+    def __getattr__(self, name):
+        return getattr(self.fileobj, name)
+
+
+class _FormBudgetTempFile:
+    """
+    Write-side accounting wrapper for temporary objects created by the
+    library while processing a form request.
+
+    Unlike the input stream, temporary objects are owned by the library:
+    closing the wrapper closes the wrapped object.
+    """
+
+    def __init__(self, fileobj, budget):
+        self.fileobj = fileobj
+        self.budget = budget
+
+    def write(self, data):
+        self.budget._count_stored(len(data))
+
+        try:
+            return self.fileobj.write(data)
+        except OSError as exc:
+            raise FormStorageError(
+                "temporary storage backend failed while writing form data"
+            ) from exc
+
+    def read(self, size=-1):
+        try:
+            return self.fileobj.read(size)
+        except OSError as exc:
+            raise FormStorageError(
+                "temporary storage backend failed while reading form data"
+            ) from exc
+
+    def close(self):
+        return self.fileobj.close()
+
+    def __getattr__(self, name):
+        return getattr(self.fileobj, name)
 
 
 class LimitedLengthFile(io.RawIOBase):
