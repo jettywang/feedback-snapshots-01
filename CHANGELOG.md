@@ -2,6 +2,16 @@
 
 ## [Unreleased](https://github.com/cedarcode/webauthn-ruby/compare/v3.5.1...master/)
 
+### Added
+
+- Add `WebAuthn::CredentialOperation` and `WebAuthn::ConfigurationSnapshot` for site-scoped credential ceremonies.
+  `WebAuthn::RelyingParty#registration_operation` and `#authentication_operation` capture the relying-party
+  configuration and verification requirements at issuance, so a hot-reloaded configuration or the global defaults
+  cannot change how an already-issued ceremony is decoded or verified. Operations can be serialized and rehydrated
+  in another process, and expose `#compatibility_with` (`:continue`/`:stop`), `#diagnose` and per-attempt
+  verification records. Options built through `RelyingParty#options_for_registration` and
+  `#options_for_authentication` expose the same record via `#operation`.
+
 ## [v3.5.1](https://github.com/cedarcode/webauthn-ruby/compare/v3.5.0...v3.5.1/) - 2026-11-10
 
 ### Changed

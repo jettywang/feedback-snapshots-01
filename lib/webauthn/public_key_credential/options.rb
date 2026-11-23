@@ -9,17 +9,31 @@ module WebAuthn
 
       CHALLENGE_LENGTH = 32
 
-      attr_reader :timeout, :extensions, :hints, :relying_party
+      attr_reader :timeout, :extensions, :hints, :relying_party, :operation
+      attr_writer :operation
 
-      def initialize(timeout: nil, extensions: nil, hints: nil, relying_party: WebAuthn.configuration.relying_party)
+      def initialize(
+        timeout: nil,
+        extensions: nil,
+        hints: nil,
+        challenge: nil,
+        operation: nil,
+        relying_party: WebAuthn.configuration.relying_party
+      )
         @relying_party = relying_party
+        @operation = operation
         @timeout = timeout || default_timeout
         @extensions = default_extensions.merge(extensions || {})
         @hints = hints
+        @given_challenge = challenge
       end
 
       def challenge
         encoder.encode(raw_challenge)
+      end
+
+      def raw_challenge
+        @raw_challenge ||= @given_challenge || SecureRandom.random_bytes(CHALLENGE_LENGTH)
       end
 
       private
@@ -30,10 +44,6 @@ module WebAuthn
 
       def encoder
         relying_party.encoder
-      end
-
-      def raw_challenge
-        @raw_challenge ||= SecureRandom.random_bytes(CHALLENGE_LENGTH)
       end
 
       def default_timeout

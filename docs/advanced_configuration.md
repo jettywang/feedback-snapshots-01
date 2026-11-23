@@ -166,6 +166,121 @@ rescue WebAuthn::Error => e
 end
 ```
 
+## Site-scoped Credential Operations
+
+When several sites (tenants, brands, subdomains) share a process, issuing
+options from a live `WebAuthn::RelyingParty` and verifying later is fragile: the
+instance (or the global configuration) may have been hot-reloaded in between.
+
+`WebAuthn::RelyingParty#registration_operation` and
+`WebAuthn::RelyingParty#authentication_operation` return a
+`WebAuthn::CredentialOperation`: a self-contained record of one ceremony.
+
+```ruby
+# Issued by the site-specific relying party.
+relying_party = WebAuthn::RelyingParty.new(
+  allowed_origins: ["https://admin.example.com"],
+  id: "example.com",
+  name: "Admin"
+)
+
+operation = relying_party.registration_operation(
+  user: { id: user.webauthn_user_handle, name: user.name },
+  # Requirements requested now are enforced on verification, even if the
+  # configuration is reloaded in the meantime.
+  user_verification: true
+)
+
+session[:credential_operation] = operation.to_json
+```
+
+The operation captures, at issuance time:
+
+- `allowed_origins`, the RP ID and the RP name
+- the encoder implied by `encoding`
+- the verification policy: algorithms, attestation policy, cross-origin policy
+  and silent authentication
+- the verification requirements (`user_presence`, `user_verification`)
+
+Public key options issued by `registration_operation` and
+`authentication_operation` carry the same challenge that the operation will
+verify against, so storing the operation is enough to verify the callback.
+
+None of those are read from the live instance during verification, so a hot
+reload cannot silently change how an already-issued ceremony is decoded or
+accepted. `operation.options` returns the same public-key options (with the
+same challenge) that were sent to the browser.
+
+### Verification, including asynchronous callbacks
+
+The serialized operation can be rehydrated anywhere — another process, a job,
+or a callback handler that has no access to the original instance:
+
+```ruby
+operation = WebAuthn::CredentialOperation.from_json(session[:credential_operation])
+
+# Verification uses the issuance-time configuration.
+webauthn_credential = operation.verify_registration(params[:publicKeyCredential])
+```
+
+`operation.diagnose(raw_credential)` explains what will actually happen:
+decoded credential ID, client-data origin, whether the origin was allowed, the
+RP ID hash comparison, the user handle, and the sign count. This is useful when
+two sites produce similar-looking payloads.
+
+### Continue or stop after a configuration change
+
+`operation.compatibility_with(relying_party)` compares the issuance-time flow
+with the current one:
+
+```ruby
+compatibility = operation.compatibility_with(relying_party)
+compatibility.decision        # => :continue or :stop
+compatibility.changed_fields  # => [] or [:allowed_origins, :encoding, ...]
+compatibility.explain         # human-readable summary
+```
+
+Flow-defining changes (`allowed_origins`, RP ID, encoding, verification policy)
+produce `:stop`; descriptive changes (RP name, timeout) produce `:continue`.
+Pass the live configuration explicitly if you want a stop to be enforced:
+
+```ruby
+operation.verify_registration(raw_credential, against: relying_party)
+# => raises WebAuthn::CredentialOperation::CompatibilityError
+#    (error.compatibility has the details)
+```
+
+If the integration deliberately wants to finish an in-flight ceremony anyway,
+use `on_change: :continue`. Each attempt is recorded in
+`operation.verifications` / `operation.last_verification`, including the
+decision, changed fields and the credential/user attribution:
+
+```ruby
+operation.verify_registration(raw_credential, against: relying_party, on_change: :continue)
+
+operation.last_verification.to_h
+# => {
+#   kind: :registration, outcome: :verified, decision: :stop,
+#   credential_id: "...", user_handle: nil, origin: "https://admin.example.com",
+#   details: { changed_fields: [:allowed_origins], ... }
+# }
+```
+
+Settings that are not part of the ceremony flow (the root-certificate finders,
+for example) are not serialized. When rehydrating, pass them explicitly with
+`WebAuthn::CredentialOperation.from_json(json, attestation_root_certificates_finders: [finder])`.
+
+The snapshot also carries a SHA-256 `fingerprint` of the flow-defining fields
+and an operation-level fingerprint (`operation.fingerprint`). Log either next to
+each registration/authentication attempt to prove which site configuration was
+applied. `operation.to_h`/`to_json` and `operation.explain` include both.
+
+The compatibility-first API is additive: `options_for_registration`,
+`options_for_authentication`, `verify_registration`, `verify_authentication` and
+the global configuration keep working. Options built through
+`options_for_*` also expose `.operation`, so the legacy-style code can record
+which issuance configuration it is using.
+
 ## Moving from Global to Instance Based Configuration
 
 Adding a configuration for a new instance does not mean you need to get rid of your Global configuration. They can co-exist in your application and be both available for the different usages you might have. `WebAuthn.configuration.relying_party` will always return the global one while `WebAuthn::RelyingParty.new`, executed anywhere in your codebase, will allow you to create a different instance as you see the need. They will not collide and instead operate in isolation without any shared state.

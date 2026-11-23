@@ -1,7 +1,9 @@
 # frozen_string_literal: true
 
 require "openssl"
+require "webauthn/configuration_snapshot"
 require "webauthn/credential"
+require "webauthn/credential_operation"
 require "webauthn/encoder"
 require "webauthn/error"
 
@@ -64,8 +66,42 @@ module WebAuthn
 
     # This is the user-data encoder.
     # Used to decode user input and to encode data provided to the user.
+    #
+    # The encoder is rebuilt when `encoding` changes so a hot-reloaded
+    # configuration is reflected immediately by newly issued ceremonies.
     def encoder
-      @encoder ||= WebAuthn::Encoder.new(encoding)
+      @encoder = WebAuthn::Encoder.new(encoding) unless @encoder && @encoder_encoding == encoding
+      @encoder_encoding = encoding
+
+      @encoder
+    end
+
+    # An immutable record of the security-relevant configuration currently in
+    # effect for this relying party.
+    def snapshot
+      WebAuthn::ConfigurationSnapshot.from_relying_party(self)
+    end
+
+    # Starts a registration ceremony bound to the current configuration.
+    #
+    # The returned WebAuthn::CredentialOperation can be serialized, and will
+    # keep using the issuance-time configuration even if this relying party (or
+    # the global configuration) is updated later.
+    def registration_operation(**keyword_arguments)
+      WebAuthn::CredentialOperation.for_registration(
+        relying_party: snapshot,
+        **keyword_arguments
+      )
+    end
+
+    # Starts an authentication ceremony bound to the current configuration.
+    #
+    # See WebAuthn::RelyingParty#registration_operation.
+    def authentication_operation(**keyword_arguments)
+      WebAuthn::CredentialOperation.for_authentication(
+        relying_party: snapshot,
+        **keyword_arguments
+      )
     end
 
     def attestation_root_certificates_finders=(finders)
@@ -83,10 +119,12 @@ module WebAuthn
     end
 
     def options_for_registration(**keyword_arguments)
-      WebAuthn::Credential.options_for_create(
+      options = WebAuthn::Credential.options_for_create(
         **keyword_arguments,
-        relying_party: self
+        relying_party: snapshot
       )
+
+      attach_operation(:registration, options)
     end
 
     def verify_registration(raw_credential, challenge, user_presence: nil, user_verification: nil)
@@ -98,10 +136,12 @@ module WebAuthn
     end
 
     def options_for_authentication(**keyword_arguments)
-      WebAuthn::Credential.options_for_get(
+      options = WebAuthn::Credential.options_for_get(
         **keyword_arguments,
-        relying_party: self
+        relying_party: snapshot
       )
+
+      attach_operation(:authentication, options)
     end
 
     def verify_authentication(
@@ -149,6 +189,18 @@ module WebAuthn
       )
 
       @allowed_origins ||= Array(new_origin) # rubocop:disable Naming/MemoizedInstanceVariableName
+    end
+
+    private
+
+    def attach_operation(kind, options)
+      WebAuthn::CredentialOperation.for_options(
+        kind: kind,
+        relying_party: options.relying_party,
+        options: options
+      )
+
+      options
     end
   end
 end

@@ -11,6 +11,8 @@ module WebAuthn
 
     def_delegators :@encoder_klass, :encode, :decode
 
+    attr_reader :encoder_klass
+
     def initialize(encoding = STANDARD_ENCODING)
       @encoder_klass = Encoders.lookup(encoding)
     end

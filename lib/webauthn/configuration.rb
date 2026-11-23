@@ -49,6 +49,18 @@ module WebAuthn
       @relying_party = RelyingParty.new
     end
 
+    def snapshot
+      relying_party.snapshot
+    end
+
+    def registration_operation(**keyword_arguments)
+      relying_party.registration_operation(**keyword_arguments)
+    end
+
+    def authentication_operation(**keyword_arguments)
+      relying_party.authentication_operation(**keyword_arguments)
+    end
+
     def rp_name
       relying_party.name
     end

@@ -2,8 +2,10 @@
 
 require "webauthn/json_serializer"
 require "webauthn/configuration"
+require "webauthn/configuration_snapshot"
 require "webauthn/credential"
 require "webauthn/credential_creation_options"
+require "webauthn/credential_operation"
 require "webauthn/credential_request_options"
 require "webauthn/version"
 
