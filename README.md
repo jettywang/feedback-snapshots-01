@@ -376,6 +376,26 @@ session[:creation_challenge] = creation_options.challenge
 # I.e. it will encode and convert the options to JSON automatically.
 ```
 
+#### `WebAuthn::RelyingParty#account_registration(store:)`
+
+Opt-in helper for registration ceremonies that must not re-register a credential already active on the account and must
+send the browser only that account's `excludeCredentials`. The store is a duck-typed object implementing
+`active_credentials(account_id:)` and an atomic `register(account_id:, credential:)` (optionally
+`find_credential(account_id:, raw_id:)`). Stored identifiers may be raw bytes or either base64 spelling.
+
+```ruby
+registration = relying_party.account_registration(store: my_store)
+attempt = registration.options_for_create(account_id: user.id, user: { id: user.webauthn_user_handle, name: user.name })
+
+receipt = registration.complete_registration(params[:publicKeyCredential], approval: attempt.approval)
+receipt.registered?  # true only after re-reading the account's active credentials
+receipt.conflict?    # another writer already registered this credential
+receipt.unconfirmed? # the store did not prove the credential is active
+```
+
+See [Account Scoped Registration](docs/advanced_configuration.md#account-scoped-registration) for the full contract.
+The direct `WebAuthn::Credential.options_for_create(exclude: ...)` path remains available.
+
 #### `WebAuthn::Credential.options_for_get([options])`
 
 Helper method to build the necessary [PublicKeyCredentialRequestOptions](https://www.w3.org/TR/webauthn-2/#dictdef-publickeycredentialrequestoptions)

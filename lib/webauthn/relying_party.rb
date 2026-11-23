@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require "openssl"
+require "webauthn/account_registration"
 require "webauthn/credential"
 require "webauthn/encoder"
 require "webauthn/error"
@@ -87,6 +88,12 @@ module WebAuthn
         **keyword_arguments,
         relying_party: self
       )
+    end
+
+    # Opt-in account-scoped registration contract. See
+    # WebAuthn::AccountRegistration for the store interface.
+    def account_registration(store:)
+      WebAuthn::AccountRegistration.new(relying_party: self, store: store)
     end
 
     def verify_registration(raw_credential, challenge, user_presence: nil, user_verification: nil)

@@ -2,6 +2,12 @@
 
 ## [Unreleased](https://github.com/cedarcode/webauthn-ruby/compare/v3.5.1...master/)
 
+### Added
+
+- Add an opt-in `WebAuthn::RelyingParty#account_registration` contract that builds account-scoped `excludeCredentials`
+  lists, normalizes stored base64/base64url credential identifiers, and reports `registered`, `conflict`, or
+  `unconfirmed` only after re-reading the account's active credentials.
+
 ## [v3.5.1](https://github.com/cedarcode/webauthn-ruby/compare/v3.5.0...v3.5.1/) - 2026-11-10
 
 ### Changed

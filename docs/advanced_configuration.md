@@ -166,6 +166,57 @@ rescue WebAuthn::Error => e
 end
 ```
 
+## Account Scoped Registration
+
+`WebAuthn::RelyingParty#account_registration` is an optional contract for applications that need the browser's
+`excludeCredentials` list to contain only the credentials of the account currently adding a device, and that need a
+receipt proving the store actually kept the credential.
+
+```ruby
+registration = relying_party.account_registration(store: my_store)
+
+attempt = registration.options_for_create(
+  account_id: user.id,
+  user: { id: user.webauthn_user_handle, name: user.name }
+)
+
+# Send `attempt`/`attempt.as_json` to the browser and keep `attempt.approval` on the server.
+receipt = registration.complete_registration(
+  params[:publicKeyCredential],
+  approval: attempt.approval
+)
+
+case receipt.status
+when :registered   # the credential is active in the store after the write
+when :conflict     # the store reported a duplicate; nothing new was added
+when :unconfirmed  # the store did not return a credential that is active now
+end
+```
+
+The store is a duck-typed application object:
+
+- `active_credentials(account_id:)` returns the account's credential records used to build the exclusion list and to
+  confirm the last write.
+- `register(account_id:, credential:)` performs the atomic write and returns `WebAuthn::AccountRegistration::Result`
+  (`created`, `conflict`, or `unconfirmed`), `:created`/`:conflict`, `true`/`false`, or a persisted credential record.
+  The gem calls it exactly once per completed ceremony.
+- `find_credential(account_id:, raw_id:)` is optional and lets the confirmation target one record instead of scanning
+  the active list.
+
+Records can be hashes or objects. Credential identifiers may be stored as raw bytes (`:raw_id`) or as text in either
+base64 spelling (`:webauthn_id`, `:credential_id`, `:credential_identifier`, `:external_id`); both spellings are
+normalized to the same raw identifier, so one credential yields one exclusion entry. Records with `:archived`,
+`:archived_at`, `:status` of `archived`/`revoked`/`deleted`/`inactive`, or `active? == false` are ignored. The exclusion
+list is recomputed from the account at option time, and a credential archived after the options were issued is likewise
+ignored when confirming. `transports` on a record is forwarded as a browser selection hint only; it is never treated as
+evidence about the authenticator. `exclude` and `exclude_credentials` cannot be passed to `options_for_create`; the list always
+comes from the account.
+
+A receipt is only `registered` when re-reading the account shows the credential still active. A reported conflict, a
+store result that does not identify the credential, or a write that vanished leaves the receipt `conflict` or
+`unconfirmed`. The existing direct construction path
+(`WebAuthn::Credential.options_for_create(exclude: ...)`) is unchanged.
+
 ## Moving from Global to Instance Based Configuration
 
 Adding a configuration for a new instance does not mean you need to get rid of your Global configuration. They can co-exist in your application and be both available for the different usages you might have. `WebAuthn.configuration.relying_party` will always return the global one while `WebAuthn::RelyingParty.new`, executed anywhere in your codebase, will allow you to create a different instance as you see the need. They will not collide and instead operate in isolation without any shared state.
