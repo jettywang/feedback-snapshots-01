@@ -1,3 +1,4 @@
+import asyncio
 import json
 
 from asgiref.sync import async_to_sync
@@ -23,6 +24,10 @@ class WebsocketConsumer(SyncConsumer):
     def __init__(self, *args, **kwargs):
         if self.groups is None:
             self.groups = []
+        # Track every group this instance has attempted to join. A backend may
+        # apply a membership even if the group_add() call is cancelled, so the
+        # attempt must be recorded before awaiting it.
+        self._joined_groups = set()
 
     def websocket_connect(self, message):
         """
@@ -30,7 +35,7 @@ class WebsocketConsumer(SyncConsumer):
         """
         try:
             for group in self.groups:
-                async_to_sync(self.channel_layer.group_add)(group, self.channel_name)
+                self._add_group(group)
         except AttributeError:
             raise InvalidChannelLayerError(
                 "BACKEND is unconfigured or doesn't support groups"
@@ -41,6 +46,37 @@ class WebsocketConsumer(SyncConsumer):
             self.accept()
         except DenyConnection:
             self.close()
+
+    def _add_group(self, group):
+        """
+        Records and joins a group.
+        """
+        self._joined_groups.add(group)
+        async_to_sync(self.channel_layer.group_add)(group, self.channel_name)
+
+    def _discard_groups(self):
+        """
+        Leaves every group this instance attempted to join.
+
+        Cleanup is best-effort and idempotent: the tracked set is cleared as
+        entries are handled, so repeated disconnects (or a disconnect after a
+        cancelled or failed connect) cannot affect another connection.
+        """
+        async_to_sync(self._discard_groups_async)()
+
+    async def _discard_groups_async(self):
+        while self._joined_groups:
+            group = self._joined_groups.pop()
+            try:
+                await self.channel_layer.group_discard(group, self.channel_name)
+            except (Exception, asyncio.CancelledError):
+                # A cleanup failure must not mask the connection's outcome.
+                pass
+
+    async def _cleanup(self):
+        # The channel layer API is async, so clean up directly on the event
+        # loop. This still runs when the handler thread is stuck before accept.
+        await self._discard_groups_async()
 
     def connect(self):
         self.accept()
@@ -101,10 +137,7 @@ class WebsocketConsumer(SyncConsumer):
         need to call super() all the time.
         """
         try:
-            for group in self.groups:
-                async_to_sync(self.channel_layer.group_discard)(
-                    group, self.channel_name
-                )
+            self._discard_groups()
         except AttributeError:
             raise InvalidChannelLayerError(
                 "BACKEND is unconfigured or doesn't support groups"
@@ -164,6 +197,10 @@ class AsyncWebsocketConsumer(AsyncConsumer):
     def __init__(self, *args, **kwargs):
         if self.groups is None:
             self.groups = []
+        # Track every group this instance has attempted to join. A backend may
+        # apply a membership even if the group_add() call is cancelled, so the
+        # attempt must be recorded before awaiting it.
+        self._joined_groups = set()
 
     async def websocket_connect(self, message):
         """
@@ -171,6 +208,7 @@ class AsyncWebsocketConsumer(AsyncConsumer):
         """
         try:
             for group in self.groups:
+                self._joined_groups.add(group)
                 await self.channel_layer.group_add(group, self.channel_name)
         except AttributeError:
             raise InvalidChannelLayerError(
@@ -182,6 +220,22 @@ class AsyncWebsocketConsumer(AsyncConsumer):
             await self.accept()
         except DenyConnection:
             await self.close()
+
+    async def _cleanup(self):
+        """
+        Leaves every group this instance attempted to join.
+
+        Cleanup is best-effort and idempotent: the tracked set is cleared as
+        entries are handled, so repeated disconnects (or a disconnect after a
+        cancelled or failed connect) cannot affect another connection.
+        """
+        while self._joined_groups:
+            group = self._joined_groups.pop()
+            try:
+                await self.channel_layer.group_discard(group, self.channel_name)
+            except (Exception, asyncio.CancelledError):
+                # A cleanup failure must not mask the connection's outcome.
+                pass
 
     async def connect(self):
         await self.accept()
@@ -241,8 +295,7 @@ class AsyncWebsocketConsumer(AsyncConsumer):
         need to call super() all the time.
         """
         try:
-            for group in self.groups:
-                await self.channel_layer.group_discard(group, self.channel_name)
+            await self._cleanup()
         except AttributeError:
             raise InvalidChannelLayerError(
                 "BACKEND is unconfigured or doesn't support groups"

@@ -258,6 +258,11 @@ layer is configured or the channel layer doesn't support groups, connecting
 to a ``WebsocketConsumer`` with a non-empty ``groups`` attribute will raise
 ``channels.exceptions.InvalidChannelLayerError``. See :ref:`groups` for more.
 
+Membership is tracked as each group is joined, so a connection is also
+removed from any groups it had joined if it is cancelled before it accepts,
+or if its ``connect`` method raises. Cleanup is idempotent and does not affect
+other connections to the same groups.
+
 
 AsyncWebsocketConsumer
 ~~~~~~~~~~~~~~~~~~~~~~

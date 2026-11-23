@@ -63,6 +63,16 @@ class AsyncConsumer:
         except StopConsumer:
             # Exit cleanly
             pass
+        finally:
+            # Release any resources acquired while handling the connection,
+            # including when dispatch was cancelled or failed partway through.
+            await self._cleanup()
+
+    async def _cleanup(self):
+        """
+        Hook called when the consumer's dispatch loop exits, however it exits.
+        """
+        pass
 
     async def dispatch(self, message):
         """

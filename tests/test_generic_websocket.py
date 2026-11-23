@@ -1,3 +1,6 @@
+import asyncio
+import threading
+
 import pytest
 from django.test import override_settings
 
@@ -7,10 +10,34 @@ from channels.generic.websocket import (
     JsonWebsocketConsumer,
     WebsocketConsumer,
 )
-from channels.layers import get_channel_layer
+from channels.layers import InMemoryChannelLayer, channel_layers, get_channel_layer
 from channels.sessions import SessionMiddlewareStack
 from channels.testing import WebsocketCommunicator
 
+
+class DeferredGroupAddLayer(InMemoryChannelLayer):
+    """
+    In-memory layer that can block a chosen group_add() before registering the
+    group. This lets a connection be cancelled while only some of its groups
+    are joined, before the application accepts it.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.add_started = asyncio.Event()
+        self.finish_add = asyncio.Event()
+        self.block_group = None
+        self.discarded = []
+
+    async def group_add(self, group, channel):
+        if group == self.block_group:
+            self.add_started.set()
+            await self.finish_add.wait()
+        await super().group_add(group, channel)
+
+    async def group_discard(self, group, channel):
+        self.discarded.append((group, channel))
+        await super().group_discard(group, channel)
 
 @pytest.mark.django_db(transaction=True)
 @pytest.mark.asyncio
@@ -536,3 +563,159 @@ async def test_websocket_receive_with_none_text():
     assert response["text"] == "Received text: Hello, world!"
 
     await communicator.disconnect()
+
+
+@pytest.mark.parametrize("async_consumer", [False, True])
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+async def test_group_cleanup_when_cancelled_before_accept(async_consumer):
+    """
+    Tests that a connection cancelled after joining its groups but before
+    accepting them leaves those groups.
+    """
+    layer = InMemoryChannelLayer()
+    previous = channel_layers.set("default", layer)
+    release = threading.Event()
+    accepted = asyncio.Event()
+    try:
+
+        class SyncConsumer(WebsocketConsumer):
+            groups = ["chat"]
+
+            def connect(self):
+                release.wait()
+
+        class AsyncConsumer(AsyncWebsocketConsumer):
+            groups = ["chat"]
+
+            async def connect(self):
+                await accepted.wait()
+
+        if async_consumer:
+            consumer = AsyncConsumer()
+        else:
+            consumer = SyncConsumer()
+
+        communicator = WebsocketCommunicator(consumer, "/testws/")
+        await communicator.send_input({"type": "websocket.connect"})
+
+        for _ in range(100):
+            if layer.groups.get("chat"):
+                break
+            await asyncio.sleep(0.01)
+
+        # Membership is recorded, but the application has not accepted yet.
+        assert list(layer.groups["chat"]) == [consumer.channel_name]
+        communicator.future.cancel()
+        try:
+            await communicator.future
+        except asyncio.CancelledError:
+            pass
+
+        assert layer.groups == {}
+        assert consumer._joined_groups == set()
+    finally:
+        release.set()
+        accepted.set()
+        await asyncio.sleep(0)
+        channel_layers.set("default", previous)
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+async def test_async_group_cleanup_for_partial_membership():
+    """
+    Tests that cancelling an async connection while it is joining its second
+    group removes both the completed and in-flight memberships.
+    """
+    layer = DeferredGroupAddLayer()
+    layer.block_group = "second"
+    previous = channel_layers.set("default", layer)
+    try:
+
+        class TestConsumer(AsyncWebsocketConsumer):
+            groups = ["first", "second"]
+
+            async def connect(self):
+                await self.accept()
+
+        consumer = TestConsumer()
+        communicator = WebsocketCommunicator(consumer, "/testws/")
+        await communicator.send_input({"type": "websocket.connect"})
+        await asyncio.wait_for(layer.add_started.wait(), 1)
+
+        assert list(layer.groups["first"]) == [consumer.channel_name]
+        assert "second" not in layer.groups
+        communicator.future.cancel()
+        try:
+            await communicator.future
+        except asyncio.CancelledError:
+            pass
+
+        assert layer.groups == {}
+        assert consumer._joined_groups == set()
+        assert {group for group, _ in layer.discarded} == {"first", "second"}
+    finally:
+        channel_layers.set("default", previous)
+
+
+@pytest.mark.parametrize("async_consumer", [False, True])
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+async def test_group_cleanup_when_connect_fails(async_consumer):
+    """
+    Tests that a failed connect() removes the groups it joined and that a
+    later connection keeps its own membership.
+    """
+    layer = InMemoryChannelLayer()
+    previous = channel_layers.set("default", layer)
+    received = []
+    fail = {"next": True}
+    try:
+
+        class SyncConsumer(WebsocketConsumer):
+            groups = ["chat"]
+
+            def connect(self):
+                if fail["next"]:
+                    fail["next"] = False
+                    raise RuntimeError("connect failed")
+                self.accept()
+
+            def chat_message(self, event):
+                received.append((self.channel_name, event["text"]))
+
+        class AsyncConsumer(AsyncWebsocketConsumer):
+            groups = ["chat"]
+
+            async def connect(self):
+                if fail["next"]:
+                    fail["next"] = False
+                    raise RuntimeError("connect failed")
+                await self.accept()
+
+            async def chat_message(self, event):
+                received.append((self.channel_name, event["text"]))
+
+        consumer_class = AsyncConsumer if async_consumer else SyncConsumer
+        failing_communicator = WebsocketCommunicator(consumer_class(), "/testws/")
+        with pytest.raises(RuntimeError, match="connect failed"):
+            await failing_communicator.connect()
+        assert layer.groups == {}
+
+        consumer = consumer_class()
+        communicator = WebsocketCommunicator(consumer, "/testws/")
+        connected, _ = await communicator.connect()
+        assert connected
+        assert list(layer.groups["chat"]) == [consumer.channel_name]
+
+        await layer.group_send("chat", {"type": "chat.message", "text": "hello"})
+        await asyncio.sleep(0.05)
+        # Only the live connection received the notification.
+        assert received == [(consumer.channel_name, "hello")]
+
+        await communicator.disconnect()
+        assert layer.groups == {}
+    finally:
+        channel_layers.set("default", previous)
+
