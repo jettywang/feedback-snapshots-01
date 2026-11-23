@@ -162,11 +162,20 @@ class PermissionSet(IdentityWithPolicies):
 
 
 class Policy:
-    def __init__(self, name, document, path="/", is_aws_managed_policy=False):
+    def __init__(self, name, document, path="/", is_aws_managed_policy=False, arn=None, version_id=None,
+                 read_error=None):
         self.Name = name
         self.Policy = document
         self.Path = path
         self.IsAWSManagedPolicy = is_aws_managed_policy
+        # ARN and the resolved version id are only populated for managed policies pulled from the
+        # environment.  They let release validation pin and re-check the exact version that was
+        # reviewed without changing equality for policies defined inside the template.
+        self.Arn = arn
+        self.VersionId = version_id
+        # read_error is set when the default version document cannot be read, so the role is not
+        # silently treated as having a valid, reviewable managed policy.
+        self.ReadError = read_error
 
     def __eq__(self, other):
         if not isinstance(other, Policy):

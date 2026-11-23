@@ -2,6 +2,7 @@
 Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 SPDX-License-Identifier: MIT-0
 """
+import json
 import logging
 
 from abc import ABC
@@ -123,8 +124,20 @@ class AttachedPolicyParser:
 			default_version_id = response['Policy']['DefaultVersionId']
 			policy_path = response['Policy']['Path']
 
-			response = self.client.get_policy_version(PolicyArn=arn, VersionId=default_version_id)
-			policy_document = response['PolicyVersion']['Document']
+			policy_document = None
+			read_error = None
+			try:
+				response = self.client.get_policy_version(PolicyArn=arn, VersionId=default_version_id)
+				policy_document = response['PolicyVersion']['Document']
+				if isinstance(policy_document, str):
+					policy_document = json.loads(policy_document)
+			except ClientError as error:
+				if error.response['Error']['Code'] in ('NoSuchEntity', 'InvalidInput'):
+					# the policy exists but its default version cannot be read. Keep the ARN and
+					# advertised version so release validation flags it instead of guessing a document.
+					read_error = f'Could not read version {default_version_id} of managed policy {arn}.'
+				else:
+					raise
 
 			# it must be a valid ARN if we made it this far
 			arn_parts = arn.split(':')
@@ -132,7 +145,8 @@ class AttachedPolicyParser:
 			# record whether this is an AWS managed policy because we may treat them slightly different for validation
 			is_aws_managed_policy = account_id.lower() == 'aws'
 
-			policy = Policy(policy_name, policy_document, policy_path, is_aws_managed_policy)
+			policy = Policy(policy_name, policy_document, policy_path, is_aws_managed_policy,
+							arn=arn, version_id=default_version_id, read_error=read_error)
 			principal.add_policy(policy)
 
 
