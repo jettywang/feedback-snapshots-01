@@ -2,6 +2,7 @@
 # frozen_string_literal: true
 require 'warden/hooks'
 require 'warden/config'
+require 'warden/failure_context'
 
 module Warden
   # The middleware for Rack Authentication
@@ -131,19 +132,40 @@ module Warden
     end
 
     # Calls the failure app.
-    # The before_failure hooks are run on each failure
+    # The before_failure hooks are run on each failure. They keep receiving the
+    # complete Rack environment and the complete options hash.
+    #
+    # When a restricted failure app is configured, it receives a separate,
+    # allowlisted environment created by Warden::FailureContext. The trusted
+    # environment, session and options are never handed to it. Otherwise the
+    # configured failure app keeps its existing contract.
     # :api: private
     def call_failure_app(env, options = {})
-      if config.failure_app
+      if config.failure_app || config.restricted_failure_app
         options.merge!(:attempted_path => ::Rack::Request.new(env).fullpath)
         env["PATH_INFO"] = "/#{options[:action]}"
         env["warden.options"] = options
 
         _run_callbacks(:before_failure, env, options)
-        config.failure_app.call(env).to_a
+        call_configured_failure_app(env, options)
       else
         raise "No Failure App provided"
       end
     end # call_failure_app
+
+    # Dispatches to the restricted failure app when one is configured. The
+    # context is built after the before_failure callbacks so that a callback
+    # may select a different (safe) failure category or action.
+    # :api: private
+    def call_configured_failure_app(env, options)
+      if (restricted = config.restricted_failure_app)
+        proxy = env['warden']
+        result = options.key?(:result) ? options[:result] : (proxy && proxy.result)
+        context = Warden::FailureContext.build(options, config, result)
+        restricted.call(Warden::FailureContext.public_env(env, context)).to_a
+      else
+        config.failure_app.call(env).to_a
+      end
+    end
   end
 end # Warden
