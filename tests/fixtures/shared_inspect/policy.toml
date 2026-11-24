@@ -1,0 +1,4 @@
+# Declarative restriction policy consumed by RedactionPolicy.from_settings.
+RESTRICTED_KEYS = ["BILLING_CODE"]
+BILLING_CODE = "FIXTURE-PLACEHOLDER-billing-0007"
+VISIBLE = "visible-value"

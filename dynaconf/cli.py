@@ -916,21 +916,64 @@ INSPECT_FORMATS = list(builtin_dumpers.keys())
     count=True,
     help="Increase verbosity of the output on --report-mode=debug.",
 )
+@click.option(
+    "--shared",
+    "--public",
+    "--shareable",
+    "--redact",
+    "--sanitize",
+    "--safe",
+    "shared",
+    default=False,
+    is_flag=True,
+    help=(
+        "Produce a shareable report: restricted/sensitive values and fields "
+        "derived from them are redacted before printing/exporting."
+    ),
+)
+@click.option(
+    "--restricted-key",
+    "--sensitive-key",
+    "--secret-key",
+    "--redact-key",
+    "restricted_keys",
+    multiple=True,
+    help=(
+        "Key name or dotted path to redact on --shared output "
+        "(repeatable). Conventional *PASSWORD/*TOKEN/*SECRET names are "
+        "detected automatically."
+    ),
+)
 def inspect(
-    key, env, format, new_first, history_limit, _all, report_mode, verbose
+    key,
+    env,
+    format,
+    new_first,
+    history_limit,
+    _all,
+    report_mode,
+    verbose,
+    shared,
+    restricted_keys,
 ):  # pragma: no cover
     """
     Inspect the loading history of the given settings instance.
 
     Filters by key and environment, otherwise shows all.
-    """
 
+    Use --shared to produce a ticket-safe/public report in which restricted
+    values (and fields computed from them) are masked while sources, override
+    order and source identifiers are preserved.
+    """
+    restricted = restricted_keys or None
     if report_mode == "debug":
         print_debug_info(
             settings,
             dumper=format,
             verbosity=verbose,
             key=key,
+            shared=shared,
+            restricted_keys=restricted,
         )
         click.echo()
     elif report_mode == "inspect":
@@ -944,6 +987,8 @@ def inspect(
                 include_internal=_all,
                 history_limit=history_limit,
                 print_report=True,
+                shared=shared,
+                restricted_keys=restricted,
             )
             click.echo()
         except (KeyNotFoundError, EnvNotFoundError, OutputFormatError) as err:

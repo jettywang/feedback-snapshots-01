@@ -217,6 +217,70 @@ Kwargs-only:
 - `dumper`: Accepts preset strings (e.g. "yaml", "json") or custom dumper callable ``(dict, TextIO) -> None``. If not provided, does nothing.
 - `report_builder`: If provided, it is used to generate the report dict.
 
+### Shared (ticket-safe) view
+
+When an inspect/debug report has to be attached to a public incident ticket,
+pass `shared=True` (aliases: `public=True`, `redact=True`) to get a redacted
+copy:
+
+```python
+from dynaconf import inspect_settings, get_shared_report
+
+# same report shape as usual (header/current/history), but safe to share
+report = inspect_settings(settings, shared=True)
+
+# convenience entry point
+report = get_shared_report(settings, key="DATABASE")
+```
+
+What the shared view does:
+
+- Restricted values are replaced by the `"********"` placeholder (which
+  compares equal to the usual `"***"` / `"[REDACTED]"` masks). Keys named
+  like `PASSWORD`, `TOKEN`, `SECRET`, `API_KEY`, `CREDENTIALS`, ... are
+  detected automatically; add your own with
+  `restricted_keys=["BILLING_CODE", "services.cache.token"]` (bare names
+  match any leaf, dotted paths match a path suffix).
+- Fields computed from restricted values are redacted too. This covers
+  evaluated values that embed a secret (e.g. an interpolated `DSN`), raw
+  `@format`/`@jinja` lazy references to restricted keys, nested leaves and
+  merged history entries. Secret literals are harvested from the **full**
+  loading history, so a value that was later overridden/reset cannot survive
+  in older entries.
+- Sources, override order and the source `identifier`/`loader`/`env`/`merged`
+  fields are preserved untouched, so human (YAML) and structured (JSON)
+  exports can still be compared and traced back to their origins.
+- Normal keys are untouched and can be queried precisely, e.g.
+  `inspect_settings(settings, key="DB.HOST", shared=True)`.
+
+Restricted keys can also be declared on the settings object via
+`RESTRICTED_KEYS = ["BILLING_CODE"]` (list or comma separated string). For
+fine control use `dynaconf.utils.inspect.RedactionPolicy` directly
+(`detect_named`, `scan_values`, `redact_derived`, `marker`,
+`on_restricted="mask"|"drop"`). `redact_report(report, ...)` redacts an
+already-built report structure and `shared_view(source, ...)` dispatches on
+either a settings object or a report dict.
+
+The same option works for diagnostics:
+
+```python
+from dynaconf.utils.inspect import get_debug_info, print_debug_info
+
+get_debug_info(settings, verbosity=2, shared=True)
+print_debug_info(settings, shared=True, dumper="json")
+```
+
+And on the CLI:
+
+```bash
+dynaconf inspect --shared -f json
+dynaconf inspect --shared --restricted-key BILLING_CODE -m debug -vv
+```
+
+The default view is unchanged and keeps the complete loading history for
+authorized operators (an explicit `reveal=True`/`reveal_secrets=True` also
+forces the full view).
+
 ### `get_history`
 
 Returns a list of history-records (the same as in the `history` key of `inspect_settings` records. In fact, `inspect_settings` uses `get_history`, so this is just available if your main goal is to use the data directly. It offer some basic filtering capabilities, but it is assumed that if you choose to use this you'll probably want to process and filter the data by your own.
@@ -227,7 +291,7 @@ Returns a list of history-records (the same as in the `history` key of `inspect_
 Returns a dictionary containing debug information about the settings object. This information includes the current environment, the settings file, the loaders, and the history of the settings object.
 
 ```python
-from dynaconf.utils.inspect_settings import get_debug_info
+from dynaconf.utils.inspect import get_debug_info
 get_debug_info(settings.DYNACONF, verbosity=0, key="data")
 # result
 {'core_loaders': [],

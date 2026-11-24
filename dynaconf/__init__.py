@@ -7,7 +7,11 @@ from dynaconf.contrib import FlaskDynaconf
 from dynaconf.hooking import post_hook
 from dynaconf.nodes import DataDict
 from dynaconf.utils.inspect import get_history
+from dynaconf.utils.inspect import get_shared_report
 from dynaconf.utils.inspect import inspect_settings
+from dynaconf.utils.inspect import redact_report
+from dynaconf.utils.inspect import RedactionPolicy
+from dynaconf.utils.inspect import shared_view
 from dynaconf.utils.parse_conf import add_converter
 from dynaconf.utils.parse_conf import DynaconfFormatError
 from dynaconf.utils.parse_conf import DynaconfParseError
@@ -40,6 +44,10 @@ __all__ = [
     "add_converter",
     "inspect_settings",
     "get_history",
+    "get_shared_report",
+    "redact_report",
+    "RedactionPolicy",
+    "shared_view",
     "DynaconfFormatError",
     "DynaconfParseError",
     "post_hook",

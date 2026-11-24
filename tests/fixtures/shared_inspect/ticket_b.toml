@@ -1,0 +1,13 @@
+# Override source for the shared-inspect fixtures.
+NORMAL = "beta-normal"
+PASSWORD = "FIXTURE-PLACEHOLDER-pass-beta-0004"
+
+[DB]
+dynaconf_merge = true
+PASSWORD = "FIXTURE-PLACEHOLDER-dbpass-beta-0005"
+
+[FEATURES]
+dynaconf_merge = true
+MERGED_LIST = ["three"]
+
+PASSWORDS = ["FIXTURE-PLACEHOLDER-listpass-beta-0006", "dynaconf_merge"]

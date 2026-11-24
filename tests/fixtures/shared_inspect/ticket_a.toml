@@ -1,0 +1,18 @@
+# Base source for the shared-inspect fixtures.
+# All credential-looking literals are synthetic placeholders.
+NORMAL = "alpha-normal"
+ONLY_IN_A = "stay-in-a"
+PASSWORD = "FIXTURE-PLACEHOLDER-pass-alpha-0001"
+API_TOKEN = "FIXTURE-PLACEHOLDER-token-alpha-0002"
+GREETING = "@format hello {this.NORMAL}"
+DSN = "@format postgres://{this.DB.USER}:{this.DB.PASSWORD}@{this.DB.HOST}:5432/{this.DB.NAME}"
+
+[DB]
+HOST = "alpha-db.internal"
+PORT = 5432
+NAME = "appdb"
+USER = "alpha_user"
+PASSWORD = "FIXTURE-PLACEHOLDER-dbpass-alpha-0003"
+
+[FEATURES]
+MERGED_LIST = ["one", "two"]

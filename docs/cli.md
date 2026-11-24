@@ -140,6 +140,11 @@ Options:
   -v, --verbose                   Increase verbosity of the output on
                                   --report-mode=debug.
 
+  --shared, --public              Produce a shareable report with restricted
+                                  values and derived fields redacted.
+  --restricted-key TEXT           Key/dotted path to redact on --shared output
+                                  (repeatable).
+
   --help                          Show this message and exit.
                     Show this message and exit.
 ```
