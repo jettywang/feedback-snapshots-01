@@ -129,5 +129,40 @@ class Elastic::Transport::Transport::Connections::ConnectionTest < Minitest::Tes
       assert c1 == c2, "Connection #{c1} should be equal to #{c2}"
       assert c2 != c3, "Connection #{c2} should NOT be equal to #{c3}"
     end
+
+    should 'not be equal when the header profile differs' do
+      c1 = Connection.new(host: { protocol: 'http', host: 'foo', port: 123 }, headers: { 'X-Token' => 'a' })
+      c2 = Connection.new(host: { protocol: 'http', host: 'foo', port: 123 }, headers: { 'X-Token' => 'b' })
+
+      refute c1 == c2, "Connections with different headers should not be equal: #{c1.inspect} #{c2.inspect}"
+    end
+
+    should 'compute a generation that changes with headers' do
+      c1 = Connection.new(host: { protocol: 'http', host: 'foo', port: 123 }, headers: { 'X-Token' => 'a' })
+      c2 = Connection.new(host: { protocol: 'http', host: 'foo', port: 123 }, headers: { 'X-Token' => 'b' })
+
+      refute_equal c1.generation, c2.generation
+      refute_includes c1.to_s, 'X-Token', 'the connection string must not print header values'
+    end
+
+    should 'freeze its header snapshot' do
+      headers = { 'X-Token' => 'a' }
+      c = Connection.new(host: { protocol: 'http', host: 'foo', port: 123 }, headers: headers)
+      headers['X-Token'] = 'b'
+
+      assert_equal 'a', c.headers['X-Token']
+      assert c.headers.frozen?
+    end
+
+    should 'know which private headers it is approved to send' do
+      c = Connection.new(
+        host: { protocol: 'http', host: 'foo', port: 123 },
+        headers: { 'X-Token' => 'a' },
+        approved_headers: { 'X-Token' => 'a' }
+      )
+
+      assert c.approved_header?('x-token')
+      refute c.approved_header?('X-Other')
+    end
   end
 end

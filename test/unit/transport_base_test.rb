@@ -42,6 +42,23 @@ class Elastic::Transport::Transport::BaseTest < Minitest::Test
     def initialize(*); end
   end
 
+  # Records the options each connection was built with, so tests can check the
+  # header profile a host actually received.
+  class HeaderRecordingTransport
+    include Elastic::Transport::Transport::Base
+    attr_reader :built
+
+    def initialize(arguments = {})
+      @built = []
+      super
+    end
+
+    def __build_connection(host, options = {}, block = nil)
+      @built << { host: host, headers: options[:headers].dup }
+      Elastic::Transport::Transport::Connections::Connection.new(host: host, connection: Object.new)
+    end
+  end
+
   context "Transport::Base" do
     should "raise exception when it doesn't implement __build_connection" do
       assert_raise NoMethodError do
@@ -595,6 +612,160 @@ class Elastic::Transport::Transport::BaseTest < Minitest::Test
 
       assert_equal 2, @transport.connections.all.size
       assert_equal 1, @transport.connections.size
+    end
+  end
+
+  context "header profiles" do
+    setup do
+      @options = {
+        transport_options: { headers: { 'X-Service-Token' => 'token', 'X-Trace' => 'trace' } }
+      }
+      @transport = HeaderRecordingTransport.new(
+        hosts: [{ host: 'service-a', port: 9200 }], options: @options
+      )
+    end
+
+    should "separate private headers from public ones" do
+      profile = @transport.header_profile
+      assert_equal({ 'X-Trace' => 'trace' }, profile[:public])
+      assert_equal({ 'X-Service-Token' => 'token' }, profile[:private])
+    end
+
+    should "treat declared private headers as private even without a credential-like name" do
+      transport = HeaderRecordingTransport.new(
+        hosts: [{ host: 'service-a', port: 9200 }],
+        options: {
+          private_headers: ['X-Signature'],
+          transport_options: { headers: { 'X-Signature' => 'sig', 'X-Trace' => 'trace' } }
+        }
+      )
+      profile = transport.header_profile
+      assert_equal({ 'X-Signature' => 'sig' }, profile[:private])
+      assert_equal({ 'X-Trace' => 'trace' }, profile[:public])
+    end
+
+    should "give the connection a snapshot and a generation" do
+      connection = @transport.connections.first
+      assert_equal 'token', connection.headers['X-Service-Token']
+      assert connection.approved_header?('x-service-token')
+      assert_match(/\A[0-9a-f]{16}\z/, connection.generation)
+    end
+
+    should "not write into the caller's transport options" do
+      snapshot = Marshal.load(Marshal.dump(@options))
+      assert_equal snapshot, @options
+    end
+
+    should "withhold private headers from a host that is not approved" do
+      @options[:approved_hosts] = ['service-b:9200']
+      transport = HeaderRecordingTransport.new(
+        hosts: [{ host: 'service-a', port: 9200 }], options: @options
+      )
+      connection = transport.connections.first
+
+      assert_equal({ 'X-Trace' => 'trace' }, connection.headers)
+      refute connection.private_headers_allowed?
+      assert_equal ['x-service-token'], connection.withheld_header_names
+      assert_nil transport.built.first[:headers]['X-Service-Token']
+    end
+
+    should "approve an approved host even when its protocol changes" do
+      @options[:approved_hosts] = ['service-a:9200']
+      transport = HeaderRecordingTransport.new(
+        hosts: [{ host: 'service-a', port: 9200, scheme: 'https' }], options: @options
+      )
+      assert transport.connections.first.private_headers_allowed?
+      assert_equal 'token', transport.connections.first.headers['X-Service-Token']
+    end
+
+    should "replace a connection when the header profile changes" do
+      @transport.__rebuild_connections(
+        hosts: [{ host: 'service-a', port: 9200 }],
+        options: @options.merge(
+          transport_options: { headers: { 'X-Service-Token' => 'new-token', 'X-Trace' => 'trace' } }
+        )
+      )
+
+      connection = @transport.connections.first
+      assert_equal 'new-token', connection.headers['X-Service-Token']
+      assert_equal 1, @transport.connections.all.size
+    end
+
+    should "keep a connection when only unrelated hosts are added" do
+      old = @transport.connections.first
+      @transport.__rebuild_connections(
+        hosts: [{ host: 'service-a', port: 9200 }, { host: 'service-c', port: 9200 }],
+        options: @options
+      )
+      assert_equal 2, @transport.connections.size
+      assert_equal old.object_id, @transport.connections.first.object_id
+    end
+  end
+
+  context "request-scoped private headers" do
+    setup do
+      @transport = HeaderRecordingTransport.new(
+        hosts: [
+          { host: 'service-a', port: 9200 },
+          { host: 'service-b', port: 9200 }
+        ],
+        options: {
+          approved_hosts: ['service-a:9200'],
+          transport_options: { headers: { 'X-Service-Token' => 'token' } }
+        }
+      )
+    end
+
+    should "withhold a private request header from an unapproved connection" do
+      connection = @transport.connections.all.find { |c| c.host[:host] == 'service-b' }
+      resolved, withheld = @transport.resolve_attempt_headers(connection, { 'Authorization' => 'Basic x' })
+
+      refute resolved.key?('Authorization')
+      assert_includes withheld, 'authorization'
+      assert_includes withheld, 'x-service-token'
+    end
+
+    should "keep a private request header on an approved connection" do
+      connection = @transport.connections.all.find { |c| c.host[:host] == 'service-a' }
+      resolved, withheld = @transport.resolve_attempt_headers(connection, { 'Authorization' => 'Basic x' })
+
+      assert_equal 'Basic x', resolved['Authorization']
+      assert_empty withheld
+    end
+
+    should "withhold the request header from a host outside a URL-form allowlist" do
+      transport = HeaderRecordingTransport.new(
+        hosts: [{ host: 'service-b', port: 9200 }],
+        options: { approved_hosts: ['https://service-a:9200'] }
+      )
+      connection = transport.connections.first
+      resolved, withheld = transport.resolve_attempt_headers(connection, { 'Authorization' => 'Basic x' })
+
+      refute resolved.key?('Authorization')
+      assert_includes withheld, 'authorization'
+    end
+
+    should "send the request header to a host approved by URL" do
+      transport = HeaderRecordingTransport.new(
+        hosts: [{ host: 'service-b', port: 9200 }],
+        options: { approved_hosts: ['http://service-b:9200'] }
+      )
+      connection = transport.connections.first
+      resolved, withheld = transport.resolve_attempt_headers(connection, { 'Authorization' => 'Basic x' })
+
+      assert_equal 'Basic x', resolved['Authorization']
+      assert_empty withheld
+    end
+
+    should "never publish values in the request context" do
+      connection = @transport.connections.all.first
+      context = Elastic::Transport::Transport::RequestContext.new(request_id: 'req-1', attempt: 1)
+      context.connection_generation = connection.generation
+      context.record_sent_headers('Authorization' => 'Basic secret', 'Content-Type' => 'application/json')
+
+      assert_includes context.to_h[:header_names], 'authorization'
+      refute_includes context.to_h.inspect, 'secret'
+      refute_includes context.to_h.inspect, 'Basic'
     end
   end
 

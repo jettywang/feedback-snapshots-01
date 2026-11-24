@@ -117,6 +117,15 @@ module Elastic
       #
       # @option enable_meta_header [Boolean] :enable_meta_header Enable sending the meta data header to Cloud.
       #                                                          (Default: true)
+      # @option arguments [Hash,Array,String] :private_headers Header names (or a hash of name/value pairs)
+      #   that are private to this service. Credential-like names (`Authorization`, `Cookie`, `*token*`,
+      #   `*secret*`, `*api*key*`, ...) are detected automatically; this option covers names the policy
+      #   can't recognize, for example `X-Service-Signature`. Values are still sent, but never logged,
+      #   traced or returned in a response context.
+      # @option arguments [Array<String>] :approved_hosts Hosts (`host`, `host:port` or a URL) that may receive
+      #   this service's private headers. When set, connections to any other host stay usable with public
+      #   headers only, and a node discovered by the sniffer or a reload can't inherit the credentials.
+      #   When omitted, every host the transport connects to belongs to the service.
       # @option arguments [String] :ca_fingerprint SHA256 fingerprint of a certificate in the server's chain (usually
       #   the CA). Before the first request, the matching certificate is fetched from the server and becomes the only
       #   trusted certificate for every connection. Chain and expiry are verified, host names aren't (except on
@@ -127,6 +136,14 @@ module Elastic
       #
       def initialize(arguments = {}, &block)
         @arguments = arguments.transform_keys(&:to_sym)
+        # The top-level hash is a copy, but nested hashes belong to the caller
+        # and may be reused for another client. Copy them before adding the
+        # meta header, a timeout or credentials, and never write into them.
+        @arguments[:transport_options] = (@arguments[:transport_options] || {}).dup
+        @arguments[:transport_options][:headers] =
+          (@arguments[:transport_options][:headers] || {}).dup
+        @arguments[:http] = (@arguments[:http] || {}).dup
+
         @arguments[:logger] ||= @arguments[:log]   ? DEFAULT_LOGGER.call : nil
         @arguments[:tracer] ||= @arguments[:trace] ? DEFAULT_TRACER.call : nil
         @arguments[:reload_connections] ||= false
@@ -134,8 +151,6 @@ module Elastic
         @arguments[:delay_on_retry]     ||= 0
         @arguments[:reload_on_failure]  ||= false
         @arguments[:randomize_hosts]    ||= false
-        @arguments[:transport_options]  ||= {}
-        @arguments[:http]               ||= {}
         @arguments[:enable_meta_header] = arguments.fetch(:enable_meta_header, true)
 
         @hosts ||= extract_hosts
@@ -201,11 +216,8 @@ module Elastic
       private
 
       def add_header(header)
-        headers = @arguments[:transport_options]&.[](:headers) || {}
-        headers.merge!(header)
-        @arguments[:transport_options].merge!(
-          headers: headers
-        )
+        @arguments[:transport_options][:headers] =
+          @arguments[:transport_options][:headers].merge(header)
       end
 
       # Normalizes and returns hosts configuration.
@@ -274,7 +286,9 @@ module Elastic
                          port: host.port
                        }
                      when Hash
-                       host
+                       # Don't resolve ports or trim paths in the caller's hash;
+                       # one host configuration may be reused for another client.
+                       host.dup
                      else
                        raise ArgumentError, "Please pass host as a String, URI or Hash -- #{host.class} given."
                      end

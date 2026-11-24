@@ -23,6 +23,7 @@ module Elastic
       module Base
         include Loggable
         include CaFingerprint
+        include HeaderPolicy
 
         DEFAULT_PORT             = 9200
         DEFAULT_PROTOCOL         = 'http'.freeze
@@ -53,6 +54,10 @@ module Elastic
 
           @hosts       = arguments[:hosts]   || []
           @options     = arguments[:options] || {}
+          # Manticore (and direct transport construction) can pass transport
+          # options next to :options rather than inside it. Keep the source so
+          # header configuration is read consistently from both placements.
+          @argument_transport_options = arguments[:transport_options] || {}
           @options[:http] ||= {}
           @options[:retry_on_status] ||= []
           @options[:delay_on_retry]  ||= 0
@@ -126,7 +131,8 @@ module Elastic
         def __rebuild_connections(arguments = {})
           @state_mutex.synchronize do
             @hosts       = arguments[:hosts]    || []
-            @options     = arguments[:options]  || {}
+            @options     = arguments[:options]  || @options
+            @argument_transport_options = arguments[:transport_options] || @argument_transport_options
 
             __close_connections
 
@@ -155,13 +161,133 @@ module Elastic
           )
         end
 
-        # Helper function: Maps over hosts, sets protocol, port and user/password and builds connections
+        # The header configuration this transport owns. Private headers are
+        # kept apart from the shared defaults, so a caller that reuses its
+        # options hash for another client can't hand one service's credentials
+        # to the other.
         #
-        # @return [Array<Connection>
+        # @return [Hash] `:public` and `:private` header hashes.
+        # @api private
+        #
+        def header_profile
+          declared = options[:private_headers] || @argument_transport_options[:private_headers]
+          declared_values = {}
+          declared_names = []
+
+          case declared
+          when Hash
+            declared.each { |name, value| declared_values[name.to_s] = value }
+          when Array
+            declared_names = declared.map { |name| name.to_s.downcase }
+          when String
+            declared_names = [declared.downcase]
+          end
+
+          merged = HeaderPolicy.merge_headers(
+            options[:headers],
+            @argument_transport_options[:headers],
+            options.dig(:transport_options, :headers)
+          )
+
+          public_headers = {}
+          private_headers = {}
+
+          merged.each do |name, value|
+            if sensitive_header?(name) ||
+               declared_names.include?(name.to_s.downcase) ||
+               declared_values.key?(name.to_s)
+              private_headers[name] = value
+            else
+              public_headers[name] = value
+            end
+          end
+
+          declared_values.each { |name, value| private_headers[name] = value }
+
+          { public: public_headers.freeze, private: private_headers.freeze }
+        end
+
+        # Whether the private headers may be sent to this host.
+        #
+        # The transport is the service boundary: without an allowlist every
+        # host it builds a connection for (configured, sniffed or reloaded) is
+        # approved, which keeps a rotating cluster and a protocol change in
+        # service. With an allowlist, only the listed hosts are; the others
+        # stay usable with public headers only, so a node that belongs to
+        # another service can never inherit these credentials.
+        #
+        # @param host [Hash]
+        # @return [Boolean]
+        # @api private
+        #
+        def approved_host?(host)
+          allowlist = options[:approved_hosts] || @argument_transport_options[:approved_hosts]
+          return true if allowlist.nil?
+
+          entries = allowlist.is_a?(String) ? allowlist.split(',') : Array(allowlist)
+          name = host[:host].to_s
+          port = host[:port].to_i
+
+          entries.any? do |entry|
+            entry = entry.to_s.strip
+            next false if entry.empty?
+
+            entry_name, entry_port = if entry.start_with?('http://', 'https://')
+                                       uri = URI.parse(entry)
+                                       [uri.host.to_s, uri.port]
+                                     elsif entry.start_with?('[')
+                                       match = entry.match(/\A\[(.+)\](?::(\d+))?/)
+                                       [match && match[1], match && match[2] && match[2].to_i]
+                                     elsif entry.count(':') == 1
+                                       host_part, port_part = entry.split(':', 2)
+                                       [host_part, port_part.to_i]
+                                     else
+                                       [entry, nil]
+                                     end
+
+            entry_name == name && (entry_port.nil? || entry_port == port)
+          end
+        end
+
+        # Headers one connection built now would carry: public headers for
+        # every host, plus the private headers only where approved. Computed on
+        # every build, so a rebuild picks up new configuration while existing
+        # connections keep their snapshot.
+        #
+        # @param host [Hash]
+        # @return [Hash] `:all`, `:private`, `:withheld`.
+        # @api private
+        #
+        def connection_header_profile(host = nil)
+          profile = header_profile
+          approved = host.nil? || approved_host?(host)
+
+          all = if approved
+                  HeaderPolicy.merge_headers(profile[:public], profile[:private])
+                else
+                  profile[:public]
+                end
+
+          {
+            all: all.freeze,
+            private: approved ? profile[:private] : {}.freeze,
+            withheld: approved ? [].freeze : profile[:private].keys.map { |name| name.to_s.downcase }.sort.freeze
+          }
+        end
+
+        # Helper function: Maps over hosts, sets protocol, port and user/password and builds connections.
+        # Each host is copied: the hashes may belong to a client that builds another transport from them.
+        #
+        # @return [Array<Connection>]
         # @api    private
         #
         def __connections_from_host
-          hosts.map do |host|
+          hosts.map do |configured_host|
+            host = configured_host.dup
+            # The Client hands its host hashes to the transport, and a caller
+            # may build several clients from one array; keep this transport's
+            # resolved protocol and credentials to itself.
+            host[:attributes] = host[:attributes].dup if host[:attributes].is_a?(Hash)
             host[:protocol] = host[:scheme] || options[:scheme] || options[:http][:scheme] || DEFAULT_PROTOCOL
             host[:port] ||= options[:port] || options[:http][:port] || DEFAULT_PORT
             if (options[:user] || options[:http][:user]) && !host[:user]
@@ -172,8 +298,142 @@ module Elastic
             # Hosts added after the pin (reload, sniffing) would otherwise get no protection
             raise Error, 'CA fingerprinting can\'t be configured over http' if @ca_file && host[:protocol] != 'https'
 
-            __build_connection(host, (options[:transport_options] || {}), @block)
+            profile = connection_header_profile(host)
+
+            # A fresh options hash per connection: adapters add Content-Type,
+            # User-Agent and defaults to their copy, and the caller's shared
+            # hash must stay untouched.
+            transport_options = (options[:transport_options] || {}).merge(headers: profile[:all].dup)
+            connection = __build_connection(host, transport_options, @block)
+            connection.with_header_profile(
+              profile[:all],
+              profile[:private],
+              withheld: profile[:withheld],
+              allowed: approved_host?(host)
+            )
+            connection
           end
+        end
+
+        # Header names this transport was told to treat as private, on top of
+        # the credential-like names {HeaderPolicy} recognizes.
+        #
+        # @return [Array<String>]
+        # @api private
+        #
+        def declared_private_header_names
+          declared = options[:private_headers] || @argument_transport_options[:private_headers]
+
+          names = case declared
+                  when Hash then declared.keys
+                  when Array then declared
+                  when String then [declared]
+                  else []
+                  end
+
+          names.map { |name| name.to_s.downcase }
+        end
+
+        # @api private
+        #
+        def publishable_headers(headers)
+          redacted_headers(headers, HeaderPolicy::REDACTED, declared_private_header_names)
+        end
+
+        # True for names that are private by name (`Authorization`, ...) or
+        # because the caller declared them private (`X-Service-Signature`).
+        #
+        # @api private
+        #
+        def private_header_name?(name)
+          sensitive_header?(name) || declared_private_header_names.include?(name.to_s.downcase)
+        end
+
+        # Headers for one request attempt. Request-scoped private headers are
+        # added only on a connection that is approved to carry them; anything
+        # withheld is named (not valued) so the response context can report it.
+        #
+        # @param connection [Connections::Connection]
+        # @param headers [Hash, nil] headers passed to #perform_request
+        # @return [Array(Hash, Array<String>)]
+        # @api private
+        #
+        def resolve_attempt_headers(connection, headers)
+          request_headers = headers.nil? ? {} : headers.dup
+          private_request = request_headers.keys.select { |name| private_header_name?(name) }
+
+          withheld = Array(withheld_header_names_of(connection))
+
+          if !private_request.empty? && !private_headers_allowed?(connection)
+            withheld |= private_request.map { |name| name.to_s.downcase }
+            request_headers = request_headers.reject { |name, _| private_header_name?(name) }
+          end
+
+          [request_headers, withheld.uniq.sort]
+        end
+
+        # True unless the connection explicitly says it is not approved for
+        # private headers. Untyped test doubles and custom connections keep
+        # their previous behaviour.
+        #
+        # @api private
+        #
+        def private_headers_allowed?(connection)
+          return true unless connection.respond_to?(:private_headers_allowed?)
+
+          connection.private_headers_allowed? != false
+        end
+
+        # @api private
+        #
+        def generation_of(connection)
+          return nil unless connection.respond_to?(:generation)
+
+          generation = connection.generation
+          generation.is_a?(String) ? generation : nil
+        end
+
+        # @api private
+        #
+        def withheld_header_names_of(connection)
+          return [] unless connection.respond_to?(:withheld_header_names)
+
+          withheld = connection.withheld_header_names
+          withheld.is_a?(Array) ? withheld.map(&:to_s) : []
+        end
+
+        # @api private
+        #
+        def connection_headers_snapshot(connection)
+          return {} unless connection.respond_to?(:headers)
+
+          headers = connection.headers
+          headers.is_a?(Hash) ? headers : {}
+        end
+
+        # Header values that reach an adapter, before that adapter applies its
+        # own defaults. The connection snapshot is the base (it is frozen, so a
+        # rebuild cannot change an in-flight request), the adapter's physical
+        # headers fill in its defaults, and request-scoped values win.
+        #
+        # @api private
+        #
+        def request_headers_for_attempt(connection, headers)
+          snapshot = connection_headers_snapshot(connection)
+          physical = connection_physical_headers(connection)
+          HeaderPolicy.merge_headers(snapshot, physical, headers)
+        end
+
+        # @api private
+        #
+        def connection_physical_headers(connection)
+          return {} unless connection.respond_to?(:connection)
+
+          physical = connection.connection
+          return {} unless physical.respond_to?(:headers)
+
+          headers = physical.headers
+          headers.is_a?(Hash) ? headers : {}
         end
 
         # @abstract Build and return a connection.
@@ -199,11 +459,12 @@ module Elastic
         #
         # @api private
         #
-        def __log_response(method, path, params, body, url, response, json, took, duration)
+        def __log_response(method, path, params, body, url, response, json, took, duration, context = nil)
           if logger
             sanitized_url = sanitize_url(url.to_s)
+            suffix = context ? " generation:#{context.connection_generation} request:#{context.request_id}" : ''
             log_info "#{method.to_s.upcase} #{sanitized_url} " +
-                         "[status:#{response.status}, request:#{sprintf('%.3fs', duration)}, query:#{took}]"
+                         "[status:#{response.status}, request:#{sprintf('%.3fs', duration)}, query:#{took}]#{suffix}"
             log_debug "> #{__convert_to_json(body)}" if body
             log_debug "< #{response.body}"
           end
@@ -218,7 +479,8 @@ module Elastic
               (params.empty? ? '' : "&#{::Faraday::Utils::ParamsHash[params].to_query}")
           trace_body = body ? " -d '#{__convert_to_json(body, :pretty => true)}'" : ''
           trace_command = "curl -X #{method.to_s.upcase}"
-          trace_command += " -H '#{headers.collect { |k, v| "#{k}: #{v}" }.join(", ")}'" if headers && !headers.empty?
+          publishable = publishable_headers(headers)
+          trace_command += " -H '#{publishable.collect { |k, v| "#{k}: #{v}" }.join(", ")}'" if publishable && !publishable.empty?
           trace_command += " '#{trace_url}'#{trace_body}\n"
           tracer.info trace_command
           tracer.debug "# #{Time.now.iso8601} [#{response.status}] (#{format('%.3f', duration)}s)\n#"
@@ -289,6 +551,15 @@ module Elastic
           # Transforms ignore status codes to Integer
           ignore = Array(params.delete(:ignore)).compact.map(&:to_i)
 
+          # A publishable copy for diagnostics, kept apart from the values
+          # handed to the adapter.
+          log_headers = publishable_headers(headers)
+          @state_mutex.synchronize do
+            @request_sequence = (@request_sequence || 0) + 1
+          end
+          request_id = "req-#{@request_sequence}"
+          context = nil
+
           begin
             sleep(delay_on_retry / 1000.0) if tries > 0
             tries += 1
@@ -299,8 +570,29 @@ module Elastic
               params = connection.connection.params.merge(params.to_hash)
             end
 
+            # Request-scoped headers are filtered against the connection this
+            # attempt selected; adapters merge them with the headers the
+            # connection already carries. A rebuild that swaps the pool does
+            # not change a request that already holds a connection.
+            attempt_headers, withheld_names = resolve_attempt_headers(connection, headers)
+            log_headers = publishable_headers(request_headers_for_attempt(connection, attempt_headers))
+
+            # Only the names go into the context; the adapter gets the real
+            # values, which stay in the connection snapshot.
+            context = RequestContext.new(request_id: request_id, attempt: tries)
+            context.connection_generation = generation_of(connection)
+            context.record_sent_headers(log_headers)
+            context.record_withheld_headers(withheld_names)
+
             url = connection.full_url(path, params)
-            response = block.call(connection, url)
+            # Adapters take the filtered request headers as a third argument;
+            # an empty hash means the request had none. Custom transports that
+            # only declare (connection, url) keep working.
+            response = if block.arity == 2
+                         block.call(connection, url)
+                       else
+                         block.call(connection, url, attempt_headers)
+                       end
             connection.healthy! if connection.failures.positive?
 
             # Raise an exception so we can catch it for `retry_on_status`
@@ -354,8 +646,8 @@ module Elastic
           duration = Time.now - start
 
           if response.status.to_i >= 300
-            __log_response(method, path, params, body, url, response, nil, 'N/A', duration)
-            __trace(method, path, params, connection_headers(connection), body, url, response, nil, 'N/A', duration) if tracer
+            __log_response(method, path, params, body, url, response, nil, 'N/A', duration, context)
+            __trace(method, path, params, log_headers, body, url, response, nil, 'N/A', duration) if tracer
 
             # Log the failure only when `ignore` doesn't match the response status
             log_fatal("[#{response.status}] #{response.body}") unless ignore.include?(response.status.to_i)
@@ -369,15 +661,23 @@ module Elastic
             json = serializer.load(response.body)
           end
           took = (json['took'] ? sprintf('%.3fs', json['took'] / 1000.0) : 'n/a') rescue 'n/a'
-          __log_response(method, path, params, body, url, response, json, took, duration) unless ignore.include?(response.status.to_i)
-          __trace(method, path, params, connection_headers(connection), body, url, response, nil, 'N/A', duration) if tracer
+          __log_response(method, path, params, body, url, response, json, took, duration, context) unless ignore.include?(response.status.to_i)
+          __trace(method, path, params, log_headers, body, url, response, nil, 'N/A', duration) if tracer
           log_warn(response.headers['warning']) if response.headers&.[]('warning')
 
           if opentelemetry? && response.status
             ::OpenTelemetry::Trace.current_span&.set_attribute('db.response.status_code', response.status)
+            if context.connection_generation
+              ::OpenTelemetry::Trace.current_span&.set_attribute(
+                'elastic.transport.connection_generation', context.connection_generation.to_s
+              )
+            end
+            ::OpenTelemetry::Trace.current_span&.set_attribute('elastic.transport.request_id', context.request_id)
           end
 
-          Response.new response.status, json || response.body, response.headers
+          built_response = Response.new response.status, json || response.body, response.headers
+          built_response.request_context = context
+          built_response
         ensure
           @last_request_at = Time.now
         end
@@ -478,13 +778,19 @@ module Elastic
           end
         end
 
+        # Headers of a connection, with private values replaced. Kept for
+        # callers that build their own diagnostic output.
+        #
+        # @api private
+        #
         def connection_headers(connection)
-          if defined?(Elastic::Transport::Transport::HTTP::Manticore) &&
-             instance_of?(Elastic::Transport::Transport::HTTP::Manticore)
-            @request_options[:headers]
-          else
-            connection.connection.headers
-          end
+          headers = if defined?(Elastic::Transport::Transport::HTTP::Manticore) &&
+                       instance_of?(Elastic::Transport::Transport::HTTP::Manticore)
+                      @request_options[:headers]
+                    else
+                      connection.connection.headers
+                    end
+          redacted_headers(headers)
         end
 
         def sanitize_url(url)

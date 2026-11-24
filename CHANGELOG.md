@@ -1,3 +1,20 @@
+## Unreleased
+
+- Adds a header/credential generation to connections, so a rebuild can't reuse a connection built with a different header profile:
+  - `Client.new` copies `transport_options` (including its `:headers`) and `:http` before adding the meta header, credentials or a timeout. Several clients can share one options hash; none of them writes into it.
+  - `Connection` snapshots the headers it was built with. Requests use that snapshot, so a rebuild can't change what an in-flight request sends.
+  - `Connection#==` now includes a header/credential generation. A rebuild that changes a private header or credential replaces the connection instead of keeping it.
+  - Existing behaviour is kept: a node that moves between `http` and `https`, is sniffed, reloaded or resurrected stays in service and picks up the current profile.
+- Adds header protection options:
+  - `:private_headers` marks header names (or name/value pairs) as private in addition to the credential-like names detected automatically (`Authorization`, `Cookie`, `*token*`, `*secret*`, `*api*key*`, ...).
+  - `:approved_hosts` limits which hosts may receive private headers. Other hosts stay usable with public headers only, so a node discovered by the sniffer cannot inherit one service's credentials.
+  - Request-scoped private headers are withheld from a connection that is not approved, and the withheld names are reported without values.
+- Keeps private values out of diagnostics:
+  - Curl-style traces, debug output and OpenTelemetry spans redact private header values (`<REDACTED>`); only header names are reported.
+  - `Response#request_context` exposes the request id, attempt, connection generation and the header *names* that were sent or withheld. Values are never included.
+  - Curb removes request-scoped private headers from the reused `Curl::Easy` after each request, so a pooled connection can't carry them into the next one.
+  - Manticore rebuilds its shared request headers from the current profile instead of appending to the previous configuration.
+
 ## 8.6.0
 
 - **Breaking:** fixes `ca_fingerprint` so it secures the connections used for requests. The certificate matching the fingerprint is fetched from the server's chain and used as the only trusted certificate on every connection, with chain and expiry verification left on. Host names aren't checked (a pinned intermediate can't be used on JRuby, and the certificate is fetched without a proxy), so a cluster reached by a name or IP that isn't in its certificate works (Faraday 1 and Manticore still check them). Previously the fingerprint was checked on a separate socket and matched any certificate the server sent, without checking that the server's certificate was signed by it.

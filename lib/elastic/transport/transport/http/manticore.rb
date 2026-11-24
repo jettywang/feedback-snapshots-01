@@ -63,14 +63,13 @@ module Elastic
           include Base
 
           def initialize(arguments = {}, &block)
-            @request_options = {
-              headers:
-                arguments.dig(:transport_options, :headers) ||
-                arguments.dig(:options, :transport_options, :headers) ||
-                {}
-            }
+            @request_options = { headers: {} }
             @manticore = build_client(arguments[:options] || {})
             super(arguments, &block)
+            # A client may set headers between construction and the first
+            # request; rebuild the merged request defaults once more so they
+            # are included.
+            __refresh_request_headers
           end
 
           # Should just be run once at startup
@@ -86,10 +85,17 @@ module Elastic
           # @see    Transport::Base#perform_request
           #
           def perform_request(method, path, params = {}, body = nil, headers = nil, opts = {})
-            super do |connection, url|
+            super do |connection, url, attempt_headers|
               capture_otel_span_attributes(connection, url)
               body = body ? __convert_to_json(body) : nil
-              body, headers = compress_request(body, parse_headers(headers))
+              # Manticore shares one client, so the connection-specific headers
+              # (including its private ones) come from the connection snapshot
+              # rather than from a per-connection client object.
+              request_headers = HeaderPolicy.merge_headers(
+                connection.headers,
+                attempt_headers.nil? ? headers : attempt_headers
+              )
+              body, headers = compress_request(body, parse_headers(request_headers))
               params[:body] = body if body
               params[:headers] = headers if headers
 
@@ -117,20 +123,65 @@ module Elastic
           # @return [Connections::Collection]
           #
           def __build_connections
-            apply_headers(options)
+            # Start from the current profile on every build: Manticore keeps
+            # one client, so headers left from a previous configuration would
+            # otherwise keep being sent after a rebuild.
+            profile_for_build = header_profile
+            @request_options = {
+              headers: HeaderPolicy.merge_headers(
+                default_headers,
+                profile_for_build[:public]
+              )
+            }
+
             Connections::Collection.new(
-              connections: hosts.map do |host|
+              connections: hosts.map do |configured_host|
+                host = configured_host.dup
+                host[:attributes] = host[:attributes].dup if host[:attributes].is_a?(Hash)
                 host[:protocol] = host[:scheme] || DEFAULT_PROTOCOL
                 host[:port] ||= DEFAULT_PORT
 
                 host.delete(:user)     # auth is not supported here.
                 host.delete(:password) # use the headers
 
-                Connections::Connection.new(host: host, connection: @manticore)
+                host_profile = connection_header_profile(host)
+                approved = approved_host?(host)
+                connection = Connections::Connection.new(host: host, connection: @manticore)
+                connection.with_header_profile(
+                  host_profile[:all],
+                  host_profile[:private],
+                  withheld: host_profile[:withheld],
+                  allowed: approved
+                )
               end,
               selector_class: options[:selector_class],
               selector: options[:selector]
             )
+          end
+
+          # Recomputes the request-level default headers (Content-Type, User-Agent
+          # and the connection's public headers) from the current options.
+          #
+          # @api private
+          #
+          def __refresh_request_headers
+            profile = header_profile
+            @request_options[:headers] = HeaderPolicy.merge_headers(
+              default_headers,
+              profile[:public]
+            )
+          end
+
+          # Content-Type and User-Agent defaults Manticore needs on every
+          # request. They are not private, so they live in @request_options.
+          #
+          # @api private
+          #
+          def default_headers
+            {
+              CONTENT_TYPE_STR => DEFAULT_CONTENT_TYPE,
+              USER_AGENT_STR => user_agent_header
+            }
           end
 
           # Closes all connections by marking them as dead
@@ -168,21 +219,9 @@ module Elastic
 
           def parse_headers(headers)
             request_headers = @request_options.fetch(:headers, {})
-            headers = request_headers.merge(headers || {})
-            headers.empty? ? nil : headers
-          end
-
-          def apply_headers(options)
-            headers = options[:headers].clone || options.dig(:transport_options, :headers).clone || {}
-            if (value = find_value(headers, CONTENT_TYPE_REGEX))
-              @request_options[:headers].reject! { |k, _| k.match? CONTENT_TYPE_REGEX }
-              headers[CONTENT_TYPE_STR] = value
-            else
-              headers[CONTENT_TYPE_STR] = DEFAULT_CONTENT_TYPE
-            end
-            headers[USER_AGENT_STR] = find_value(headers, USER_AGENT_REGEX) || find_value(@request_options[:headers], USER_AGENT_REGEX) || user_agent_header
+            headers = HeaderPolicy.merge_headers(request_headers, headers || {})
             headers[ACCEPT_ENCODING] = GZIP if use_compression?
-            @request_options[:headers].merge!(headers)
+            headers.empty? ? nil : headers
           end
 
           def user_agent_header

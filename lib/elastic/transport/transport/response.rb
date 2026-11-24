@@ -23,6 +23,13 @@ module Elastic
       class Response
         attr_reader :status, :body, :headers
 
+        # Names, never values, of the headers that served this response and
+        # the connection generation that sent them. Useful to correlate a
+        # response with the logs of the request that produced it.
+        #
+        # @return [RequestContext, nil]
+        attr_accessor :request_context
+
         # @param status  [Integer] Response status code
         # @param body    [String]  Response body
         # @param headers [Hash]    Response headers

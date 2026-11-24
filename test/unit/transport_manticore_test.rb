@@ -238,9 +238,12 @@ if JRUBY
                     transport_options: transport_options
                   )
 
+                  # Private headers are kept on the connection, not on the
+                  # shared Manticore request defaults, so a rebuild cannot
+                  # leave one service's credential in place for another.
                   assert_equal(
-                    transport.instance_variable_get(:@request_options)[:headers]['Authorization'],
-                    'Basic token'
+                    'Basic token',
+                    transport.connections.first.headers['Authorization']
                   )
                   transport.connections.first.connection.expects(:get).with do |_host, options|
                     assert_equal('Basic token', options[:headers]['Authorization'])

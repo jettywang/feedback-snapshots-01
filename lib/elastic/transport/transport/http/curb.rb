@@ -31,24 +31,36 @@ module Elastic
           # @see    Transport::Base#perform_request
           #
           def perform_request(method, path, params = {}, body = nil, headers = nil, opts = {})
-            super do |connection, url|
+            super do |connection, url, attempt_headers|
               capture_otel_span_attributes(connection, url)
               connection.connection.url = connection.full_url(path, params)
               body = body ? __convert_to_json(body) : nil
+              headers = attempt_headers.nil? ? headers : attempt_headers
               body, headers = compress_request(body, headers)
 
-              case method
-              when 'HEAD'
-                connection.connection.set :nobody, true
-              when 'GET', 'POST', 'PUT', 'DELETE'
-                connection.connection.set :nobody, false
-                connection.connection.put_data = body if body
+              # Curb keeps headers on the reused Curl::Easy, so request-scoped
+              # private headers are removed after this request. Otherwise a
+              # pooled connection could carry one service's credentials into
+              # the next request.
+              request_private_headers = (headers || {}).keys.select { |name| private_header_name?(name) }
 
-                parse_headers!(headers, connection)
-              else raise ArgumentError, "Unsupported HTTP method: #{method}"
+              begin
+                case method
+                when 'HEAD'
+                  connection.connection.set :nobody, true
+                when 'GET', 'POST', 'PUT', 'DELETE'
+                  connection.connection.set :nobody, false
+                  connection.connection.put_data = body if body
+
+                  parse_headers!(headers, connection)
+                else raise ArgumentError, "Unsupported HTTP method: #{method}"
+                end
+
+                connection.connection.http(method.to_sym)
+              ensure
+                delete_private_headers!(connection, request_private_headers)
               end
 
-              connection.connection.http(method.to_sym)
               header_string = connection.connection.header_str.to_s
 
               _response_status, *response_headers = header_string.split(/[\r\n]+/).map(&:strip)
@@ -59,6 +71,24 @@ module Elastic
                 decompress_response(connection.connection.body_str),
                 response_headers
               )
+            end
+          end
+
+          # Removes request-scoped private headers from the reused Curl::Easy.
+          # Header names are case-sensitive here, so match on the down-cased
+          # name rather than the exact key.
+          #
+          # @api private
+          #
+          def delete_private_headers!(connection, names)
+            return if names.nil? || names.empty?
+
+            curl_headers = connection.connection.headers
+            return unless curl_headers
+
+            wanted = names.map { |name| name.to_s.downcase }
+            curl_headers.keys.each do |key|
+              curl_headers.delete(key) if wanted.include?(key.to_s.downcase)
             end
           end
 
