@@ -1,0 +1,26 @@
+en:
+  dry_schema:
+    errors:
+      filled?:
+        text: "EN field is required"
+        code: "required"
+      eql?:
+        failure:
+          text: "EN expected %{left}, but sample was %{right}"
+          code: "equality_mismatch"
+        hint:
+          text: "EN must equal %{left}"
+          code: "equality_hint"
+ja:
+  dry_schema:
+    errors:
+      filled?:
+        text: "JA field is required"
+        code: "required"
+      eql?:
+        failure:
+          text: "JA expected %{left}, but sample was %{right}"
+          code: "equality_mismatch"
+        hint:
+          text: "JA must equal %{left}"
+          code: "equality_hint"

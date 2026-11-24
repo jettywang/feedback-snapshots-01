@@ -162,6 +162,61 @@ module Dry
         message_set(options)
       end
 
+      # Build a redacted representation safe to share externally
+      #
+      # @param options [Hash] locale and field/category policy options
+      # @return [ShareableMessageSet]
+      # @api public
+      def shareable_messages(**options)
+        ShareableMessageSet.from_result(self, **options)
+      end
+      alias_method :to_shareable, :shareable_messages
+      alias_method :shared_messages, :shareable_messages
+      alias_method :public_messages, :shareable_messages
+      alias_method :safe_messages, :shareable_messages
+      alias_method :redacted_messages, :shareable_messages
+
+      # Redacted error-only representation
+      #
+      # @return [ShareableMessageSet]
+      # @api public
+      def shareable_errors(**options)
+        shareable_messages(**options, hints: false)
+      end
+      alias_method :public_errors, :shareable_errors
+      alias_method :safe_errors, :shareable_errors
+
+      # Redacted hint-only representation
+      #
+      # @return [ShareableMessageSet]
+      # @api public
+      def shareable_hints(**options)
+        shareable_messages(**options, errors: false)
+      end
+      alias_method :public_hints, :shareable_hints
+      alias_method :safe_hints, :shareable_hints
+
+      # Plain hash representation of {#shareable_messages}
+      #
+      # @return [Hash]
+      # @api public
+      def to_shareable_h(**options)
+        shareable_messages(**options).to_h
+      end
+      alias_method :to_shared_h, :to_shareable_h
+      alias_method :to_public_h, :to_shareable_h
+
+      # Shareable records compiled for several locales
+      #
+      # @return [Hash<Symbol, Array<Hash>>]
+      # @api public
+      def shareable_messages_for(*locales, **options)
+        locales.flatten.to_h do |locale|
+          [locale.to_sym, shareable_messages(**options, locale: locale).records]
+        end
+      end
+      alias_method :shareable_messages_by_locale, :shareable_messages_for
+
       # Return the message set
       #
       # @param [Hash] options

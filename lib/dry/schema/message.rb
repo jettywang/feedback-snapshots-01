@@ -52,6 +52,24 @@ module Dry
       end
       alias_method :to_s, :dump
 
+      # Build a redacted representation of this message
+      #
+      # @return [ShareableMessage]
+      # @api public
+      def to_shareable(**options)
+        ShareableMessage.new(self, **options)
+      end
+
+      # Redacted hash representation of this message
+      #
+      # @return [Hash]
+      # @api public
+      def to_shareable_h(**options)
+        to_shareable(**options).to_h
+      end
+      alias_method :to_shared_h, :to_shareable_h
+      alias_method :to_public_h, :to_shareable_h
+
       # Dump the message into a hash
       #
       # The hash will be deeply nested if the path's size is greater than 1

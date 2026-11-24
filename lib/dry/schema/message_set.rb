@@ -61,6 +61,25 @@ module Dry
       end
       alias_method :to_hash, :to_h
 
+      # Build a redacted representation of this set
+      #
+      # @return [ShareableMessageSet]
+      # @api public
+      def shareable(**options)
+        ShareableMessageSet.new(messages, **options)
+      end
+      alias_method :to_shareable, :shareable
+
+      # Redacted envelope hash
+      #
+      # @return [Hash]
+      # @api public
+      def to_shareable_h(**options)
+        shareable(**options).to_h
+      end
+      alias_method :to_shared_h, :to_shareable_h
+      alias_method :to_public_h, :to_shareable_h
+
       # Get a list of message texts for the given key
       #
       # @param [Symbol] key
