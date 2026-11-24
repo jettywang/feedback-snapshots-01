@@ -32,6 +32,7 @@ from dynaconf.loaders.base import SourceMetadata
 from dynaconf.nodes import DataDict
 from dynaconf.nodes import DataList
 from dynaconf.nodes import recursively_evaluate_lazy_format
+from dynaconf.preview import preview_merge
 from dynaconf.strategies.filtering import PrefixFilter
 from dynaconf.utils import BANNER
 from dynaconf.utils import ensure_a_list
@@ -1746,6 +1747,23 @@ class Settings:
                     value = object_merge(existing, value, merge_unique)
             if value is not empty:
                 setattr(obj, key, value)
+
+    def preview_merge(self, files=None, loaders=None, env=None, silent=True):
+        """Preview how the given sources would merge into this object.
+
+        Runs the merge on a disposable clone, so this object is never
+        mutated and no load hooks are executed. Lazy values are reported
+        as pending instead of being evaluated.
+
+        :param files: Optional file path or list of paths to load.
+        :param loaders: Optional list of loader modules/objects.
+        :param env: Which env to load (default: current env).
+        :param silent: Should loading errors be silenced?
+        :return: dynaconf.preview.PreviewReport
+        """
+        return preview_merge(
+            self, files=files, loaders=loaders, env=env, silent=silent
+        )
 
     def dynaconf_clone(self):
         """Clone the current settings object."""

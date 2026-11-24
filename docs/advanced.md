@@ -258,6 +258,35 @@ get_debug_info(settings.DYNACONF, verbosity=0, key="data")
  'versions': {'django': '4.2.16', 'dynaconf': '3.2.8.dev0'}}
 ```
 
+## Previewing merges
+
+Sometimes you want to see how a set of sources would be merged *before*
+applying it — for example, a configuration panel that shows the resulting
+state before the user confirms. `settings.preview_merge` replays only the
+sources you choose on a disposable clone of the settings object:
+
+- the running settings object is never mutated;
+- no post-load hooks (instance or module) are executed;
+- lazy values (e.g. `@format ...`) are kept unevaluated and reported as
+  pending, so they can be flagged for a follow-up check.
+
+```python
+report = settings.preview_merge(
+    files=["settings_a.toml", "settings_b.toml"],
+    loaders=[my_custom_loader],  # optional, any object with .load()
+)
+
+report.data          # merged key/value snapshot (lazy values unevaluated)
+report.pending       # keys still holding unevaluated lazy values
+report.merge_order   # SourceMetadata list, in the order sources were applied
+report.settings      # the throwaway clone, for further inspection
+```
+
+Existing dynamic reads (`settings.get_fresh(key)`, `settings.fresh()`)
+are unaffected, and applying the same sources afterwards (e.g. with
+`settings.load_file(...)`) reproduces the previewed state on the live
+object.
+
 
 ## Update dynaconf settings using command-line arguments (cli)
 
