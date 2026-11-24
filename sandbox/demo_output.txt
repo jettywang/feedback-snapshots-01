@@ -1,0 +1,72 @@
+================================================================================================
+A. 三种生成上下文下，operation 是否进入 schema（operationId）
+================================================================================================
+METHOD  PATH                               | public                           | partner ctx                      | admin ctx                       
+---------------------------------------------------------------------------------------------------------------------------------------------------
+GET     /api/internal/                     | listInternalViewSets             | — 隐藏 —                           | listInternalViewSets            
+POST    /api/internal/{id}/rotate_key/     | rotateKeyInternalViewSet         | — 隐藏 —                           | rotateKeyInternalViewSet        
+GET     /api/items/                        | listItemsViewSets                | listItemsViewSets                | listItemsViewSets               
+POST    /api/items/                        | createItemsViewSet               | — 隐藏 —                           | createItemsViewSet              
+POST    /api/items/bulk_reload/            | bulkReloadItemsViewSet           | — 隐藏 —                           | bulkReloadItemsViewSet          
+DELETE  /api/items/{id}/                   | destroyItemsViewSet              | — 隐藏 —                           | destroyItemsViewSet             
+GET     /api/items/{id}/                   | retrieveItemsViewSet             | retrieveItemsViewSet             | retrieveItemsViewSet            
+PATCH   /api/items/{id}/                   | partialUpdateItemsViewSet        | — 隐藏 —                           | partialUpdateItemsViewSet       
+PUT     /api/items/{id}/                   | updateItemsViewSet               | — 隐藏 —                           | updateItemsViewSet              
+GET     /api/legacy/                       | — 隐藏 —                           | — 隐藏 —                           | — 隐藏 —                          
+GET     /api/public/                       | listPublicViewSets               | listPublicViewSets               | listPublicViewSets              
+POST    /api/public/                       | createPublicViewSet              | createPublicViewSet              | createPublicViewSet             
+
+================================================================================================
+B. 真实 API 请求结果（HTTP 状态码 / 异常）对照
+================================================================================================
+METHOD  PATH                               | anon               | partner            | admin             
+---------------------------------------------------------------------------------------------------------
+GET     /api/public/                       | 200                | 200                | 200               
+POST    /api/public/                       | 201                | 201                | 201               
+GET     /api/items/                        | 403                | 200                | 200               
+POST    /api/items/                        | 403                | 403                | 201               
+GET     /api/items/1/                      | 403                | 200                | 200               
+GET     /api/items/2/                      | 403                | 403                | 200               
+PUT     /api/items/1/                      | 403                | 403                | 200               
+PATCH   /api/items/1/                      | 403                | 403                | 200               
+DELETE  /api/items/1/                      | 403                | 403                | 204               
+POST    /api/items/bulk_reload/            | 403                | 403                | 200               
+GET     /api/internal/                     | 403                | 403                | 200               
+POST    /api/internal/1/rotate_key/        | 403                | 403                | 200               
+GET     /api/legacy/                       | 200                | 200                | 200               
+
+================================================================================================
+C. 关键分歧：生成器结论 vs 合作方真实可达性（模板路径与具体探针归一化匹配）
+================================================================================================
+
+[public=True (管理命令/generateschema)]
+  schema 可见 GET    /api/internal/       (listInternalViewSets    ) -> partner 真实请求: 403
+  schema 可见 POST   /api/internal/{id}/rotate_key/ (rotateKeyInternalViewSet) -> partner 真实请求: 403
+  schema 可见 GET    /api/items/          (listItemsViewSets       ) -> partner 真实请求: 200
+  schema 可见 POST   /api/items/          (createItemsViewSet      ) -> partner 真实请求: 403
+  schema 可见 POST   /api/items/bulk_reload/ (bulkReloadItemsViewSet  ) -> partner 真实请求: 403
+  schema 可见 DELETE /api/items/{id}/     (destroyItemsViewSet     ) -> partner 真实请求: 403
+  schema 可见 GET    /api/items/{id}/     (retrieveItemsViewSet    ) -> partner 真实请求: 200
+  schema 可见 PATCH  /api/items/{id}/     (partialUpdateItemsViewSet) -> partner 真实请求: 403
+  schema 可见 PUT    /api/items/{id}/     (updateItemsViewSet      ) -> partner 真实请求: 403
+  schema 可见 GET    /api/public/         (listPublicViewSets      ) -> partner 真实请求: 200
+  schema 可见 POST   /api/public/         (createPublicViewSet     ) -> partner 真实请求: 201
+
+[request=partner]
+  schema 可见 GET    /api/items/          (listItemsViewSets       ) -> partner 真实请求: 200
+  schema 可见 GET    /api/items/{id}/     (retrieveItemsViewSet    ) -> partner 真实请求: 200
+  schema 可见 GET    /api/public/         (listPublicViewSets      ) -> partner 真实请求: 200
+  schema 可见 POST   /api/public/         (createPublicViewSet     ) -> partner 真实请求: 201
+
+[request=admin]
+  schema 可见 GET    /api/internal/       (listInternalViewSets    ) -> partner 真实请求: 403
+  schema 可见 POST   /api/internal/{id}/rotate_key/ (rotateKeyInternalViewSet) -> partner 真实请求: 403
+  schema 可见 GET    /api/items/          (listItemsViewSets       ) -> partner 真实请求: 200
+  schema 可见 POST   /api/items/          (createItemsViewSet      ) -> partner 真实请求: 403
+  schema 可见 POST   /api/items/bulk_reload/ (bulkReloadItemsViewSet  ) -> partner 真实请求: 403
+  schema 可见 DELETE /api/items/{id}/     (destroyItemsViewSet     ) -> partner 真实请求: 403
+  schema 可见 GET    /api/items/{id}/     (retrieveItemsViewSet    ) -> partner 真实请求: 200
+  schema 可见 PATCH  /api/items/{id}/     (partialUpdateItemsViewSet) -> partner 真实请求: 403
+  schema 可见 PUT    /api/items/{id}/     (updateItemsViewSet      ) -> partner 真实请求: 403
+  schema 可见 GET    /api/public/         (listPublicViewSets      ) -> partner 真实请求: 200
+  schema 可见 POST   /api/public/         (createPublicViewSet     ) -> partner 真实请求: 201
