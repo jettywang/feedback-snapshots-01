@@ -6,6 +6,16 @@ from dynaconf.contrib import DjangoDynaconf
 from dynaconf.contrib import FlaskDynaconf
 from dynaconf.hooking import post_hook
 from dynaconf.nodes import DataDict
+from dynaconf.policy import AuditLog
+from dynaconf.policy import AuditRecord
+from dynaconf.policy import FieldSourcePolicy
+from dynaconf.policy import PolicyAudit
+from dynaconf.policy import PolicyAuditEntry
+from dynaconf.policy import PolicyEngine
+from dynaconf.policy import PolicyRule
+from dynaconf.policy import SourcePolicy
+from dynaconf.policy import SourcePolicyAudit
+from dynaconf.policy import SourcePolicyEngine
 from dynaconf.utils.inspect import get_history
 from dynaconf.utils.inspect import inspect_settings
 from dynaconf.utils.parse_conf import add_converter
@@ -30,9 +40,19 @@ settings = LazySettings(
 Dynaconf = LazySettings  # noqa
 
 __all__ = [
+    "AuditLog",
+    "AuditRecord",
     "DataDict",
     "Dynaconf",
+    "FieldSourcePolicy",
     "LazySettings",
+    "PolicyAudit",
+    "PolicyAuditEntry",
+    "PolicyEngine",
+    "PolicyRule",
+    "SourcePolicy",
+    "SourcePolicyAudit",
+    "SourcePolicyEngine",
     "Validator",
     "FlaskDynaconf",
     "ValidationError",

@@ -32,6 +32,7 @@ from dynaconf.loaders.base import SourceMetadata
 from dynaconf.nodes import DataDict
 from dynaconf.nodes import DataList
 from dynaconf.nodes import recursively_evaluate_lazy_format
+from dynaconf.policy import SourcePolicyEngine
 from dynaconf.strategies.filtering import PrefixFilter
 from dynaconf.utils import BANNER
 from dynaconf.utils import ensure_a_list
@@ -173,6 +174,7 @@ class DynaconfConfig:
         default_factory=lambda: defaultdict(dict)
     )
     loaded_by_loaders: dict[SourceMetadata, Any] = field(default_factory=dict)
+    policy_engine: Any = None
     loaded_py_modules: list[str] = field(default_factory=list)
     loaded_files: list[str] = field(default_factory=list)
     loaders: list[str] = field(default_factory=list)
@@ -292,11 +294,47 @@ class Settings:
         :param settings_module: defines the settings file
         :param kwargs:  override default settings
         """
+        policy_option_names = (
+            "source_policy",
+            "source_policies",
+            "field_source_policy",
+            "field_source_policies",
+            "policy_rules",
+            "source_rules",
+            "policies",
+            "policy_engine",
+            "source_policy_engine",
+            "policy_audit",
+            "source_audit",
+            "source_audit_log",
+            "audit",
+            "audit_log",
+            "audit_storage",
+            "audit_records",
+            "audit_sink",
+            "audit_sinks",
+            "audit_log_path",
+            "audit_file",
+            "audit_all",
+            "audit_all_sources",
+            "audit_updates",
+            "record_updates",
+            "enable_audit",
+            "audit_logger",
+        )
+        policy_options = {}
+        for option_name in policy_option_names:
+            if option_name in kwargs:
+                policy_options[option_name] = kwargs.pop(option_name)
+
         core = DynaconfCore("main", box_settings=self, **kwargs)
         config = core.config
         config.defaults = kwargs
 
         self.__core__ = core
+        policy_engine = SourcePolicyEngine.from_kwargs(policy_options)
+        config.policy_engine = policy_engine
+        policy_engine.bind_settings(self)
         self.SETTINGS_MODULE = None
 
         if settings_module:
@@ -340,6 +378,88 @@ class Settings:
     @property
     def validators(self):
         return self.__core__.validators
+
+    @property
+    def policy_engine(self):
+        return self.__core__.config.policy_engine
+
+    @property
+    def source_policy(self):
+        return self.policy_engine
+
+    @property
+    def source_policies(self):
+        return self.policy_engine.rules
+
+    @property
+    def policy_audit(self):
+        return self.policy_engine.audit
+
+    @property
+    def source_audit(self):
+        return self.policy_engine.audit
+
+    @property
+    def audit(self):
+        return self.policy_engine.audit
+
+    @property
+    def audit_log(self):
+        return self.policy_engine.audit
+
+    @property
+    def audit_records(self):
+        return self.policy_engine.audit.records
+
+    @property
+    def audit_batches(self):
+        return self.policy_engine.audit.batches
+
+    @property
+    def pending_approvals(self):
+        return self.policy_engine.audit.pending_updates
+
+    @property
+    def pending_updates(self):
+        return self.policy_engine.audit.pending_updates
+
+    @property
+    def accepted_updates(self):
+        return self.policy_engine.audit.accepted_updates
+
+    def add_source_policy(self, *args, **kwargs):
+        return self.policy_engine.add_policy(*args, **kwargs)
+
+    def add_policy(self, *args, **kwargs):
+        return self.policy_engine.add_policy(*args, **kwargs)
+
+    def declare_source_policy(self, *args, **kwargs):
+        return self.policy_engine.add_policy(*args, **kwargs)
+
+    def set_source_policy(self, field, *args, **kwargs):
+        field_key = str(field).lower()
+        self.policy_engine.rules = [
+            rule
+            for rule in self.policy_engine.rules
+            if rule.field.lower() != field_key
+        ]
+        return self.policy_engine.add_policy(field, *args, **kwargs)
+
+    def approve_update(self, update_id, reviewer="ops", note=None):
+        return self.policy_engine.audit.approve(
+            update_id, reviewer=reviewer, note=note
+        )
+
+    def reject_update(self, update_id, reviewer="ops", note=None):
+        return self.policy_engine.audit.reject(
+            update_id, reviewer=reviewer, note=note
+        )
+
+    def approved_snapshot(self):
+        return self.policy_engine.approved_snapshot()
+
+    def get_approved_version(self, version=None):
+        return self.policy_audit.get_version(version)
 
     @property
     def store(self):
@@ -1274,6 +1394,26 @@ class Settings:
                     context_merge=merge,
                 )
 
+        policy_plan = None
+        policy_engine = config.policy_engine
+        if policy_engine is not None:
+            parsed, policy_plan = policy_engine.prepare_set(
+                settings=self,
+                target_key=key,
+                candidate=parsed,
+                existing=existing,
+                source_metadata=source_metadata,
+                merge=merge,
+                raw_value=value,
+            )
+            if policy_plan is not None and policy_plan.skip:
+                if source_metadata in self.loaded_by_loaders:
+                    self.loaded_by_loaders[source_metadata][key] = value
+                else:
+                    self.loaded_by_loaders[source_metadata] = {key: value}
+                policy_engine.commit(policy_plan, self)
+                return
+
         if (
             self.get("DYNABOXIFY", True)
             and isinstance(parsed, dict)
@@ -1298,6 +1438,9 @@ class Settings:
             self.loaded_by_loaders[source_metadata][key] = value
         else:
             self.loaded_by_loaders[source_metadata] = {key: value}
+
+        if policy_plan is not None:
+            policy_engine.commit(policy_plan, self)
 
         if loader_identifier is None:
             # if .set is called without loader identifier it becomes

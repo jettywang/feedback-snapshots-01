@@ -12,6 +12,7 @@ nav:
   - Settings files: settings_files.md
   - Secrets: secrets.md
   - Merging: merging.md
+  - Source policies: source-policies.md
   - Dynamic Variables: dynamic.md
   - CLI: cli.md
   - Validation: validation.md
