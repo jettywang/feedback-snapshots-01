@@ -18,6 +18,7 @@
 # under the License.
 
 require 'test_helper'
+require 'tmpdir'
 
 if JRUBY
   puts "'#{File.basename(__FILE__)}' not supported on JRuby #{RUBY_VERSION}"
@@ -130,6 +131,60 @@ else
                 transport = Curb.new hosts: [{ host: 'foobar', port: 1234, user: 'foo', password: 'bar' }]
                 assert_equal 'foo', transport.connections.first.connection.username
                 assert_equal 'bar', transport.connections.first.connection.password
+              end
+
+              context 'per-node trust' do
+                setup do
+                  @dir = Dir.mktmpdir
+                  @node_a = File.join(@dir, 'node-a.pem')
+                  @node_b = File.join(@dir, 'node-b.pem')
+                  File.write(@node_a, 'A')
+                  File.write(@node_b, 'B')
+                end
+
+                teardown do
+                  FileUtils.remove_entry(@dir)
+                end
+
+                should 'set the CA file approved for each node on its Curl handle' do
+                  transport = Curb.new(
+                    hosts: [
+                      { id: 'node-a', host: 'node-a.test', port: 9200, scheme: 'https' },
+                      { id: 'node-b', host: 'node-b.test', port: 9200, scheme: 'https' }
+                    ],
+                    options: {
+                      node_trust: {
+                        'node-a' => { ca_file: @node_a },
+                        'node-b' => { ca_file: @node_b }
+                      }
+                    }
+                  )
+
+                  assert_equal @node_a, transport.connections.all[0].connection.cacert
+                  assert_equal @node_b, transport.connections.all[1].connection.cacert
+                end
+
+                should 'replace only the rotated node' do
+                  policy = {
+                    'node-a' => { ca_file: @node_a },
+                    'node-b' => { ca_file: @node_b, version: 1 }
+                  }
+                  transport = Curb.new(
+                    hosts: [
+                      { id: 'node-a', host: 'node-a.test', port: 9200, scheme: 'https' },
+                      { id: 'node-b', host: 'node-b.test', port: 9200, scheme: 'https' }
+                    ],
+                    options: { node_trust: policy }
+                  )
+                  before = transport.connections.all.dup
+
+                  policy['node-b'] = { ca_file: @node_b, version: 2 }
+                  transport.refresh_trust!
+
+                  after = transport.connections.all
+                  assert_same before[0], after[0]
+                  refute_same before[1], after[1]
+                end
               end
 
               should 'use global http configuration' do

@@ -63,6 +63,11 @@ module Elastic
           include Base
 
           def initialize(arguments = {}, &block)
+            if node_trust_configured?(arguments)
+              raise ArgumentError,
+                    'node_trust can\'t be used with Manticore: it has a single client for every host'
+            end
+
             @request_options = {
               headers:
                 arguments.dig(:transport_options, :headers) ||
@@ -157,6 +162,13 @@ module Elastic
           end
 
           private
+
+          # @return [Boolean] true when the per-node trust policy was passed.
+          #
+          def node_trust_configured?(arguments)
+            options = arguments[:options] || {}
+            arguments.key?(:node_trust) || options.key?(:node_trust)
+          end
 
           # Faraday and Curb read the pinned CA when a connection is built, so rebuilding connections is enough.
           # Manticore reads it once, when the Manticore::Client is built in initialize, so the client is built again.

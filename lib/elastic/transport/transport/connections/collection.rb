@@ -50,12 +50,13 @@ module Elastic
             @connections.to_a.map { |c| c.host }
           end
 
-          # Returns an Array of alive connections.
+          # Returns an Array of alive connections. Retired connections are never alive, even if a
+          # caller marked them alive directly.
           #
           # @return [Array]
           #
           def connections
-            @connections.reject { |c| c.dead? }
+            @connections.reject { |c| c.dead? || retired?(c) }
           end
           alias :alive :connections
 
@@ -83,7 +84,14 @@ module Elastic
           # @return [Connection]
           #
           def get_connection(options={})
-            selector.select(options) || @connections.min_by(&:failures)
+            selector.select(options) || fallback_connection
+          end
+
+          # When no live connection is selectable, prefer a connection that is neither removed nor
+          # stale before falling back to the least-failed one (existing behaviour).
+          def fallback_connection
+            @connections.reject { |c| retired?(c) || stale?(c) }.min_by(&:failures) ||
+              @connections.reject { |c| retired?(c) }.min_by(&:failures)
           end
 
           def each(&block)
@@ -109,6 +117,29 @@ module Elastic
             self
           end
 
+          # Replace a connection in place, keeping its position so round-robin order and the
+          # cluster's node order are preserved.
+          #
+          # @param old [Connection] The connection to replace.
+          # @param new [Connection] The replacement.
+          # @return [self]
+          #
+          def replace(old, new)
+            index = @connections.index(old)
+            index ? @connections[index] = new : @connections << new
+            self
+          end
+
+          # Replace the whole list, for example with the order the sniffer returned.
+          #
+          # @param connections [Array<Connection>]
+          # @return [self]
+          #
+          def replace_all(connections)
+            @connections = Array(connections)
+            self
+          end
+
           # Remove connection(s) from the collection
           #
           # @param connections [Connection,Array] A connection or an array of connections to remove
@@ -117,6 +148,17 @@ module Elastic
           def remove(connections)
             @connections -= Array(connections).to_a
             self
+          end
+
+          private
+
+          # Custom connection objects don't have to implement the trust states.
+          def retired?(connection)
+            connection.respond_to?(:retired?) && connection.retired?
+          end
+
+          def stale?(connection)
+            connection.respond_to?(:stale?) && connection.stale?
           end
         end
 

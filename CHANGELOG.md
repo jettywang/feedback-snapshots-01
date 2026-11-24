@@ -1,3 +1,13 @@
+## Unreleased
+
+- Adds `node_trust` for certificate rotation node by node. The option maps a node `id`/`name` (from the sniffer), `host:port`, bare `host`, or `:default` to the SSL settings approved for it (`ca_file`, `ca_path` or `cert_store`, plus `verify`/`verify_hostname`/`verify_mode`). Each Faraday or Curb connection is built with its own node's trust material. `version` names the approved certificate generation; without one, the trust material's content names it.
+  - A live connection whose node's `version` changed is replaced before the next request; a connection for a node that wasn't touched stays in place, so round-robin keeps working.
+  - A dead connection whose node's certificate changed while it was down is marked `stale` and rebuilt with the current policy when its resurrection time arrives. A dead connection whose policy didn't change is resurrected as before.
+  - Removing a node retires its connection (`Connection#retired?`), which is separate from the failure state and doesn't increment `failures`. If the node returns with the same approved generation the connection is revived; with a new one it is rebuilt.
+  - The policy Hash is read between requests and never modified, so it can be updated in place or returned by a lambda. Rotating a CA file on disk is detected by mtime and size.
+  - `node_trust` raises an `ArgumentError` with `ca_fingerprint`, with a custom `:transport`, for an entry without a trust anchor or with two, for `verify: false`, and for SSL options the adapter can't apply per connection. It isn't supported by Manticore, which has one client for all hosts. Trust material requires `https` hosts.
+  - `Connection` gains `trust_version`, `status` (`:alive`, `:dead`, `:stale`, `:retired`), `stale?`, `retired?`, and `retired_since`.
+
 ## 8.6.0
 
 - **Breaking:** fixes `ca_fingerprint` so it secures the connections used for requests. The certificate matching the fingerprint is fetched from the server's chain and used as the only trusted certificate on every connection, with chain and expiry verification left on. Host names aren't checked (a pinned intermediate can't be used on JRuby, and the certificate is fetched without a proxy), so a cluster reached by a name or IP that isn't in its certificate works (Faraday 1 and Manticore still check them). Previously the fingerprint was checked on a separate socket and matched any certificate the server sent, without checking that the server's certificate was signed by it.

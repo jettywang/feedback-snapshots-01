@@ -84,6 +84,7 @@ module Elastic
             apply_headers(client, options)
             client.url = __full_url(host)
             client.cacert = options.dig(:ssl, :ca_file) if options.dig(:ssl, :ca_file)
+            client.capath = options.dig(:ssl, :ca_path) if options.dig(:ssl, :ca_path)
             client.ssl_verify_peer = false if options.dig(:ssl, :verify) == false
             client.ssl_verify_host = 0 if options.dig(:ssl, :verify) == false || options.dig(:ssl, :verify_hostname) == false
 
@@ -114,6 +115,11 @@ module Elastic
           end
 
           private
+
+          # Curb reads the CA from the `Curl::Easy` object; it has no certificate store option.
+          def __supported_node_trust_keys
+            %i[ca_file ca_path verify verify_hostname]
+          end
 
           def user_agent_header(client)
             @user_agent ||= begin

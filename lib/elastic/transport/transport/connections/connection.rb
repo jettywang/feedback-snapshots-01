@@ -32,7 +32,8 @@ module Elastic
         class Connection
           DEFAULT_RESURRECT_TIMEOUT = 60
 
-          attr_reader :host, :connection, :options, :failures, :dead_since
+          attr_reader :host, :connection, :options, :failures, :dead_since,
+                      :trust_version, :retired_since
 
           # @option arguments [Hash]   :host       Host information (example: `{host: 'localhost', port: 9200}`)
           # @option arguments [Object] :connection The transport-specific physical connection or "session"
@@ -46,7 +47,82 @@ module Elastic
 
             @options[:resurrect_timeout] ||= DEFAULT_RESURRECT_TIMEOUT
             @dead = false
+            @retired = false
+            @stale = false
+            @trust_version = arguments[:trust_version]
             @failures = 0
+          end
+
+          # Records the trust revision this connection was built with.
+          #
+          # @param version [String, nil]
+          # @return [self]
+          #
+          def trust!(version)
+            @trust_version = version
+            self
+          end
+
+          # Marks this connection as built for a trust revision that is no longer approved.
+          #
+          # @return [self]
+          #
+          def mark_stale!
+            @state_mutex.synchronize { @stale = true }
+            self
+          end
+
+          # @return [Boolean] true when the connection was built for a superseded trust revision.
+          #
+          def stale?
+            @stale || false
+          end
+
+          # Marks this connection as removed from the cluster. Retired connections are kept for
+          # bookkeeping, but are never selected or resurrected.
+          #
+          # @return [self]
+          #
+          def retire!
+            @state_mutex.synchronize do
+              @dead = true
+              @retired = true
+              @retired_since ||= Time.now
+              @dead_since ||= @retired_since
+            end
+            self
+          end
+
+          # @return [Boolean] true when the node this connection points at was removed.
+          #
+          def retired?
+            @retired || false
+          end
+
+          # Brings a retired connection back into the pool after its node returned and its trust
+          # revision was checked. Removal isn't a node failure, so the failure counter is reset.
+          #
+          # @return [self]
+          #
+          def revive!
+            @state_mutex.synchronize do
+              @retired = false
+              @retired_since = nil
+              @dead = false
+              @failures = 0
+            end
+            self
+          end
+
+          # @return [Symbol] :retired, :stale, :dead or :alive. A retired connection is also dead;
+          #   a stale connection may be alive or dead, so callers that care about failures should
+          #   check `dead?` too.
+          #
+          def status
+            return :retired if retired?
+            return :stale if stale?
+
+            dead? ? :dead : :alive
           end
 
           # Returns the complete endpoint URL with host, port, path and serialized parameters.
@@ -123,6 +199,8 @@ module Elastic
           # @see    #resurrectable?
           #
           def resurrect!
+            return self if retired?
+
             alive! if resurrectable?
           end
 
@@ -131,6 +209,8 @@ module Elastic
           # @return [Boolean]
           #
           def resurrectable?
+            return false if retired?
+
             @state_mutex.synchronize {
               Time.now > @dead_since + ( @options[:resurrect_timeout] * 2 ** (@failures-1) )
             }

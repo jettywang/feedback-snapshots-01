@@ -117,6 +117,15 @@ module Elastic
       #
       # @option enable_meta_header [Boolean] :enable_meta_header Enable sending the meta data header to Cloud.
       #                                                          (Default: true)
+      # @option arguments [Hash,#call] :node_trust Certificate trust approved per node, keyed by the node `id` or
+      #   `name` from the sniffer, by `host:port`, by bare `host`, or by `:default`. A value is an SSL options Hash
+      #   (for example `{ ca_file: 'node-a.pem' }`) or `{ ssl: {...}, version: 2 }`. `version` is the approved
+      #   certificate generation; when it changes, connections built for the node are replaced (live) or rebuilt
+      #   before they may be resurrected (dead). Without a version, the trust material identifies the generation.
+      #   Rotate one node at a time by replacing its entry. The Hash is read between requests and is never modified;
+      #   `transport.refresh_trust!` applies a change immediately. Not supported with Manticore (one client for all
+      #   hosts), `ca_fingerprint`, or a custom `:transport`.
+      #
       # @option arguments [String] :ca_fingerprint SHA256 fingerprint of a certificate in the server's chain (usually
       #   the CA). Before the first request, the matching certificate is fetched from the server and becomes the only
       #   trusted certificate for every connection. Chain and expiry are verified, host names aren't (except on
@@ -146,7 +155,12 @@ module Elastic
         end
 
         if @arguments[:transport]
-          raise ArgumentError, 'ca_fingerprint can\'t be used with a custom :transport instance' if @arguments[:ca_fingerprint]
+          if @arguments[:ca_fingerprint]
+            raise ArgumentError, 'ca_fingerprint can\'t be used with a custom :transport instance'
+          end
+          if node_trust_arguments?
+            raise ArgumentError, 'node_trust can\'t be used with a custom :transport instance'
+          end
 
           @transport = @arguments[:transport]
         else
@@ -199,6 +213,10 @@ module Elastic
       end
 
       private
+
+      def node_trust_arguments?
+        @arguments.key?(:node_trust)
+      end
 
       def add_header(header)
         headers = @arguments[:transport_options]&.[](:headers) || {}

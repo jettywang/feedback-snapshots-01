@@ -31,8 +31,12 @@ module Elastic
         DEFAULT_MAX_RETRIES      = 3      # Requests
         DEFAULT_SERIALIZER_CLASS = Serializer::MultiJson
         SANITIZED_PASSWORD       = '*' * (rand(14) + 1)
+        NODE_TRUST_OPTION        = :node_trust
+        MAX_STALE_CONNECTIONS    = 32
+        MAX_RETIRED_CONNECTIONS  = 32
 
-        attr_reader   :hosts, :options, :connections, :counter, :last_request_at, :protocol
+        attr_reader   :hosts, :options, :connections, :counter, :last_request_at, :protocol,
+                      :node_trust, :retired_connections, :stale_connections
         attr_accessor :serializer, :sniffer, :logger, :tracer,
                       :reload_connections, :reload_after,
                       :resurrect_after
@@ -56,6 +60,15 @@ module Elastic
           @options[:http] ||= {}
           @options[:retry_on_status] ||= []
           @options[:delay_on_retry]  ||= 0
+
+          @node_trust = NodeTrust.new(__node_trust_policy(arguments))
+          if @node_trust.configured? && @options[:ca_fingerprint]
+            raise ArgumentError, 'node_trust can\'t be combined with ca_fingerprint'
+          end
+          __validate_node_trust! if @node_trust.configured?
+
+          @retired_connections = []
+          @stale_connections   = []
 
           validate_ca_fingerprint_options! if @options[:ca_fingerprint]
           @block       = block
@@ -87,11 +100,21 @@ module Elastic
         # @see    Connections::Collection#get_connection
         #
         def get_connection(options = {})
+          __refresh_node_trust!
           resurrect_dead_connections! if Time.now > @last_request_at + @resurrect_after
 
           @counter_mtx.synchronize { @counter += 1 }
           reload_connections! if reload_connections && (counter % reload_after).zero?
           connections.get_connection(options)
+        end
+
+        # Reconciles the pool with the currently approved per-node trust policy.
+        #
+        # @return [self]
+        #
+        def refresh_trust!
+          __refresh_node_trust!(force: true)
+          self
         end
 
         # Reloads and replaces the connection collection based on cluster information
@@ -112,7 +135,35 @@ module Elastic
         # @see Connections::Connection#resurrect!
         #
         def resurrect_dead_connections!
-          connections.dead.each(&:resurrect!)
+          return connections.dead.each(&:resurrect!) unless @node_trust.configured?
+
+          entries = @node_trust.entries(force: true)
+          @state_mutex.synchronize do
+            connections.dead.each do |connection|
+              next if connection.retired?
+
+              entry = @node_trust.entry_for(connection.host, entries)
+              current = entry&.version
+              # A policy that no longer lists the node isn't an approval to fall back to whatever
+              # the transport trusts by default; keep the last approved settings in that case.
+              connection.mark_stale! if entry && (connection.stale? || connection.trust_version != current)
+              next unless connection.resurrectable?
+
+              if connection.stale?
+                # The certificate generation changed while the node was dead. Don't let the old
+                # connection rejoin: build one with the trust policy that is effective now.
+                replacement = __build_connection_for(connection.host, entries)
+                replacement.trust!(current)
+                replacement.alive!
+                __archive_stale(connection)
+                # Replacement keeps the node's position, so round-robin order doesn't shift when
+                # one dead node comes back after a certificate change.
+                @connections.replace(connection, replacement)
+              else
+                connection.resurrect!
+              end
+            end
+          end
         end
 
         # Rebuilds the connections collection in the transport.
@@ -130,12 +181,45 @@ module Elastic
 
             __close_connections
 
-            new_connections = __build_connections
-            stale_connections = @connections.all.reject { |c| new_connections.include?(c) }
-            new_connections = new_connections.reject { |c| @connections.all.include?(c) }
+            # Re-check the policy before rebuilding (the throttled request-path check may be
+            # fresh but stale), then build through __build_connections, which Manticore overrides.
+            @node_trust.entries(force: true) if @node_trust.configured?
+            desired = __build_connections.all
+            former = @connections.all
+            removed = former.reject { |connection| desired.any? { |new_connection| new_connection == connection } }
+            removed.each do |connection|
+              # A node that left the cluster is retired, which is a different state from a failure.
+              connection.retire!
+              unless @retired_connections.include?(connection)
+                @retired_connections << connection
+                @retired_connections.shift while @retired_connections.size > MAX_RETIRED_CONNECTIONS
+              end
+            end
 
-            @connections.remove(stale_connections)
-            @connections.add(new_connections)
+            ordered = desired.map do |new_connection|
+              old = former.find { |connection| connection == new_connection }
+              if old && !old.retired? && old.trust_version == new_connection.trust_version
+                next old
+              end
+              __archive_stale(old) if old
+
+              retired = @retired_connections.find { |connection| connection == new_connection }
+              if retired
+                @retired_connections.delete(retired)
+                if retired.trust_version == new_connection.trust_version
+                  # The node was removed and came back with the same approved trust generation.
+                  next retired.revive!
+                end
+                # The node came back with a new certificate while it was gone.
+                __archive_stale(retired)
+              end
+
+              new_connection
+            end
+
+            # The selector holds the collection, not its list, so replacing the list keeps custom
+            # selectors working and restores the sniffer's node order.
+            @connections.replace_all(ordered)
             @connections
           end
         end
@@ -161,6 +245,7 @@ module Elastic
         # @api    private
         #
         def __connections_from_host
+          entries = @node_trust.entries
           hosts.map do |host|
             host[:protocol] = host[:scheme] || options[:scheme] || options[:http][:scheme] || DEFAULT_PROTOCOL
             host[:port] ||= options[:port] || options[:http][:port] || DEFAULT_PORT
@@ -172,7 +257,13 @@ module Elastic
             # Hosts added after the pin (reload, sniffing) would otherwise get no protection
             raise Error, 'CA fingerprinting can\'t be configured over http' if @ca_file && host[:protocol] != 'https'
 
-            __build_connection(host, (options[:transport_options] || {}), @block)
+            if @node_trust.configured? && __node_trust_uses_ca?(host, entries) && host[:protocol] != 'https'
+              raise Error, 'node_trust with certificate authorities can\'t be configured over http'
+            end
+
+            connection = __build_connection(host, __connection_options_for(host, entries), @block)
+            connection.trust!(@node_trust.entry_for(host, entries)&.version)
+            connection
           end
         end
 
@@ -392,6 +483,125 @@ module Elastic
         end
 
         private
+
+        # Every entry must carry a trust anchor. An entry with only verification switches would
+        # quietly use the host's default trust store while looking like an approved node policy.
+        #
+        def __validate_node_trust!
+          @node_trust.entries.each_pair do |key, entry|
+            next if entry.trust_material?
+
+            raise ArgumentError,
+                  "node_trust for #{key.inspect} has no trust anchor; " \
+                  'pass :ca_file, :ca_path or :cert_store'
+          end
+        end
+
+        # @return [Object, nil] The raw per-node trust policy passed to the transport.
+        #
+        def __node_trust_policy(arguments)
+          return arguments[NODE_TRUST_OPTION] if arguments.key?(NODE_TRUST_OPTION)
+
+          @options[NODE_TRUST_OPTION]
+        end
+
+        # Merges the node's approved SSL settings into a copy of the transport options.
+        #
+        # @return [Hash]
+        #
+        def __connection_options_for(host, entries = @node_trust.entries)
+          base = options[:transport_options] || {}
+          ssl = @node_trust.ssl_for(host, entries)
+          return base if ssl.nil? || ssl.empty?
+
+          unsupported = ssl.keys - __supported_node_trust_keys
+          if unsupported.any?
+            raise ArgumentError,
+                  "#{self.class.name} can't apply #{unsupported.join(', ')} per node; use :ca_file or :ca_path"
+          end
+          inherited = base[:ssl] || {}
+          # A node with its own trust anchor must not also trust the transport-wide one.
+          if (ssl.keys & NodeTrust::TRUST_KEYS).any?
+            inherited = inherited.reject { |key, _| NodeTrust::TRUST_KEYS.include?(key) }
+          end
+          if ssl.key?(:verify_hostname) && !__verify_hostname_supported?
+            raise ArgumentError, "#{self.class.name} can't apply :verify_hostname per node"
+          end
+          base.merge(ssl: inherited.merge(ssl))
+        end
+
+        # SSL settings the adapter can apply to an individual connection.
+        #
+        # @api private
+        #
+        def __supported_node_trust_keys
+          NodeTrust::TRUST_KEYS + NodeTrust::VERIFY_KEYS
+        end
+
+        # Whether the adapter can verify host names together with the other SSL settings picked
+        # here. Faraday 1 has no `verify_hostname` option, so setting it would fail inside Faraday.
+        #
+        def __verify_hostname_supported?
+          true
+        end
+
+        # Whether the node's approved settings include a certificate authority. A policy that only
+        # changes verification switches doesn't turn http into https.
+        #
+        def __node_trust_uses_ca?(host, entries)
+          ssl = @node_trust.ssl_for(host, entries)
+          ssl && (ssl.keys & NodeTrust::TRUST_KEYS).any?
+        end
+
+        # @return [Connections::Connection]
+        #
+        def __build_connection_for(host, entries = @node_trust.entries)
+          __build_connection(host, __connection_options_for(host, entries), @block)
+        end
+
+        # Reconciles connections with the currently approved trust policy.
+        #
+        # A live connection whose node now has a different certificate generation is replaced
+        # immediately with a connection that uses the new trust material. A dead connection is only
+        # marked stale here; it is rebuilt with the current policy when it is due to resurrect.
+        #
+        def __refresh_node_trust!(force: false)
+          return unless @node_trust.configured?
+
+          entries = @node_trust.entries(force: force)
+          @state_mutex.synchronize do
+            @connections.all.each do |connection|
+              next if connection.retired?
+
+              entry = @node_trust.entry_for(connection.host, entries)
+              current = entry&.version
+              # Without an entry the connection keeps the settings it was built with.
+              next if entry.nil? || (connection.trust_version == current && !connection.stale?)
+
+              connection.mark_stale!
+              next if connection.dead?
+
+              replacement = __build_connection_for(connection.host, entries)
+              replacement.trust!(current)
+              __archive_stale(connection)
+              @connections.replace(connection, replacement)
+            end
+          end
+        end
+
+        # Archives a superseded connection without closing it: another thread may still be inside a
+        # request on it. It is unreachable from the pool, so its client is released by GC once that
+        # request finishes.
+        def __archive_stale(connection)
+          connection.mark_stale!
+          unless @stale_connections.include?(connection)
+            @stale_connections << connection
+            # Keep the archive bounded: a long-lived client rotating certificates must not retain
+            # every client it ever built. Dropped entries are released by GC.
+            @stale_connections.shift while @stale_connections.size > MAX_STALE_CONNECTIONS
+          end
+          connection
+        end
 
         USER_AGENT_STR = 'User-Agent'.freeze
         USER_AGENT_REGEX = /user-?_?agent/.freeze

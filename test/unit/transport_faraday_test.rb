@@ -18,6 +18,7 @@
 # under the License.
 
 require 'test_helper'
+require 'tmpdir'
 
 module Elastic
   module Transport
@@ -233,6 +234,66 @@ module Elastic
 
               assert_instance_of ::Faraday::Connection, transport.connections.first.connection
               assert_equal 'http://foobar:1234/',       transport.connections.first.connection.url_prefix.to_s
+            end
+
+            context 'per-node trust' do
+              setup do
+                @dir = Dir.mktmpdir
+                @node_a = File.join(@dir, 'node-a.pem')
+                @node_b = File.join(@dir, 'node-b.pem')
+                File.write(@node_a, 'A')
+                File.write(@node_b, 'B')
+              end
+
+              teardown do
+                FileUtils.remove_entry(@dir)
+              end
+
+              should 'hand each Faraday connection the CA file approved for its node' do
+                transport = Faraday.new(
+                  hosts: [
+                    { id: 'node-a', host: 'node-a.test', port: 9200, scheme: 'https' },
+                    { id: 'node-b', host: 'node-b.test', port: 9200, scheme: 'https' }
+                  ],
+                  options: {
+                    node_trust: {
+                      'node-a' => { ca_file: @node_a },
+                      'node-b' => { ca_file: @node_b }
+                    }
+                  }
+                )
+
+                ssl = transport.connections.all.map { |c| c.connection.ssl }
+                assert_equal @node_a, ssl[0].ca_file
+                assert_equal @node_b, ssl[1].ca_file
+                assert ssl[0].verify?
+                assert ssl[1].verify?
+              end
+
+              should 'replace the node\'s connection with the newly approved CA file' do
+                node_b = File.join(@dir, 'node-b-2.pem')
+                File.write(node_b, 'B2')
+                policy = {
+                  'node-a' => { ca_file: @node_a },
+                  'node-b' => { ca_file: @node_b }
+                }
+                transport = Faraday.new(
+                  hosts: [
+                    { id: 'node-a', host: 'node-a.test', port: 9200, scheme: 'https' },
+                    { id: 'node-b', host: 'node-b.test', port: 9200, scheme: 'https' }
+                  ],
+                  options: { node_trust: policy }
+                )
+                before = transport.connections.all.dup
+
+                policy['node-b'] = { ca_file: node_b }
+                transport.refresh_trust!
+
+                after = transport.connections.all
+                assert_same before[0], after[0]
+                refute_same before[1], after[1]
+                assert_equal node_b, after[1].connection.ssl.ca_file
+              end
             end
 
             should 'use global http configuration' do

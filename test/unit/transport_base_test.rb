@@ -16,6 +16,8 @@
 # under the License.
 
 require 'test_helper'
+require 'tmpdir'
+require 'fileutils'
 
 class Elastic::Transport::Transport::BaseTest < Minitest::Test
 
@@ -34,12 +36,38 @@ class Elastic::Transport::Transport::BaseTest < Minitest::Test
     def perform_request(method, path, params={}, body=nil, &block); super; end
   end
 
+  # Exposes the per-connection SSL options it is asked to build with, the way an adapter copies
+  # them onto its client.
+  class TrustAwareTransport < DummyTransport
+    def __build_connection(host, options = {}, block = nil)
+      ssl = options[:ssl] || {}
+      super(host, options, block).tap do |connection|
+        connection.define_singleton_method(:ssl_source) { ssl[:ca_file] }
+        connection.define_singleton_method(:ssl_options) { ssl }
+      end
+    end
+  end
+
   class DummySerializer
     def initialize(*); end
   end
 
   class DummySniffer
     def initialize(*); end
+  end
+
+  def build_trust_transport(policy, hosts = nil)
+    build_trust_transport_with(policy, hosts: hosts)
+  end
+
+  def build_trust_transport_with(policy, hosts: nil, transport_options: nil)
+    hosts ||= [
+      { id: 'node-a', host: 'node-a.test', port: 9200, scheme: 'https' },
+      { id: 'node-b', host: 'node-b.test', port: 9200, scheme: 'https' }
+    ]
+    options = { node_trust: policy, resurrect_after: 0 }
+    options[:transport_options] = transport_options if transport_options
+    TrustAwareTransport.new(hosts: hosts, options: options)
   end
 
   context "Transport::Base" do
@@ -652,6 +680,484 @@ class Elastic::Transport::Transport::BaseTest < Minitest::Test
       c.expects(:healthy!)
 
       @transport.perform_request('GET', '/') { |connection, url| Elastic::Transport::Transport::Response.new 200, 'OK' }
+    end
+  end
+
+  context "per-node trust" do
+    setup do
+      @dir = Dir.mktmpdir
+      @node_a = File.join(@dir, 'node-a.pem')
+      @node_b = File.join(@dir, 'node-b.pem')
+      File.write(@node_a, 'CA A, generation 1')
+      File.write(@node_b, 'CA B, generation 1')
+    end
+
+    teardown do
+      FileUtils.remove_entry(@dir)
+    end
+
+    should "give each connection the trust material approved for its own node" do
+      transport = build_trust_transport(
+        'node-a' => { ssl: { ca_file: @node_a }, version: 1 },
+        'node-b' => { ssl: { ca_file: @node_b }, version: 7 }
+      )
+
+      a, b = transport.connections.all
+      assert_equal @node_a, a.ssl_source
+      assert_equal @node_b, b.ssl_source
+      assert_equal '1', a.trust_version
+      assert_equal '7', b.trust_version
+    end
+
+    should "not write the node's trust settings into the transport options" do
+      policy = { 'node-a' => { ca_file: @node_a } }
+      transport = build_trust_transport(policy)
+      refute transport.options[:transport_options]
+      refute_includes transport.options.keys, :ca_file
+      assert_equal({ ca_file: @node_a }, policy['node-a'], 'the caller\'s policy is not modified')
+    end
+
+    should "replace only the connection whose approved certificate changed" do
+      policy = {
+        'node-a' => { ssl: { ca_file: @node_a }, version: 1 },
+        'node-b' => { ssl: { ca_file: @node_b }, version: 1 }
+      }
+      transport = build_trust_transport(policy)
+      original = transport.connections.all.dup
+
+      policy['node-a'] = { ssl: { ca_file: @node_a }, version: 2 }
+      transport.refresh_trust!
+
+      a = transport.connections.all.find { |c| c.host[:id] == 'node-a' }
+      b = transport.connections.all.find { |c| c.host[:id] == 'node-b' }
+      assert_equal @node_a, a.ssl_source
+      assert_equal '2', a.trust_version
+      assert_same original[1], b, 'the unchanged node keeps its connection'
+      refute_same original[0], a
+      assert original[0].stale?
+      refute original[1].stale?
+    end
+
+    should "rebuild a dead connection with the current policy when it is resurrected" do
+      policy = {
+        'node-a' => { ssl: { ca_file: @node_a }, version: 1 },
+        'node-b' => { ssl: { ca_file: @node_b }, version: 1 }
+      }
+      transport = build_trust_transport(policy)
+      dead = transport.connections.all.first
+      alive = transport.connections.all.last
+      dead.dead!
+      later = Time.now + 120
+      Time.stubs(:now).returns(later)
+
+      # The certificate was rotated while node-a was down.
+      File.write(@node_a, 'CA A, generation 2')
+      policy['node-a'] = { ssl: { ca_file: @node_a }, version: 2 }
+
+      transport.resurrect_dead_connections!
+
+      resurrected = transport.connections.all.find { |c| c.host[:id] == 'node-a' }
+      refute_same dead, resurrected
+      assert_equal '2', resurrected.trust_version
+      refute resurrected.dead?
+      assert dead.stale?
+      assert_same alive, transport.connections.all.find { |c| c.host[:id] == 'node-b' }
+      assert_equal 2, transport.connections.all.size
+    end
+
+    should "resurrect a dead connection when its approved certificate didn't change" do
+      transport = build_trust_transport(
+        'node-a' => { ssl: { ca_file: @node_a }, version: 1 },
+        'node-b' => { ssl: { ca_file: @node_b }, version: 1 }
+      )
+      dead = transport.connections.all.first
+      dead.dead!
+      later = Time.now + 120
+      Time.stubs(:now).returns(later)
+
+      transport.resurrect_dead_connections!
+
+      assert_same dead, transport.connections.all.find { |c| c.host[:id] == 'node-a' }
+      refute dead.dead?
+      refute dead.stale?
+    end
+
+    should "retire a removed node without treating it as a failure, and revive it on return" do
+      policy = {
+        'node-a' => { ssl: { ca_file: @node_a }, version: 1 },
+        'node-b' => { ssl: { ca_file: @node_b }, version: 1 }
+      }
+      hosts = [
+        { id: 'node-a', host: 'node-a.test', port: 9200, scheme: 'https' },
+        { id: 'node-b', host: 'node-b.test', port: 9200, scheme: 'https' }
+      ]
+      transport = build_trust_transport(policy, hosts)
+      removed = transport.connections.all.last
+
+      hosts.pop
+      transport.__rebuild_connections(hosts: hosts, options: transport.options)
+
+      assert_equal 1, transport.connections.all.size
+      assert_equal 1, transport.retired_connections.size
+      assert removed.retired?
+      assert_equal 0, removed.failures, 'removal is not a node failure'
+      assert_equal :retired, removed.status
+
+      # The node returns with the same approved certificate generation.
+      hosts << { id: 'node-b', host: 'node-b.test', port: 9200, scheme: 'https' }
+      transport.__rebuild_connections(hosts: hosts, options: transport.options)
+
+      assert_equal 2, transport.connections.all.size
+      assert_empty transport.retired_connections
+      assert_same removed, transport.connections.all.last
+      refute removed.retired?
+      assert_equal :alive, removed.status
+    end
+
+    should "rebuild a returning node whose certificate changed while it was removed" do
+      policy = {
+        'node-a' => { ssl: { ca_file: @node_a }, version: 1 },
+        'node-b' => { ssl: { ca_file: @node_b }, version: 1 }
+      }
+      hosts = [
+        { id: 'node-a', host: 'node-a.test', port: 9200, scheme: 'https' },
+        { id: 'node-b', host: 'node-b.test', port: 9200, scheme: 'https' }
+      ]
+      transport = build_trust_transport(policy, hosts)
+      retired = transport.connections.all.last
+
+      hosts.pop
+      transport.__rebuild_connections(hosts: hosts, options: transport.options)
+
+      policy['node-b'] = { ssl: { ca_file: @node_b }, version: 2 }
+      hosts << { id: 'node-b', host: 'node-b.test', port: 9200, scheme: 'https' }
+      transport.__rebuild_connections(hosts: hosts, options: transport.options)
+
+      b = transport.connections.all.last
+      refute_same retired, b
+      assert_equal '2', b.trust_version
+      assert retired.stale?
+      assert_empty transport.retired_connections
+    end
+
+    should "not use a dead connection rebuilt for a new policy before its resurrection time" do
+      policy = {
+        'node-a' => { ssl: { ca_file: @node_a }, version: 1 },
+        'node-b' => { ssl: { ca_file: @node_b }, version: 1 }
+      }
+      transport = build_trust_transport(policy)
+      dead = transport.connections.all.first
+      dead.dead!
+
+      # A live request notices the new policy but must not bring the dead node back early.
+      policy['node-a'] = { ssl: { ca_file: @node_a }, version: 2 }
+      transport.refresh_trust!
+
+      assert dead.stale?
+      assert dead.dead?
+      assert_equal :stale, dead.status
+      assert_equal 2, transport.connections.all.size
+      assert_equal 1, transport.connections.size, 'only node-b is selectable'
+      assert_equal 'node-b', transport.get_connection.host[:id]
+    end
+
+    should "resurrect the connection separately from the trust change" do
+      policy = {
+        'node-a' => { ssl: { ca_file: @node_a }, version: 1 },
+        'node-b' => { ssl: { ca_file: @node_b }, version: 1 }
+      }
+      transport = build_trust_transport(policy)
+      dead = transport.connections.all.first
+      dead.dead!
+
+      policy['node-a'] = { ssl: { ca_file: @node_a }, version: 2 }
+      later = Time.now + 121
+      Time.stubs(:now).returns(later)
+      transport.get_connection
+
+      a = transport.connections.all.find { |c| c.host[:id] == 'node-a' }
+      refute_same dead, a
+      refute a.dead?
+      assert_equal '2', a.trust_version
+      assert dead.stale?
+    end
+
+    should "raise when a node entry sets an SSL option the adapter can't apply" do
+      error = assert_raises(ArgumentError) do
+        build_trust_transport('node-a' => { ca_file: @node_a, min_version: 'TLS1_2' })
+      end
+      assert_match(/unsupported settings: min_version/, error.message)
+    end
+
+    should "keep round-robin selecting the surviving connection after a rotation" do
+      policy = {
+        'node-a' => { ssl: { ca_file: @node_a }, version: 1 },
+        'node-b' => { ssl: { ca_file: @node_b }, version: 1 }
+      }
+      transport = build_trust_transport(policy)
+      selected = 4.times.map { transport.get_connection.host[:id] }
+      assert_equal %w[node-a node-b node-a node-b], selected
+
+      policy['node-b'] = { ssl: { ca_file: @node_b }, version: 2 }
+      selected = 4.times.map { transport.get_connection.host[:id] }
+      assert_equal %w[node-a node-b node-a node-b], selected
+    end
+
+    should "raise when an entry has no trust anchor" do
+      error = assert_raises(ArgumentError) do
+        build_trust_transport('node-a' => { ssl: { verify_hostname: false } })
+      end
+      assert_match(/has no trust anchor/, error.message)
+    end
+
+    should "raise when an entry carries two trust anchors" do
+      error = assert_raises(ArgumentError) do
+        build_trust_transport('node-a' => { ssl: { ca_file: @node_a, ca_path: @dir } })
+      end
+      assert_match(/more than one trust anchor/, error.message)
+    end
+
+    should "raise when an entry disables verification" do
+      error = assert_raises(ArgumentError) do
+        build_trust_transport('node-a' => { ssl: { ca_file: @node_a, verify: false } })
+      end
+      assert_match(/can't disable certificate verification/, error.message)
+    end
+
+    should "raise for trust material on an http host" do
+      error = assert_raises(Elastic::Transport::Transport::Error) do
+        build_trust_transport(
+          { 'node-a' => { ca_file: @node_a } },
+          [{ id: 'node-a', host: 'node-a.test', port: 9200 }]
+        )
+      end
+      assert_match(/can't be configured over http/, error.message)
+    end
+
+    should "prefer the node's own trust anchor over the transport-wide one" do
+      transport = TrustAwareTransport.new(
+        hosts: [{ id: 'node-a', host: 'node-a.test', port: 9200, scheme: 'https' }],
+        options: {
+          node_trust: { 'node-a' => { ca_file: @node_a } },
+          transport_options: { ssl: { ca_file: @node_b, verify_hostname: false } }
+        }
+      )
+      ssl = transport.connections.all.first.ssl_options
+      assert_equal @node_a, ssl[:ca_file]
+      assert_equal false, ssl[:verify_hostname]
+    end
+
+    should "inherit the transport-wide SSL settings for nodes without an entry" do
+      transport = build_trust_transport_with(
+        { 'node-a' => { ca_file: @node_a } },
+        transport_options: { ssl: { ca_file: @node_b } }
+      )
+      a = transport.connections.all.find { |c| c.host[:id] == 'node-a' }
+      b = transport.connections.all.find { |c| c.host[:id] == 'node-b' }
+      assert_equal @node_a, a.ssl_source
+      assert_equal @node_b, b.ssl_source
+    end
+
+    should "keep a default entry for nodes without their own" do
+      transport = build_trust_transport(
+        'node-a' => { ca_file: @node_a },
+        'default' => { ca_file: @node_b }
+      )
+      a = transport.connections.all.find { |c| c.host[:id] == 'node-a' }
+      b = transport.connections.all.find { |c| c.host[:id] == 'node-b' }
+      assert_equal @node_a, a.ssl_source
+      assert_equal @node_b, b.ssl_source
+    end
+
+    should "resolve host:port and bare host entries" do
+      transport = build_trust_transport(
+        'node-a.test:9200' => { ca_file: @node_a },
+        'node-b.test' => { ca_file: @node_b }
+      )
+      assert_equal @node_a, transport.connections.all.first.ssl_source
+      assert_equal @node_b, transport.connections.all.last.ssl_source
+    end
+
+    should "raise when combined with ca_fingerprint" do
+      error = assert_raises(ArgumentError) do
+        TrustAwareTransport.new(
+          hosts: [{ id: 'node-a', host: 'node-a.test', port: 9200, scheme: 'https' }],
+          options: { ca_fingerprint: 'ABC', node_trust: { 'node-a' => { ca_file: @node_a } } }
+        )
+      end
+      assert_match(/ca_fingerprint/, error.message)
+    end
+
+    should "keep the last approved trust when a node loses its entry" do
+      policy = { 'node-a' => { ssl: { ca_file: @node_a }, version: 1 } }
+      transport = build_trust_transport(policy)
+      before = transport.connections.all.first
+
+      policy.delete('node-a')
+      transport.refresh_trust!
+
+      assert_same before, transport.connections.all.first
+      refute before.stale?
+    end
+
+    should "pick up a policy Hash that is updated in place" do
+      policy = { 'node-a' => { ssl: { ca_file: @node_a }, version: 1 } }
+      transport = build_trust_transport(policy)
+
+      policy['node-a'] = { ssl: { ca_file: @node_a }, version: 2 }
+      transport.refresh_trust!
+
+      a = transport.connections.all.find { |c| c.host[:id] == 'node-a' }
+      assert_equal '2', a.trust_version
+    end
+
+    should "accept a callable policy" do
+      current = { 'node-a' => { ssl: { ca_file: @node_a }, version: 1 } }
+      transport = TrustAwareTransport.new(
+        hosts: [{ id: 'node-a', host: 'node-a.test', port: 9200, scheme: 'https' }],
+        options: { node_trust: -> { current } }
+      )
+      assert_equal '1', transport.connections.all.first.trust_version
+
+      current = { 'node-a' => { ssl: { ca_file: @node_a }, version: 5 } }
+      transport.refresh_trust!
+      assert_equal '5', transport.connections.all.first.trust_version
+    end
+
+    should "notice a certificate rotated on disk without an explicit version" do
+      policy = { 'node-a' => { ca_file: @node_a } }
+      transport = build_trust_transport(policy)
+      before = transport.connections.all.first
+
+      # Different content *and* a new mtime, as a rewritten CA file has.
+      File.write(@node_a, 'CA A, generation 2')
+      File.utime(Time.now + 5, Time.now + 5, @node_a)
+      transport.refresh_trust!
+
+      after = transport.connections.all.first
+      refute_same before, after
+      refute_equal before.trust_version, after.trust_version
+    end
+
+    should "notice a certificate rotated on disk while serving requests" do
+      policy = { 'node-a' => { ca_file: @node_a } }
+      transport = build_trust_transport(policy)
+      transport.get_connection
+      before = transport.connections.all.first
+
+      File.write(@node_a, 'CA A, generation 2')
+      File.utime(Time.now + 5, Time.now + 5, @node_a)
+      later = Time.now + 2
+      Time.stubs(:now).returns(later)
+      transport.get_connection
+
+      after = transport.connections.all.first
+      refute_same before, after
+      refute_equal before.trust_version, after.trust_version
+    end
+
+    should "pick up an in-place policy edit without waiting for the file check interval" do
+      policy = { 'node-a' => { ssl: { ca_file: @node_a }, version: 1 } }
+      transport = build_trust_transport(policy)
+      transport.get_connection
+
+      policy['node-a'] = { ssl: { ca_file: @node_a }, version: 2 }
+      transport.get_connection
+
+      assert_equal '2', transport.connections.all.first.trust_version
+    end
+
+    should "treat a replaced cert_store as a new generation" do
+      store = OpenSSL::X509::Store.new
+      replacement = OpenSSL::X509::Store.new
+      policy = { 'node-a' => { ssl: { cert_store: store } } }
+      transport = build_trust_transport(policy)
+
+      policy['node-a'] = { ssl: { cert_store: replacement } }
+      transport.refresh_trust!
+
+      store_seen = transport.connections.all.first.ssl_options[:cert_store]
+      assert_same replacement, store_seen
+      refute_same store, store_seen
+    end
+  end
+
+  context "per-node trust with a custom selector" do
+    class RecordingSelector
+      include Elastic::Transport::Transport::Connections::Selector::Base
+      attr_reader :pools
+
+      def initialize(arguments = {})
+        super
+        @pools = [arguments[:connections]]
+      end
+
+      def select(_options = {})
+        connections.to_a.find { |connection| !connection.dead? }
+      end
+    end
+
+    setup do
+      @dir = Dir.mktmpdir
+      @ca = File.join(@dir, 'ca.pem')
+      File.write(@ca, 'CA')
+    end
+
+    teardown do
+      FileUtils.remove_entry(@dir)
+    end
+
+    should "build through the adapter hook so transports that override __build_connections still work" do
+      transport = Class.new(TrustAwareTransport) do
+        attr_reader :built, :builds
+
+        def __build_connections
+          @builds = (@builds || 0) + 1
+          @built = super
+        end
+      end.new(
+        hosts: [{ id: 'node-a', host: 'node-a.test', port: 9200, scheme: 'https' }],
+        options: { node_trust: { 'node-a' => { ca_file: @ca } } }
+      )
+      builds_before = transport.builds
+
+      transport.__rebuild_connections(
+        hosts: [{ id: 'node-a', host: 'node-a.test', port: 9200, scheme: 'https' }],
+        options: transport.options
+      )
+
+      assert_equal builds_before + 1, transport.builds
+      assert_equal transport.built.all.first, transport.connections.all.first
+    end
+
+    should "keep the selector pointed at the live pool across rebuilds and rotations" do
+      hosts = [
+        { id: 'node-a', host: 'node-a.test', port: 9200, scheme: 'https' },
+        { id: 'node-b', host: 'node-b.test', port: 9200, scheme: 'https' }
+      ]
+      policy = {
+        'node-a' => { ssl: { ca_file: @ca }, version: 1 },
+        'node-b' => { ssl: { ca_file: @ca }, version: 1 }
+      }
+      transport = TrustAwareTransport.new(
+        hosts: hosts,
+        options: { node_trust: policy, selector_class: RecordingSelector, resurrect_after: 0 }
+      )
+      selector = transport.connections.selector
+      assert_same transport.connections, selector.connections
+
+      transport.__rebuild_connections(hosts: hosts, options: transport.options)
+      assert_same selector, transport.connections.selector
+      assert_same transport.connections, selector.connections
+
+      policy['node-a'] = { ssl: { ca_file: @ca }, version: 2 }
+      transport.refresh_trust!
+      assert_same selector, transport.connections.selector
+      assert_same transport.connections, selector.connections
+      # The custom strategy always picks the first live node; the important part is that the pool
+      # it reads still contains the rebuilt connection.
+      assert_equal %w[node-a node-a], 2.times.map { transport.get_connection.host[:id] }
+      assert_equal '2', transport.connections.all.first.trust_version
     end
   end
 

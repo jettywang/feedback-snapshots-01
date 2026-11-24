@@ -63,7 +63,9 @@ module Elastic
           # @return [Connections::Connection]
           #
           def __build_connection(host, options={}, block=nil)
-            client = ::Faraday.new(__full_url(host), options, &block)
+            # Each connection gets its own copy: per-node SSL settings are merged into the options
+            # hash, and Faraday retains (and may modify) the hash it is given.
+            client = ::Faraday.new(__full_url(host), deep_dup(options), &block)
             apply_headers(client, options)
             Connections::Connection.new(host: host, connection: client)
           end
@@ -82,6 +84,22 @@ module Elastic
           end
 
           private
+
+          # Faraday 1 has no `verify_hostname` option and raises when it is passed.
+          #
+          # @see Base#__verify_hostname_supported?
+          #
+          def __verify_hostname_supported?
+            !defined?(::Faraday::SSLOptions) || ::Faraday::SSLOptions.members.include?(:verify_hostname)
+          end
+
+          # Copies the hashes the Faraday constructor reads from, so a per-connection merge can't
+          # leak into the caller's or the transport's options.
+          def deep_dup(options)
+            options.each_with_object({}) do |(key, value), copy|
+              copy[key] = value.is_a?(Hash) ? deep_dup(value) : value
+            end
+          end
 
           def user_agent_header(client)
             @user_agent ||= begin
