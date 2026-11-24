@@ -15,6 +15,7 @@ nav:
   - Dynamic Variables: dynamic.md
   - CLI: cli.md
   - Validation: validation.md
+  - Atomic updates: atomic_updates.md
   - Flask: flask.md
   - Django: django.md
   - Advanced usage: advanced.md

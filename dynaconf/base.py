@@ -179,6 +179,11 @@ class DynaconfConfig:
     deleted: set[str] = field(default_factory=set)
     env_cache: dict = field(default_factory=dict)
 
+    # Raw values of the currently approved in-memory generation.
+    # Used by the memory loader to re-apply committed values on a full
+    # loader reload (e.g. a `fresh` read).
+    memory_generation_data: dict = field(default_factory=dict)
+
     not_installed_warnings: list[str] = field(default_factory=list)
 
     def __post_init__(self):

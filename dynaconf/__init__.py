@@ -6,6 +6,11 @@ from dynaconf.contrib import DjangoDynaconf
 from dynaconf.contrib import FlaskDynaconf
 from dynaconf.hooking import post_hook
 from dynaconf.nodes import DataDict
+from dynaconf.transaction import CandidateRecord
+from dynaconf.transaction import ConfigTransaction
+from dynaconf.transaction import TransactionCancelled
+from dynaconf.transaction import TransactionError
+from dynaconf.transaction import TransactionManager
 from dynaconf.utils.inspect import get_history
 from dynaconf.utils.inspect import inspect_settings
 from dynaconf.utils.parse_conf import add_converter
@@ -43,4 +48,9 @@ __all__ = [
     "DynaconfFormatError",
     "DynaconfParseError",
     "post_hook",
+    "TransactionManager",
+    "ConfigTransaction",
+    "CandidateRecord",
+    "TransactionError",
+    "TransactionCancelled",
 ]
