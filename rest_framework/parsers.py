@@ -22,6 +22,7 @@ from rest_framework import renderers
 from rest_framework.exceptions import ParseError
 from rest_framework.settings import api_settings
 from rest_framework.utils import json
+from rest_framework.utils.mediatypes import media_type_matches
 
 
 def get_encoding(parser_context):
@@ -66,6 +67,70 @@ class BaseParser:
         parsed data and files.
         """
         raise NotImplementedError(".parse() must be overridden.")
+
+
+class BaseParserAdmission:
+    """
+    Optional policy that decides which of a view's parsers a given request is
+    allowed to use, before the request body is handed to a parser (and thus
+    before any business serializer runs).
+
+    An admission policy is consulted once per request, the first time the
+    request body is read. The parser set it admits and the parser selected
+    from it are reused for every later read (for example a read performed by
+    an authentication class followed by the view), so the same policy and
+    parser apply regardless of which stage reads first.
+    """
+
+    def get_admitted_parsers(self, request, parsers, parser_context=None):
+        """
+        Return the subset of `parsers` this request may use.
+
+        Returning every parser admits the request unchanged, while returning
+        an empty sequence refuses every input form. The default policy admits
+        all of the view's configured parsers.
+        """
+        raise NotImplementedError(
+            '.get_admitted_parsers() must be overridden.'
+        )
+
+
+class AllowAllParserAdmission(BaseParserAdmission):
+    """
+    Default admission policy: every configured parser remains available.
+    """
+
+    def get_admitted_parsers(self, request, parsers, parser_context=None):
+        return parsers
+
+
+class MediaTypeParserAdmission(BaseParserAdmission):
+    """
+    Admission policy that limits a request to an explicit set of media types.
+
+    Subclasses (or instances built with `allowed_media_types`) only admit
+    parsers whose `media_type` is in the allow list. This makes it possible
+    to restrict some clients to, for example, JSON while still allowing form
+    submissions from others.
+    """
+    allowed_media_types = None
+
+    def __init__(self, allowed_media_types=None):
+        if allowed_media_types is not None:
+            self.allowed_media_types = allowed_media_types
+        assert self.allowed_media_types is not None, (
+            '`MediaTypeParserAdmission` subclasses must define an '
+            '`allowed_media_types` attribute, or pass one to the constructor.'
+        )
+
+    def get_admitted_parsers(self, request, parsers, parser_context=None):
+        return [
+            parser for parser in parsers
+            if any(
+                media_type_matches(allowed, parser.media_type)
+                for allowed in self.allowed_media_types
+            )
+        ]
 
 
 class JSONParser(BaseParser):

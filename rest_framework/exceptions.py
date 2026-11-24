@@ -223,6 +223,25 @@ class UnsupportedMediaType(APIException):
         super().__init__(detail, code)
 
 
+class MediaTypeNotAdmitted(UnsupportedMediaType):
+    """
+    Raised when a request's media type is supported by one of the view's
+    parsers, but the view's parser admission policy does not permit this
+    client to use that input form.
+
+    Subclassing ``UnsupportedMediaType`` keeps the response at HTTP 415,
+    while the distinct ``default_code`` lets clients tell an admission
+    refusal apart from a media type that no parser can handle.
+    """
+    default_detail = _('Media type "{media_type}" is not admitted for this request.')
+    default_code = 'media_type_not_admitted'
+
+    def __init__(self, media_type, detail=None, code=None):
+        if detail is None:
+            detail = force_str(self.default_detail).format(media_type=media_type)
+        super().__init__(media_type, detail, code)
+
+
 class Throttled(APIException):
     status_code = status.HTTP_429_TOO_MANY_REQUESTS
     default_detail = _('Request was throttled.')

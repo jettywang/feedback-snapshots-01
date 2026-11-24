@@ -107,6 +107,7 @@ class APIView(View):
     # The following policies may be set at either globally, or per-view.
     renderer_classes = api_settings.DEFAULT_RENDERER_CLASSES
     parser_classes = api_settings.DEFAULT_PARSER_CLASSES
+    parser_admission_classes = api_settings.DEFAULT_PARSER_ADMISSION_CLASSES
     authentication_classes = api_settings.DEFAULT_AUTHENTICATION_CLASSES
     throttle_classes = api_settings.DEFAULT_THROTTLE_CLASSES
     permission_classes = api_settings.DEFAULT_PERMISSION_CLASSES
@@ -270,6 +271,13 @@ class APIView(View):
         """
         return [parser() for parser in self.parser_classes]
 
+    def get_parser_admissions(self):
+        """
+        Instantiates and returns the list of parser admission policies that
+        constrain which of the view's parsers each request may use.
+        """
+        return [admission() for admission in self.parser_admission_classes]
+
     def get_authenticators(self):
         """
         Instantiates and returns the list of authenticators that this view can use.
@@ -398,7 +406,8 @@ class APIView(View):
             parsers=self.get_parsers(),
             authenticators=self.get_authenticators(),
             negotiator=self.get_content_negotiator(),
-            parser_context=parser_context
+            parser_context=parser_context,
+            parser_admissions=self.get_parser_admissions()
         )
 
     def initial(self, request, *args, **kwargs):

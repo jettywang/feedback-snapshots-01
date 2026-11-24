@@ -103,12 +103,16 @@ def clone_request(request, method):
                   parsers=request.parsers,
                   authenticators=request.authenticators,
                   negotiator=request.negotiator,
-                  parser_context=request.parser_context)
+                  parser_context=request.parser_context,
+                  parser_admissions=request.parser_admissions)
     ret._data = request._data
     ret._files = request._files
     ret._full_data = request._full_data
     ret._content_type = request._content_type
     ret._stream = request._stream
+    ret._admitted_parsers = request._admitted_parsers
+    ret._accepted_parser = request._accepted_parser
+    ret._admission_denied = request._admission_denied
     ret.method = method
     if hasattr(request, '_user'):
         ret._user = request._user
@@ -154,7 +158,8 @@ class Request:
     """
 
     def __init__(self, request, parsers=None, authenticators=None,
-                 negotiator=None, parser_context=None):
+                 negotiator=None, parser_context=None,
+                 parser_admissions=None):
         assert isinstance(request, HttpRequest), (
             'The `request` argument must be an instance of '
             '`django.http.HttpRequest`, not `{}.{}`.'
@@ -166,11 +171,19 @@ class Request:
         self.authenticators = authenticators or ()
         self.negotiator = negotiator or self._default_negotiator()
         self.parser_context = parser_context
+        self.parser_admissions = parser_admissions or ()
         self._data = Empty
         self._files = Empty
         self._full_data = Empty
         self._content_type = Empty
         self._stream = Empty
+        # The admitted parser set, the selected parser and the admission
+        # outcome are resolved once, on the first read of the request body,
+        # then reused by every subsequent read (e.g. from an authenticator
+        # and again from the view). `Empty` marks "not resolved yet".
+        self._admitted_parsers = Empty
+        self._accepted_parser = Empty
+        self._admission_denied = Empty
 
         if self.parser_context is None:
             self.parser_context = {}
@@ -224,6 +237,17 @@ class Request:
             with wrap_attributeerrors():
                 self._load_data_and_files()
         return self._full_data
+
+    @property
+    def accepted_parser(self):
+        """
+        The parser selected for this request after the parser admission
+        contract has been applied, or `None` if no parser was selected.
+
+        Accessing this property resolves (and caches) the admission decision
+        without parsing the body, so it is safe to call before `request.data`.
+        """
+        return self._select_parser()
 
     @property
     def user(self):
@@ -327,6 +351,54 @@ class Request:
         )
         return any(parser.media_type in form_media for parser in self.parsers)
 
+    def _resolve_admitted_parsers(self):
+        """
+        Apply every parser admission policy in turn to the configured
+        parsers, caching the resulting parser set on the request.
+
+        Admission is part of the first parse and is therefore evaluated once,
+        no matter which stage (an authenticator, the view, ...) reads the
+        request body first.
+        """
+        if not _hasattr(self, '_admitted_parsers'):
+            admitted_parsers = self.parsers
+            for admission in self.parser_admissions:
+                admitted_parsers = admission.get_admitted_parsers(
+                    self, admitted_parsers, self.parser_context
+                )
+            self._admitted_parsers = tuple(admitted_parsers)
+        return self._admitted_parsers
+
+    def _select_parser(self):
+        """
+        Select the parser for this request, honouring the parser admission
+        contract, and cache the decision.
+
+        Returns the selected parser, or `None` when no admitted parser can
+        handle the request's media type. When a parser outside the admission
+        contract could have handled the media type, the refusal is remembered
+        so that callers can raise a distinguishable `MediaTypeNotAdmitted`
+        instead of a plain `UnsupportedMediaType`.
+        """
+        if not _hasattr(self, '_accepted_parser'):
+            admitted_parsers = self._resolve_admitted_parsers()
+            parser = self.negotiator.select_parser(self, admitted_parsers)
+            if parser is None:
+                # A parser the view supports but the admission policy did not
+                # admit means the client's input form was refused, rather than
+                # the media type being unknown to the view.
+                supported_parser = self.negotiator.select_parser(
+                    self, self.parsers
+                )
+                self._admission_denied = (
+                    supported_parser is not None
+                    and supported_parser not in admitted_parsers
+                )
+            else:
+                self._admission_denied = False
+            self._accepted_parser = parser
+        return self._accepted_parser
+
     def _parse(self):
         """
         Parse the request content, returning a two-tuple of (data, files)
@@ -343,6 +415,13 @@ class Request:
             # request was made with 'multipart/form-data', then the request stream
             # will already have been exhausted.
             if self._supports_form_parsing():
+                # The body was parsed by Django before DRF ran, but the
+                # admission contract still applies: resolve (and cache) the
+                # admission decision and refuse a form the policy does not
+                # admit, rather than silently returning request.POST.
+                self._select_parser()
+                if self._admission_denied:
+                    raise exceptions.MediaTypeNotAdmitted(media_type)
                 return (self._request.POST, self._request.FILES)
             stream = None
 
@@ -354,9 +433,11 @@ class Request:
             empty_files = MultiValueDict()
             return (empty_data, empty_files)
 
-        parser = self.negotiator.select_parser(self, self.parsers)
+        parser = self._select_parser()
 
         if not parser:
+            if self._admission_denied:
+                raise exceptions.MediaTypeNotAdmitted(media_type)
             raise exceptions.UnsupportedMediaType(media_type)
 
         from rest_framework.parsers import FormParser, JSONParser

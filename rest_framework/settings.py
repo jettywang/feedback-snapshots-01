@@ -37,6 +37,9 @@ DEFAULTS = {
         'rest_framework.parsers.FormParser',
         'rest_framework.parsers.MultiPartParser'
     ],
+    'DEFAULT_PARSER_ADMISSION_CLASSES': [
+        'rest_framework.parsers.AllowAllParserAdmission',
+    ],
     'DEFAULT_AUTHENTICATION_CLASSES': [
         'rest_framework.authentication.SessionAuthentication',
         'rest_framework.authentication.BasicAuthentication'
@@ -138,6 +141,7 @@ DEFAULTS = {
 IMPORT_STRINGS = [
     'DEFAULT_RENDERER_CLASSES',
     'DEFAULT_PARSER_CLASSES',
+    'DEFAULT_PARSER_ADMISSION_CLASSES',
     'DEFAULT_AUTHENTICATION_CLASSES',
     'DEFAULT_PERMISSION_CLASSES',
     'DEFAULT_THROTTLE_CLASSES',

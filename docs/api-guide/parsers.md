@@ -66,6 +66,88 @@ Or, if you're using the `@api_view` decorator with function based views.
 
 ---
 
+## Restricting the input forms each client may use
+
+The `parser_classes` policy lists every media type a view *can* parse.
+Sometimes you also need an admission policy that decides which of those input
+forms a *given request* is allowed to use, before the body is handed to a
+parser (and thus before any business serializer runs). This is what a parser
+admission class provides.
+
+An admission class subclasses `BaseParserAdmission` and implements
+`.get_admitted_parsers(request, parsers, parser_context)`, returning the
+subset of `parsers` the request may use. Returning every parser admits the
+request unchanged; returning an empty list refuses every input form.
+
+    from rest_framework.parsers import BaseParserAdmission, JSONParser
+
+    class JsonClientsOnly(BaseParserAdmission):
+        def get_admitted_parsers(self, request, parsers, parser_context=None):
+            # Machine clients may send JSON; browser form posts are refused.
+            if request.headers.get('X-Client-Class') == 'browser':
+                return [parser for parser in parsers
+                        if isinstance(parser, JSONParser)]
+            return parsers
+
+Attach it to a class-based view with `parser_admission_classes`.
+
+    class ExampleView(APIView):
+        parser_classes = [JSONParser, FormParser, MultiPartParser]
+        parser_admission_classes = [JsonClientsOnly]
+
+        def post(self, request):
+            return Response({'received data': request.data})
+
+Or to a function-based view with the matching decorator.
+
+    from rest_framework.decorators import api_view, parser_admission_classes
+
+    @api_view(['POST'])
+    @parser_admission_classes([JsonClientsOnly])
+    def example_view(request, format=None):
+        return Response({'received data': request.data})
+
+For the common case of allowing a fixed set of media types, use
+`MediaTypeParserAdmission` and set `allowed_media_types`.
+
+    from rest_framework.parsers import MediaTypeParserAdmission
+
+    class JsonOnlyAdmission(MediaTypeParserAdmission):
+        allowed_media_types = ['application/json']
+
+A policy may also be installed globally with the
+`DEFAULT_PARSER_ADMISSION_CLASSES` setting. The default,
+`AllowAllParserAdmission`, admits every configured parser, so existing views
+are unaffected until you opt in.
+
+### When admission is evaluated
+
+The admission policy runs at most once per request, the first time the request
+body is read. The admitted parser set and the parser selected from it are
+cached on the request and reused by every later read. This matters when an
+authentication class accesses `request.data` during authentication and the
+view reads it again afterwards: regardless of which stage reads first, both
+observe the same policy decision and the same parser, and the body is parsed a
+single time.
+
+### Refusal errors
+
+The two "no usable parser" outcomes produce distinguishable errors:
+
+* If **no configured parser** supports the request's `Content-Type`, REST
+  framework raises `UnsupportedMediaType` (HTTP 415, code
+  `unsupported_media_type`), exactly as before.
+* If a configured parser *does* support the media type but the admission
+  policy does not admit it, REST framework raises `MediaTypeNotAdmitted`
+  (HTTP 415, code `media_type_not_admitted`).
+
+`MediaTypeNotAdmitted` subclasses `UnsupportedMediaType`, so existing code that
+catches the latter keeps working, while clients can still tell an admission
+refusal apart from a genuinely unknown media type. The selected parser is also
+available without parsing the body as `request.accepted_parser`.
+
+---
+
 ## API Reference
 
 ### JSONParser

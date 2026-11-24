@@ -61,6 +61,11 @@ def api_view(http_method_names=None):
         WrappedAPIView.parser_classes = getattr(func, 'parser_classes',
                                                 APIView.parser_classes)
 
+        WrappedAPIView.parser_admission_classes = getattr(
+            func, 'parser_admission_classes',
+            APIView.parser_admission_classes
+        )
+
         WrappedAPIView.authentication_classes = getattr(func, 'authentication_classes',
                                                         APIView.authentication_classes)
 
@@ -119,6 +124,14 @@ def parser_classes(parser_classes):
     def decorator(func):
         _check_decorator_order(func, 'parser_classes')
         func.parser_classes = parser_classes
+        return func
+    return decorator
+
+
+def parser_admission_classes(parser_admission_classes):
+    def decorator(func):
+        _check_decorator_order(func, 'parser_admission_classes')
+        func.parser_admission_classes = parser_admission_classes
         return func
     return decorator
 

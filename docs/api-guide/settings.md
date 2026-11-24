@@ -64,6 +64,16 @@ Default:
         'rest_framework.parsers.MultiPartParser'
     ]
 
+#### DEFAULT_PARSER_ADMISSION_CLASSES
+
+A list or tuple of parser admission classes, that determine which of the configured parsers a given request is allowed to use before its body is parsed. The default admits every configured parser, so this is an opt-in policy. See the [parsers documentation][parsers-admission] for details.
+
+Default:
+
+    [
+        'rest_framework.parsers.AllowAllParserAdmission',
+    ]
+
 #### DEFAULT_AUTHENTICATION_CLASSES
 
 A list or tuple of authentication classes, that determines the default set of authenticators used when accessing the `request.user` or `request.auth` properties.
@@ -494,4 +504,6 @@ Default: `None`
 [cite]: https://www.python.org/dev/peps/pep-0020/
 [rfc4627]: https://www.ietf.org/rfc/rfc4627.txt
 [heroku-minified-json]: https://github.com/interagent/http-api-design#keep-json-minified-in-all-responses
+[strftime]: https://docs.python.org/3/library/datetime.html#strftime-and-strptime-format-codes
+[parsers-admission]: parsers.md#restricting-the-input-forms-each-client-may-use
 [strftime]: https://docs.python.org/3/library/datetime.html#strftime-and-strptime-format-codes
