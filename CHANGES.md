@@ -1,6 +1,19 @@
 CHANGES
 =======
 
+Unreleased
+==========
+
+- Add cache-safe handling of per-request CSP nonces. `csp.caching` provides
+  `prepare_for_cache()` and `restore_from_cache()` to neutralise a nonce before
+  caching and rebuild it with the current request's fresh nonce on a cache hit,
+  cross-checking the stored policy against the current one. CSP-aware
+  replacements for Django's two-part cache middleware live in
+  `csp.contrib.cache` (`CSPUpdateCacheMiddleware` and
+  `CSPFetchFromCacheMiddleware`). Responses without a nonce continue to cache
+  unchanged; an entry that cannot be rebuilt is evicted and the page is rendered
+  again instead of reusing a stale nonce.
+
 4.0
 ===
 
