@@ -12,6 +12,7 @@ from django.views.decorators.csrf import csrf_exempt
 from django.views.generic import View
 
 from rest_framework import exceptions, status
+from rest_framework.admissions import check_target_admission
 from rest_framework.compat import split_header_value
 from rest_framework.request import Request
 from rest_framework.response import Response
@@ -353,6 +354,23 @@ class APIView(View):
                     message=getattr(permission, 'message', None),
                     code=getattr(permission, 'code', None)
                 )
+
+    def check_target_permissions(self, request, targets):
+        """
+        Check every concrete row/nested target for a bulk or custom write.
+
+        Unlike `check_object_permissions()`, this collects target locations
+        and raises `AdmissionDenied` so the failing list row can be located.
+        """
+        return check_target_admission(
+            targets,
+            request=request,
+            view=self,
+            permissions=self.get_permissions(),
+        )
+
+    check_objects_permissions = check_target_permissions
+    admit_targets = check_target_permissions
 
     def check_throttles(self, request):
         """

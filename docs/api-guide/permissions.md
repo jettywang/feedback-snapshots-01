@@ -69,6 +69,51 @@ Often when you're using object level permissions you'll also want to [filter the
 
 Because the `get_object()` method is not called, object level permissions from the `has_object_permission()` method **are not applied** when creating objects. In order to restrict object creation you need to implement the permission check either in your Serializer class or override the `perform_create()` method of your ViewSet class.
 
+#### Bulk and nested updates
+
+A custom `ListSerializer.update()` can write many rows and nested objects, so the root object check from `get_object()` is not sufficient. DRF provides an optional target admission helper that continues to use your existing `has_object_permission()` implementations.
+
+Set `admission_permission_classes`, or pass the view in the serializer context so `view.get_permissions()` is used, and return every concrete object that may be written from `get_write_targets()`:
+
+    from rest_framework import serializers
+
+    class UpdateListSerializer(serializers.TargetAdmissionListSerializer):
+        admission_permission_classes = [CanEditObject]
+
+        def get_write_targets(self):
+            return [
+                (index, self.instance[index])
+                for index, attrs in enumerate(self.validated_data)
+            ]
+
+        def update(self, instance, validated_data):
+            return [
+                self.child.update(obj, attrs)
+                for obj, attrs in zip(instance, validated_data)
+            ]
+
+`TargetAdmissionListSerializer.save()` checks those targets immediately before saving and wraps the write in `transaction.atomic()`. If a permission changes after `is_valid()` but before `save()`, admission fails before any row is written. The raised `rest_framework.admissions.AdmissionDenied` contains the request location, object index, primary key and the original permission message/code.
+
+For custom nested updates, report the parent and each child with a JSON-like location and recheck the concrete object immediately before its write:
+
+    targets = [
+        serializers.AdmissionTarget(parent, location='parent'),
+        serializers.AdmissionTarget(child, location=('children', index)),
+    ]
+    child_list_serializer.admit_targets(targets)
+
+    with child_list_serializer.admission_boundary():
+        parent.save()
+        for index, child in enumerate(children):
+            child_list_serializer.check_write_target(
+                child, location=('children', index)
+            )
+            child.save()
+
+The preflight `admit_targets()` call explains all denied targets before writing. The point-of-write `check_write_target()` call catches a policy revocation between preflight and the write. If that check or a later save raises, `admission_boundary()` rolls back the complete bulk/nested write.
+
+Generic views also expose `check_target_permissions(request, targets)`, which uses the view's existing permission classes and returns the same location-aware `AdmissionDenied` error.
+
 ## Setting the permission policy
 
 The default permission policy may be set globally, using the `DEFAULT_PERMISSION_CLASSES` setting.  For example.

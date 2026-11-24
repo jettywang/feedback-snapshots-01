@@ -150,3 +150,23 @@ class CustomManagerModel(RESTFrameworkModel):
                                    help_text='OneToOneTarget',
                                    verbose_name='OneToOneTarget',
                                    on_delete=models.CASCADE)
+
+
+# Target-level admission / nested bulk update fixtures
+class TargetAdmissionLibrary(RESTFrameworkModel):
+    key = models.SlugField(max_length=100, unique=True)
+    name = models.CharField(max_length=200)
+
+
+class TargetAdmissionCommit(RESTFrameworkModel):
+    library = models.ForeignKey(
+        TargetAdmissionLibrary,
+        related_name='commits',
+        on_delete=models.CASCADE,
+    )
+    sha = models.CharField(max_length=40)
+    message = models.CharField(max_length=200)
+    locked = models.BooleanField(default=False)
+
+    class Meta:
+        unique_together = (('library', 'sha'),)

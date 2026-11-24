@@ -27,6 +27,10 @@ from django.utils import timezone
 from django.utils.functional import cached_property
 from django.utils.translation import gettext_lazy as _
 
+from rest_framework.admissions import (  # NOQA
+    AdmissionDenied, AdmissionTarget, TargetAdmissionMixin,
+    check_target_admission,
+)
 from rest_framework.compat import postgres_fields
 from rest_framework.deprecation import RemovedInDRF320Warning
 from rest_framework.exceptions import ErrorDetail, ValidationError
@@ -599,7 +603,7 @@ class Serializer(BaseSerializer, metaclass=SerializerMetaclass):
 # There's some replication of `ListField` here,
 # but that's probably better than obfuscating the call hierarchy.
 
-class ListSerializer(BaseSerializer):
+class ListSerializer(TargetAdmissionMixin, BaseSerializer):
     child = None
     many = True
 
@@ -772,6 +776,21 @@ class ListSerializer(BaseSerializer):
             {**attrs, **kwargs} for attrs in self.validated_data
         ]
 
+        self._admission_confirmation = None
+        admission_enabled = self.admission_is_enabled()
+
+        if admission_enabled and self.admission_atomic:
+            with self.admission_boundary():
+                if self.admission_preflight:
+                    self._admission_confirmation = self.admit_targets()
+                return self._save_validated_data(validated_data)
+
+        if admission_enabled and self.admission_preflight:
+            self._admission_confirmation = self.admit_targets()
+
+        return self._save_validated_data(validated_data)
+
+    def _save_validated_data(self, validated_data):
         if self.instance is not None:
             self.instance = self.update(self.instance, validated_data)
             assert self.instance is not None, (
@@ -829,6 +848,32 @@ class ListSerializer(BaseSerializer):
         if isinstance(ret, dict):
             return ReturnDict(ret, serializer=self)
         return ReturnList(ret, serializer=self)
+
+
+class TargetAdmissionListSerializer(ListSerializer):
+    """
+    Optional bulk list serializer with target checks and an atomic save.
+
+    Configure existing object-level permission classes through the serializer
+    context/view or ``admission_permission_classes`` and override
+    ``get_write_targets()`` to return every concrete row and nested target.
+    Custom ``update()`` implementations can additionally call
+    ``check_write_target()`` immediately before each write.
+    """
+
+    admission_enabled = True
+    admission_atomic = True
+
+
+# Compatibility-oriented aliases for the optional admission convention.
+ObjectAdmissionListSerializer = TargetAdmissionListSerializer
+AdmissionListSerializer = TargetAdmissionListSerializer
+ObjectPermissionListSerializer = TargetAdmissionListSerializer
+PermissionedListSerializer = TargetAdmissionListSerializer
+ObjectAdmissionMixin = TargetAdmissionMixin
+TargetPermissionMixin = TargetAdmissionMixin
+ObjectPermissionMixin = TargetAdmissionMixin
+admit_targets = check_target_admission
 
 
 # ModelSerializer & HyperlinkedModelSerializer

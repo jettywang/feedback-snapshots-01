@@ -4,6 +4,15 @@ Provides a set of pluggable permission policies.
 from django.http import Http404
 
 from rest_framework import exceptions
+from rest_framework.admissions import (  # NOQA
+    AdmissionConfirmation,
+    AdmissionDenied,
+    AdmissionTarget,
+    TargetAdmissionMixin,
+    admission_transaction,
+    check_object_permissions,
+    check_target_admission,
+)
 
 SAFE_METHODS = ('GET', 'HEAD', 'OPTIONS')
 
@@ -312,3 +321,9 @@ class DjangoObjectPermissions(DjangoModelPermissions):
             return False
 
         return True
+
+
+TargetAdmissionDenied = AdmissionDenied
+ObjectAdmissionDenied = AdmissionDenied
+ObjectAdmissionTarget = AdmissionTarget
+admit_targets = check_target_admission
