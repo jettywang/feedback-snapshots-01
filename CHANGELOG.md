@@ -8,6 +8,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ### Added
 
+- Documentation visibility for the `info` extension. `schema.info` now also exports `included_in?`
+  value sets and examples declared via `config.info_examples`. The new
+  `schema.info(visibility: :public)` export redacts internal-only keys, enum members and error
+  examples according to the `config.info_visibility` policy, so constraint docs can be shared with
+  external parties. Validation is not affected by the documentation policy, and custom predicate
+  arguments are never exported.
+
+    ```ruby
+    Dry::Schema.JSON do
+      configure do |config|
+        config.info_examples = {"email" => ["jane@doe.org", {value: "nope", valid: false}]}
+        config.info_visibility = {keys: %w[audit_token], values: {"state" => %w[blocked]}}
+      end
+
+      required(:email).filled(:string)
+      required(:state).filled(:string, included_in?: %w[active blocked])
+      required(:audit_token).filled(:string)
+    end
+    ```
+
 ### Changed
 
 ### Deprecated
