@@ -114,6 +114,45 @@ if __name__ == "__main__":
 You can find a complete example of turning a CloudEvent into a HTTP request
 [in the samples' directory](samples/http-json-cloudevents/json_sample_server.py).
 
+## Approving CloudEvent content
+
+A service can approve an event's content once, then hand the approval to an
+asynchronous worker that picks the protocol binding and content mode later. The
+approval covers every attribute, every extension present on the event and the
+event data, and is independent of the transport.
+
+```python
+from cloudevents.core.approval import EventApproval, approve
+from cloudevents.core.bindings import http, kafka
+
+# Approval side: decide and record the approved content.
+approval = approve(event)  # pass key=b"..." for an HMAC approval
+job = {"event": event, "approval": approval.to_dict()}
+
+# Worker side: choose a binding after approval; the approval still holds.
+approval = EventApproval.from_dict(job["approval"])  # key=b"..." if keyed
+message = kafka.to_binary_event(event, approval=approval)
+
+# Changing the approved content is rejected before anything is published.
+event.get_data()["total"] = 0
+http.to_structured_event(event, approval=approval)
+# ApprovalMismatchError: [phase=pre_publish] ... content differs at: data.total
+```
+
+A compact token (`to_dict()`) carries only the digest, so it cannot list the
+changed paths; keep the in-process `EventApproval` from `approve()` if you want
+path-level diagnostics such as `data.total`. Tokens are transport-neutral, so a
+worker can comfortably send the same approval through an HTTP binary request and
+a Kafka structured message without re-approving.
+
+Every binding accepts `approval=` on `to_binary`, `to_structured` and their
+`*_event` convenience wrappers. Failures always carry a `phase` marker:
+`ApprovalPhase.APPROVE` while approving, `ApprovalPhase.VERIFY` for explicit
+`verify()` calls and `ApprovalPhase.PRE_PUBLISH` when a binding rejects the
+event just before serialisation. Switching bindings or content modes does not
+invalidate the approval; changing the data, a standard attribute or an
+extension does.
+
 ## SDK versioning
 
 The goal of this package is to provide support for all released versions of CloudEvents,

@@ -25,6 +25,7 @@ from typing import Any, Final
 
 from dateutil.parser import isoparse
 
+from cloudevents.core.approval import EventApproval, require_approval
 from cloudevents.core.base import BaseCloudEvent, EventFactory
 from cloudevents.core.bindings.common import (
     DATACONTENTTYPE_ATTR,
@@ -59,7 +60,11 @@ class RabbitMQMessage:
     body: bytes
 
 
-def to_binary(event: BaseCloudEvent, event_format: Format) -> RabbitMQMessage:
+def to_binary(
+    event: BaseCloudEvent,
+    event_format: Format,
+    approval: EventApproval | None = None,
+) -> RabbitMQMessage:
     """
     Convert a CloudEvent to RabbitMQ binary content mode.
 
@@ -83,8 +88,13 @@ def to_binary(event: BaseCloudEvent, event_format: Format) -> RabbitMQMessage:
 
     :param event: The CloudEvent to convert
     :param event_format: Format implementation for data serialization
+    :param approval: Optional content approval verified before serialization;
+        a mismatch raises :class:`ApprovalMismatchError` with
+        ``phase=pre_publish`` and no message is produced.
     :return: RabbitMQMessage with CloudEvent attributes as headers
     """
+    require_approval(event, approval)
+
     headers: dict[str, str] = {}
     content_type: str | None = None
     attributes = event.get_attributes()
@@ -175,7 +185,11 @@ def from_binary(
     return event_factory(attributes, data)
 
 
-def to_structured(event: BaseCloudEvent, event_format: Format) -> RabbitMQMessage:
+def to_structured(
+    event: BaseCloudEvent,
+    event_format: Format,
+    approval: EventApproval | None = None,
+) -> RabbitMQMessage:
     """
     Convert a CloudEvent to RabbitMQ structured content mode.
 
@@ -197,8 +211,11 @@ def to_structured(event: BaseCloudEvent, event_format: Format) -> RabbitMQMessag
 
     :param event: The CloudEvent to convert
     :param event_format: Format implementation for serialization
+    :param approval: Optional content approval verified before serialization
     :return: RabbitMQMessage with structured content in body
     """
+    require_approval(event, approval)
+
     content_type = event_format.get_content_type()
     headers: dict[str, str] = {}
     body = event_format.write(event)
@@ -290,6 +307,7 @@ def from_rabbitmq(
 def to_binary_event(
     event: BaseCloudEvent,
     event_format: Format | None = None,
+    approval: EventApproval | None = None,
 ) -> RabbitMQMessage:
     """
     Convenience wrapper for to_binary with JSON format as default.
@@ -306,11 +324,12 @@ def to_binary_event(
 
     :param event: The CloudEvent to convert
     :param event_format: Format implementation (defaults to JSONFormat)
+    :param approval: Optional content approval verified before serialization
     :return: RabbitMQMessage with CloudEvent attributes as headers
     """
     if event_format is None:
         event_format = JSONFormat()
-    return to_binary(event, event_format)
+    return to_binary(event, event_format, approval)
 
 
 def from_binary_event(
@@ -336,6 +355,7 @@ def from_binary_event(
 def to_structured_event(
     event: BaseCloudEvent,
     event_format: Format | None = None,
+    approval: EventApproval | None = None,
 ) -> RabbitMQMessage:
     """
     Convenience wrapper for to_structured with JSON format as default.
@@ -352,11 +372,12 @@ def to_structured_event(
 
     :param event: The CloudEvent to convert
     :param event_format: Format implementation (defaults to JSONFormat)
+    :param approval: Optional content approval verified before serialization
     :return: RabbitMQMessage with structured content in body
     """
     if event_format is None:
         event_format = JSONFormat()
-    return to_structured(event, event_format)
+    return to_structured(event, event_format, approval)
 
 
 def from_structured_event(

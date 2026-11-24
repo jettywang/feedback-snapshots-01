@@ -18,6 +18,7 @@ from typing import Any, Final
 
 from dateutil.parser import isoparse
 
+from cloudevents.core.approval import EventApproval, require_approval
 from cloudevents.core.base import BaseCloudEvent, EventFactory
 from cloudevents.core.bindings.common import get_event_factory_for_version
 from cloudevents.core.formats.base import Format
@@ -95,7 +96,11 @@ def _decode_amqp_value(attr_name: str, value: Any) -> Any:
     return value
 
 
-def to_binary(event: BaseCloudEvent, event_format: Format) -> AMQPMessage:
+def to_binary(
+    event: BaseCloudEvent,
+    event_format: Format,
+    approval: EventApproval | None = None,
+) -> AMQPMessage:
     """
     Convert a CloudEvent to AMQP binary content mode.
 
@@ -124,8 +129,13 @@ def to_binary(event: BaseCloudEvent, event_format: Format) -> AMQPMessage:
 
     :param event: The CloudEvent to convert
     :param event_format: Format implementation for data serialization
+    :param approval: Optional content approval verified before serialization;
+        a mismatch raises :class:`ApprovalMismatchError` with
+        ``phase=pre_publish`` and no message is produced.
     :return: AMQPMessage with CloudEvent attributes as application properties
     """
+    require_approval(event, approval)
+
     properties: dict[str, Any] = {}
     application_properties: dict[str, Any] = {}
     attributes = event.get_attributes()
@@ -218,7 +228,11 @@ def from_binary(
     return event_factory(attributes, data)
 
 
-def to_structured(event: BaseCloudEvent, event_format: Format) -> AMQPMessage:
+def to_structured(
+    event: BaseCloudEvent,
+    event_format: Format,
+    approval: EventApproval | None = None,
+) -> AMQPMessage:
     """
     Convert a CloudEvent to AMQP structured content mode.
 
@@ -241,8 +255,11 @@ def to_structured(event: BaseCloudEvent, event_format: Format) -> AMQPMessage:
 
     :param event: The CloudEvent to convert
     :param event_format: Format implementation for serialization
+    :param approval: Optional content approval verified before serialization
     :return: AMQPMessage with structured content in application-data
     """
+    require_approval(event, approval)
+
     content_type = event_format.get_content_type()
 
     properties = {CONTENT_TYPE_PROPERTY: content_type}
@@ -352,6 +369,7 @@ def from_amqp(
 def to_binary_event(
     event: BaseCloudEvent,
     event_format: Format | None = None,
+    approval: EventApproval | None = None,
 ) -> AMQPMessage:
     """
     Convenience wrapper for to_binary with JSON format as default.
@@ -368,11 +386,12 @@ def to_binary_event(
 
     :param event: The CloudEvent to convert
     :param event_format: Format implementation (defaults to JSONFormat)
+    :param approval: Optional content approval verified before serialization
     :return: AMQPMessage with CloudEvent attributes as application properties
     """
     if event_format is None:
         event_format = JSONFormat()
-    return to_binary(event, event_format)
+    return to_binary(event, event_format, approval)
 
 
 def from_binary_event(
@@ -398,6 +417,7 @@ def from_binary_event(
 def to_structured_event(
     event: BaseCloudEvent,
     event_format: Format | None = None,
+    approval: EventApproval | None = None,
 ) -> AMQPMessage:
     """
     Convenience wrapper for to_structured with JSON format as default.
@@ -414,11 +434,12 @@ def to_structured_event(
 
     :param event: The CloudEvent to convert
     :param event_format: Format implementation (defaults to JSONFormat)
+    :param approval: Optional content approval verified before serialization
     :return: AMQPMessage with structured content in application-data
     """
     if event_format is None:
         event_format = JSONFormat()
-    return to_structured(event, event_format)
+    return to_structured(event, event_format, approval)
 
 
 def from_structured_event(

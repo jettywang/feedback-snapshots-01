@@ -6,6 +6,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Added transport-independent CloudEvent content approvals
+  (`cloudevents.core.approval`). `approve(event)` records a digest over the
+  standard attributes, approved extensions and data; any protocol binding's
+  `to_binary`/`to_structured` (and `*_event` wrappers) accepts an
+  optional `approval=` and rejects modified content before serialisation. All
+  approval failures carry a phase marker (`approve`, `verify`, `pre_publish`)
+  via `ApprovalError.phase`, and approvals can be shared across processes with
+  `EventApproval.to_dict()`/`from_dict()`, optionally HMAC-protected with a
+  shared key.
+
 ## [2.2.0]
 
 ### Changed

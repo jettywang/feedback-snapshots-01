@@ -18,6 +18,7 @@ from typing import Any, Callable, Final
 
 from dateutil.parser import isoparse
 
+from cloudevents.core.approval import EventApproval, require_approval
 from cloudevents.core.base import BaseCloudEvent, EventFactory
 from cloudevents.core.bindings.common import (
     CONTENT_TYPE_HEADER,
@@ -71,6 +72,7 @@ def to_binary(
     event: BaseCloudEvent,
     event_format: Format,
     key_mapper: KeyMapper | None = None,
+    approval: EventApproval | None = None,
 ) -> KafkaMessage:
     """
     Convert a CloudEvent to Kafka binary content mode.
@@ -96,8 +98,13 @@ def to_binary(
     :param event: The CloudEvent to convert
     :param event_format: Format implementation for data serialization
     :param key_mapper: Optional function to extract message key from event (defaults to partitionkey attribute)
+    :param approval: Optional content approval verified before serialization;
+        a mismatch raises :class:`ApprovalMismatchError` with
+        ``phase=pre_publish`` and no message is produced.
     :return: KafkaMessage with ce_-prefixed headers and event data as value
     """
+    require_approval(event, approval)
+
     headers: dict[str, bytes] = {}
     attributes = event.get_attributes()
 
@@ -201,6 +208,7 @@ def to_structured(
     event: BaseCloudEvent,
     event_format: Format,
     key_mapper: KeyMapper | None = None,
+    approval: EventApproval | None = None,
 ) -> KafkaMessage:
     """
     Convert a CloudEvent to Kafka structured content mode.
@@ -225,8 +233,11 @@ def to_structured(
     :param event: The CloudEvent to convert
     :param event_format: Format implementation for serialization
     :param key_mapper: Optional function to extract message key from event (defaults to partitionkey attribute)
+    :param approval: Optional content approval verified before serialization
     :return: KafkaMessage with structured content in value
     """
+    require_approval(event, approval)
+
     content_type = event_format.get_content_type()
 
     headers = {CONTENT_TYPE_HEADER: content_type.encode("utf-8")}
@@ -349,6 +360,7 @@ def to_binary_event(
     event: BaseCloudEvent,
     event_format: Format | None = None,
     key_mapper: KeyMapper | None = None,
+    approval: EventApproval | None = None,
 ) -> KafkaMessage:
     """
     Convenience wrapper for to_binary with JSON format and CloudEvent as defaults.
@@ -366,11 +378,12 @@ def to_binary_event(
     :param event: The CloudEvent to convert
     :param event_format: Format implementation (defaults to JSONFormat)
     :param key_mapper: Optional function to extract message key from event
+    :param approval: Optional content approval verified before serialization
     :return: KafkaMessage with ce_-prefixed headers
     """
     if event_format is None:
         event_format = JSONFormat()
-    return to_binary(event, event_format, key_mapper)
+    return to_binary(event, event_format, key_mapper, approval)
 
 
 def from_binary_event(
@@ -399,6 +412,7 @@ def to_structured_event(
     event: BaseCloudEvent,
     event_format: Format | None = None,
     key_mapper: KeyMapper | None = None,
+    approval: EventApproval | None = None,
 ) -> KafkaMessage:
     """
     Convenience wrapper for to_structured with JSON format as default.
@@ -416,11 +430,12 @@ def to_structured_event(
     :param event: The CloudEvent to convert
     :param event_format: Format implementation (defaults to JSONFormat)
     :param key_mapper: Optional function to extract message key from event
+    :param approval: Optional content approval verified before serialization
     :return: KafkaMessage with structured content
     """
     if event_format is None:
         event_format = JSONFormat()
-    return to_structured(event, event_format, key_mapper)
+    return to_structured(event, event_format, key_mapper, approval)
 
 
 def from_structured_event(

@@ -19,6 +19,7 @@ from urllib.parse import quote, unquote
 
 from dateutil.parser import isoparse
 
+from cloudevents.core.approval import EventApproval, require_approval
 from cloudevents.core.base import BaseCloudEvent, EventFactory
 from cloudevents.core.bindings.common import (
     CONTENT_TYPE_HEADER,
@@ -92,7 +93,11 @@ class HTTPMessage:
     body: bytes
 
 
-def to_binary(event: BaseCloudEvent, event_format: Format) -> HTTPMessage:
+def to_binary(
+    event: BaseCloudEvent,
+    event_format: Format,
+    approval: EventApproval | None = None,
+) -> HTTPMessage:
     """
     Convert a CloudEvent to HTTP binary content mode.
 
@@ -114,8 +119,13 @@ def to_binary(event: BaseCloudEvent, event_format: Format) -> HTTPMessage:
 
     :param event: The CloudEvent to convert
     :param event_format: Format implementation for data serialization
+    :param approval: Optional content approval verified before serialization;
+        a mismatch raises :class:`ApprovalMismatchError` with
+        ``phase=pre_publish`` and no message is produced.
     :return: HTTPMessage with ce-prefixed headers and event data as body
     """
+    require_approval(event, approval)
+
     headers: dict[str, str] = {}
     attributes = event.get_attributes()
 
@@ -189,7 +199,11 @@ def from_binary(
     return event_factory(attributes, data)
 
 
-def to_structured(event: BaseCloudEvent, event_format: Format) -> HTTPMessage:
+def to_structured(
+    event: BaseCloudEvent,
+    event_format: Format,
+    approval: EventApproval | None = None,
+) -> HTTPMessage:
     """
     Convert a CloudEvent to HTTP structured content mode.
 
@@ -211,8 +225,11 @@ def to_structured(event: BaseCloudEvent, event_format: Format) -> HTTPMessage:
 
     :param event: The CloudEvent to convert
     :param event_format: Format implementation for serialization
+    :param approval: Optional content approval verified before serialization
     :return: HTTPMessage with structured content in body
     """
+    require_approval(event, approval)
+
     content_type = event_format.get_content_type()
 
     headers = {CONTENT_TYPE_HEADER: content_type}
@@ -309,6 +326,7 @@ def from_http(
 def to_binary_event(
     event: BaseCloudEvent,
     event_format: Format | None = None,
+    approval: EventApproval | None = None,
 ) -> HTTPMessage:
     """
     Convenience wrapper for to_binary with JSON format as default.
@@ -325,11 +343,12 @@ def to_binary_event(
 
     :param event: The CloudEvent to convert
     :param event_format: Format implementation (defaults to JSONFormat)
+    :param approval: Optional content approval verified before serialization
     :return: HTTPMessage with ce-prefixed headers
     """
     if event_format is None:
         event_format = JSONFormat()
-    return to_binary(event, event_format)
+    return to_binary(event, event_format, approval)
 
 
 def from_binary_event(
@@ -357,6 +376,7 @@ def from_binary_event(
 def to_structured_event(
     event: BaseCloudEvent,
     event_format: Format | None = None,
+    approval: EventApproval | None = None,
 ) -> HTTPMessage:
     """
     Convenience wrapper for to_structured with JSON format as default.
@@ -373,11 +393,12 @@ def to_structured_event(
 
     :param event: The CloudEvent to convert
     :param event_format: Format implementation (defaults to JSONFormat)
+    :param approval: Optional content approval verified before serialization
     :return: HTTPMessage with structured content
     """
     if event_format is None:
         event_format = JSONFormat()
-    return to_structured(event, event_format)
+    return to_structured(event, event_format, approval)
 
 
 def from_structured_event(
