@@ -1,3 +1,8 @@
+## Unreleased
+
+- **Breaking:** non-idempotent requests (`POST`, `PATCH`) are no longer retried, and no longer trigger a connection reload, after a connection error. When the connection fails before a response is received the server may already have applied the change, so re-sending it could apply it twice. The transport now raises `Elastic::Transport::Transport::UnknownResultError` (a subclass of `Transport::Error`) carrying the HTTP method, path and the connection (node) that was selected, and logs them so the failure can be correlated. Rescue `UnknownResultError` and reconcile the outcome (for example by reading the resource back) before deciding whether to send the request again. Idempotent methods (`GET`, `HEAD`, `OPTIONS`, `PUT`, `DELETE`) keep the existing retry behaviour, and HTTP `5xx` responses still raise their `ServerError` subclass.
+  - Opt back in to retrying a specific non-idempotent request by passing `retry_non_idempotent: true` to `Transport::Base#perform_request`, or set it globally with the `Client` `:retry_non_idempotent` option.
+
 ## 8.6.0
 
 - **Breaking:** fixes `ca_fingerprint` so it secures the connections used for requests. The certificate matching the fingerprint is fetched from the server's chain and used as the only trusted certificate on every connection, with chain and expiry verification left on. Host names aren't checked (a pinned intermediate can't be used on JRuby, and the certificate is fetched without a proxy), so a cluster reached by a name or IP that isn't in its certificate works (Faraday 1 and Manticore still check them). Previously the fingerprint was checked on a separate socket and matched any certificate the server sent, without checking that the server's certificate was signed by it.

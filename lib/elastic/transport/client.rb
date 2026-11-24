@@ -85,6 +85,10 @@ module Elastic
       #
       # @option arguments [Boolean,Number] :retry_on_failure   Retry X times when request fails before raising an
       #                                                        exception (false by default)
+      # @option arguments [Boolean] :retry_non_idempotent Retry non-idempotent requests (POST, PATCH) after a
+      #                                                   connection error. False by default: such a request raises
+      #                                                   an {Transport::UnknownResultError} so the caller can verify
+      #                                                   the outcome instead of risking a duplicate change.
       # @option arguments [Number] :delay_on_retry  Delay in milliseconds between each retry (0 by default)
       #
       # @option arguments Array<Number> :retry_on_status Retry when specific status codes are returned

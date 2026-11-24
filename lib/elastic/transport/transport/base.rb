@@ -32,6 +32,10 @@ module Elastic
         DEFAULT_SERIALIZER_CLASS = Serializer::MultiJson
         SANITIZED_PASSWORD       = '*' * (rand(14) + 1)
 
+        # HTTP methods that can safely be sent again after a connection error,
+        # because repeating them has the same effect as sending them once.
+        IDEMPOTENT_METHODS = %i[get head options put delete].freeze
+
         attr_reader   :hosts, :options, :connections, :counter, :last_request_at, :protocol
         attr_accessor :serializer, :sniffer, :logger, :tracer,
                       :reload_connections, :reload_after,
@@ -285,6 +289,7 @@ module Elastic
           reload_on_failure = opts.fetch(:reload_on_failure, @options[:reload_on_failure])
           delay_on_retry = opts.fetch(:delay_on_retry, @options[:delay_on_retry])
           max_retries = max_retries(opts) || max_retries(options)
+          retry_non_idempotent = opts.fetch(:retry_non_idempotent, @options[:retry_non_idempotent])
           params = params.clone
           # Transforms ignore status codes to Integer
           ignore = Array(params.delete(:ignore)).compact.map(&:to_i)
@@ -322,6 +327,10 @@ module Elastic
             log_error "[#{e.class}] #{e.message} #{connection.host.inspect}"
 
             connection.dead!
+
+            unless retryable?(method, retry_non_idempotent)
+              raise_unknown_result_error(e, method, path, connection, start)
+            end
 
             if reload_on_failure && tries < connections.all.size
               log_warn "[#{e.class}] Reloading connections (attempt #{tries} of #{connections.all.size})"
@@ -407,6 +416,40 @@ module Elastic
 
         def max_retries(opts)
           opts[:retry_on_failure] == true ? DEFAULT_MAX_RETRIES : opts[:retry_on_failure]
+        end
+
+        # Whether a failed request may be sent again after a connection error.
+        # Idempotent methods are always safe to repeat; non-idempotent methods
+        # (POST, PATCH) are only retried when the caller explicitly opts in with
+        # the `:retry_non_idempotent` option.
+        #
+        # @api private
+        #
+        def retryable?(method, retry_non_idempotent)
+          IDEMPOTENT_METHODS.include?(method.to_s.downcase.to_sym) || !!retry_non_idempotent
+        end
+
+        # Builds and raises the error for a non-idempotent request whose result
+        # is unknown because the connection failed before a response came back.
+        # The message carries the method, path and the previously selected node
+        # so the failure can be correlated in the logs and reconciled by the caller.
+        #
+        # @api private
+        #
+        def raise_unknown_result_error(cause, method, path, connection, start)
+          duration = Time.now - start
+          host = connection.host.inspect
+          message = "[#{cause.class}] #{method.to_s.upcase} #{path} to #{host} failed after " \
+                    "#{sprintf('%.3fs', duration)} with no response; the request may have been " \
+                    'applied. Verify the result before retrying.'
+          log_fatal message
+          capture_otel_error_attributes(message)
+          raise UnknownResultError.new(
+            message,
+            method: method.to_s.downcase.to_sym,
+            path: path,
+            connection: connection
+          )
         end
 
         def compress_request(body, headers)

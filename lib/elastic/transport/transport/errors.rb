@@ -24,6 +24,26 @@ module Elastic
       #
       class Error < StandardError; end
 
+      # Raised when a non-idempotent request (for example a state-changing POST)
+      # fails with a connection error before any response was received. The server
+      # may have applied the change, so retrying would risk applying it twice. The
+      # caller must verify the outcome (for example by reading the resource back)
+      # instead of having the transport re-send the request.
+      #
+      class UnknownResultError < Error
+        # @return [Symbol] The HTTP method of the request whose result is unknown.
+        # @return [String] The request path.
+        # @return [Object] The connection (node) the request was sent to.
+        attr_reader :method, :path, :connection
+
+        def initialize(message = nil, method: nil, path: nil, connection: nil)
+          super(message)
+          @method = method
+          @path = path
+          @connection = connection
+        end
+      end
+
       # Reloading connections timeout (1 sec by default)
       #
       class SnifferTimeoutError < Timeout::Error; end
