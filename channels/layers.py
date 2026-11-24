@@ -234,10 +234,71 @@ class BaseChannelLayer:
         return self.require_valid_group_name(group_name)
 
 
+class PurgedValue:
+    """
+    Marker placed in a queued message (and any snapshot of it) once the field
+    it stands in for has passed its retention period. The original value is
+    gone; only the fact that a field was purged remains.
+    """
+
+    _instance = None
+
+    def __new__(cls):
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+        return cls._instance
+
+    def __repr__(self):
+        return "<purged>"
+
+    def __copy__(self):
+        return self
+
+    def __deepcopy__(self, memo):
+        return self
+
+
+# Singleton marker for fields whose value has been removed by retention rules.
+PURGED = PurgedValue()
+
+
+class _QueuedMessage:
+    """
+    A message waiting in a channel queue together with its bookkeeping:
+
+    * ``expires_at`` - when the whole event leaves the layer,
+    * ``enqueued_at`` - reference time for per-field retention periods,
+    * ``retained`` - field names still holding their original values,
+    * ``purged_fields`` - field names whose values have been removed,
+    * ``message`` - the (possibly partially purged) delivered payload.
+    """
+
+    __slots__ = (
+        "expires_at",
+        "enqueued_at",
+        "retained",
+        "purged_fields",
+        "message",
+    )
+
+    def __init__(self, expires_at, enqueued_at, retention, message):
+        self.expires_at = expires_at
+        self.enqueued_at = enqueued_at
+        self.message = message
+        self.retained = [
+            field for field in retention if field in message
+        ]
+        self.purged_fields = []
+
+
 class InMemoryChannelLayer(BaseChannelLayer):
     """
     In-memory channel layer implementation
     """
+
+    # Marker exposed so applications (and tests) can recognise values that
+    # were removed by a field retention rule.
+    PURGED = PURGED
 
     def __init__(
         self,
@@ -245,6 +306,9 @@ class InMemoryChannelLayer(BaseChannelLayer):
         group_expiry=86400,
         capacity=100,
         channel_capacity=None,
+        retention=None,
+        event_id_field="event_id",
+        time_func=None,
         **kwargs,
     ):
         super().__init__(
@@ -253,9 +317,43 @@ class InMemoryChannelLayer(BaseChannelLayer):
             channel_capacity=channel_capacity,
             **kwargs,
         )
+        # Optional per-field retention periods. A field may be kept for less
+        # time than the event itself; the event's ``expiry`` always wins for
+        # the message as a whole.
+        self.retention = self._compile_retention(retention or {})
+        self.event_id_field = event_id_field
+        # Injectable clock so expiry handling can be driven deterministically.
+        self.time_func = time_func or time.time
         self.channels = {}
         self.groups = {}
         self.group_expiry = group_expiry
+
+    def _compile_retention(self, retention):
+        if not isinstance(retention, dict):
+            raise TypeError("retention must be a dict mapping field names to TTLs")
+        compiled = {}
+        for field, ttl in retention.items():
+            if not isinstance(field, str):
+                raise TypeError("retention field names must be strings")
+            if not isinstance(ttl, (int, float)) or isinstance(ttl, bool):
+                raise TypeError("retention TTLs must be int or float seconds")
+            if ttl < 0:
+                raise ValueError("retention TTLs must not be negative")
+            if ttl > self.expiry:
+                raise ValueError(
+                    "retention TTL for %r (%s) cannot exceed event expiry (%s)"
+                    % (field, ttl, self.expiry)
+                )
+            # The ASGI ``type`` field drives dispatch and must always survive.
+            if field == "type":
+                raise ValueError(
+                    "the 'type' field cannot have a retention rule"
+                )
+            compiled[field] = ttl
+        return compiled
+
+    def now(self):
+        return self.time_func()
 
     # Channel layer API
 
@@ -277,7 +375,14 @@ class InMemoryChannelLayer(BaseChannelLayer):
         )
         # Add message
         try:
-            queue.put_nowait((time.time() + self.expiry, deepcopy(message)))
+            queue.put_nowait(
+                _QueuedMessage(
+                    expires_at=self.now() + self.expiry,
+                    enqueued_at=self.now(),
+                    retention=self.retention,
+                    message=deepcopy(message),
+                )
+            )
         except asyncio.queues.QueueFull:
             raise ChannelFull(channel)
 
@@ -296,12 +401,12 @@ class InMemoryChannelLayer(BaseChannelLayer):
 
         # Do a plain direct receive
         try:
-            _, message = await queue.get()
+            queued = await queue.get()
         finally:
             if queue.empty():
                 self.channels.pop(channel, None)
 
-        return message
+        return queued.message
 
     async def new_channel(self, prefix="specific."):
         """
@@ -315,15 +420,33 @@ class InMemoryChannelLayer(BaseChannelLayer):
 
     # Expire cleanup
 
+    def _purge_expired_fields(self, queued, now):
+        """
+        Removes values whose per-field retention period has elapsed from a
+        single queued message. Business identity and ordering are untouched;
+        only the configured field values are replaced by the PURGED marker.
+        """
+        for field in list(queued.retained):
+            if now >= queued.enqueued_at + self.retention[field]:
+                queued.message[field] = PURGED
+                queued.retained.remove(field)
+                queued.purged_fields.append(field)
+
     def _clean_expired(self):
         """
         Goes through all messages and groups and removes those that are expired.
+        Field-level retention is applied before whole-event expiry, so any
+        message still queued has its overdue field values purged as well.
         Any channel with an expired message is removed from all groups.
         """
+        now = self.now()
         # Channel cleanup
         for channel, queue in list(self.channels.items()):
-            # See if it's expired
-            while not queue.empty() and queue._queue[0][0] < time.time():
+            # Field-level retention applies to every event still waiting.
+            for queued in queue._queue:
+                self._purge_expired_fields(queued, now)
+            # See if the whole event is expired
+            while not queue.empty() and queue._queue[0].expires_at < now:
                 queue.get_nowait()
                 # Any removal prompts group discard
                 self._remove_from_groups(channel)
@@ -332,7 +455,7 @@ class InMemoryChannelLayer(BaseChannelLayer):
                     self.channels.pop(channel, None)
 
         # Group Expiration
-        timeout = int(time.time()) - self.group_expiry
+        timeout = int(now) - self.group_expiry
         for channels in self.groups.values():
             for name, timestamp in list(channels.items()):
                 # If join time is older than group_expiry
@@ -340,6 +463,68 @@ class InMemoryChannelLayer(BaseChannelLayer):
                 if timestamp and timestamp < timeout:
                     # Delete from group
                     channels.pop(name, None)
+
+    # Retention introspection
+
+    def _channel_status(self, channel, queue):
+        events = []
+        for position, queued in enumerate(queue._queue):
+            message = queued.message
+            events.append(
+                {
+                    "position": position,
+                    "event_id": message.get(self.event_id_field),
+                    "enqueued_at": queued.enqueued_at,
+                    "expires_at": queued.expires_at,
+                    "retained_fields": list(queued.retained),
+                    "purged_fields": list(queued.purged_fields),
+                }
+            )
+        return {
+            "channel": channel,
+            "queued": len(events),
+            "capacity": queue.maxsize,
+            "events": events,
+        }
+
+    def retention_status(self, channel=None):
+        """
+        Returns a checkable snapshot of what the layer still retains.
+
+        With a channel name, only that channel's status is returned (or
+        ``None`` if it has no queued events). Without one, every channel is
+        included. Retention is swept first, so purged fields reflect the
+        current clock rather than the last send or receive.
+        """
+        self._clean_expired()
+        if channel is not None:
+            queue = self.channels.get(channel)
+            if queue is None:
+                return None
+            return self._channel_status(channel, queue)
+        return {
+            name: self._channel_status(name, queue)
+            for name, queue in self.channels.items()
+        }
+
+    def diagnostic_snapshot(self, channel=None):
+        """
+        Returns deep copies of the queued messages for diagnostics.
+
+        The same retention sweep used by the waiting queue runs first, so
+        overdue field values show up as the PURGED marker here too: nothing
+        that has outlived its retention period can leak through a snapshot.
+        """
+        self._clean_expired()
+        if channel is not None:
+            queue = self.channels.get(channel)
+            if queue is None:
+                return []
+            return [deepcopy(queued.message) for queued in queue._queue]
+        return {
+            name: [deepcopy(queued.message) for queued in queue._queue]
+            for name, queue in self.channels.items()
+        }
 
     # Flush extension
 
@@ -369,7 +554,7 @@ class InMemoryChannelLayer(BaseChannelLayer):
         self.require_valid_channel_name(channel)
         # Add to group dict
         self.groups.setdefault(group, {})
-        self.groups[group][channel] = time.time()
+        self.groups[group][channel] = self.now()
 
     async def group_discard(self, group, channel):
         # Both should be text and valid

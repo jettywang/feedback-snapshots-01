@@ -1,6 +1,19 @@
 Full release notes, with more details and upgrade information, are available at:
 https://channels.readthedocs.io/en/latest/releases
 
+4.4.0 (2026-11-25)
+------------------
+
+* Added optional per-field retention rules to ``InMemoryChannelLayer``:
+  overdue field values are replaced by the ``channels.layers.PURGED`` marker
+  while the event keeps its business identifier, type and queue position.
+
+* Added ``retention_status()`` and ``diagnostic_snapshot()`` for a checkable
+  view of what the in-memory layer still retains.
+
+* Added an injectable ``time_func`` clock to the in-memory layer for
+  deterministic expiry testing.
+
 4.3.2 (2025-11-20)
 ------------------
 

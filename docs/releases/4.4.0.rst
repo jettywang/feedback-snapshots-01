@@ -1,0 +1,28 @@
+4.4.0 Release Notes
+===================
+
+Channels 4.4 adds optional per-field retention rules to the in-memory
+channel layer, aimed at workers that can pause consumption and leave events
+queued in memory.
+
+Features
+--------
+
+* ``InMemoryChannelLayer`` now accepts a ``retention`` config mapping message
+  field names to a TTL in seconds. When a field outlives its retention period
+  while its event is still queued, the value is replaced by the
+  ``channels.layers.PURGED`` marker. The event's business identifier, its
+  ``type`` and its queue position are untouched, so delivery order and
+  identity are preserved. Retention TTLs must not exceed the layer's
+  ``expiry`` and the ASGI ``type`` field cannot have a rule.
+
+* New ``retention_status()`` method gives applications a checkable view of
+  the events still in the layer, including which fields are retained or have
+  been purged.
+
+* New ``diagnostic_snapshot()`` method returns deep copies of queued messages
+  for diagnostics. The same expiry sweep scrubs the snapshot and the waiting
+  queue, so purged values cannot leak through diagnostics.
+
+* ``InMemoryChannelLayer`` accepts an injectable ``time_func`` clock so
+  expiry and retention behaviour can be tested with a deterministic clock.

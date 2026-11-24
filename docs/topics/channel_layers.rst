@@ -80,6 +80,52 @@ be helpful in :doc:`/topics/testing` or for local-development purposes:
     result in sub-optimal performance, and ultimately data-loss in a
     multi-instance environment.
 
+Field Retention
+***************
+
+When a worker pauses, events can sit in the in-memory layer's queues for a
+while. The optional ``retention`` config lets individual message fields have
+a shorter lifetime than the event that carries them. A field whose retention
+period has elapsed is replaced by the ``channels.layers.PURGED`` marker, so
+the sensitive value no longer sits in memory while the event keeps waiting.
+The event's business identifier, its ``type`` and its position in the queue
+are always retained, and messages are still delivered in send order.
+
+.. code-block:: python
+
+    CHANNEL_LAYERS = {
+        "default": {
+            "BACKEND": "channels.layers.InMemoryChannelLayer",
+            "CONFIG": {
+                "expiry": 60,
+                "retention": {
+                    # "secret" is removed after 10 seconds, "note" after 30,
+                    # while the whole event may remain queued for 60 seconds.
+                    "secret": 10,
+                    "note": 30,
+                },
+            },
+        }
+    }
+
+Two synchronous methods give the application a checkable view of what the
+layer still retains. Both run an expiry sweep first, so they are accurate at
+the moment they are called:
+
+* ``retention_status(channel=None)`` reports, per queued event, its position,
+  its business identifier (``event_id`` by default, configurable with
+  ``event_id_field``) and the fields that are still retained or already
+  purged. Passing no channel returns the status for every channel.
+
+* ``diagnostic_snapshot(channel=None)`` returns deep copies of the queued
+  messages for diagnostics. Purged fields appear as ``PURGED`` here too, so a
+  snapshot cannot reveal a value that has outlived its retention period.
+
+The clock used for expiry can be overridden with ``time_func``, which is
+mainly useful for deterministic tests that need to advance time manually.
+Retention TTLs cannot exceed the layer's ``expiry``, and the ASGI ``type``
+field cannot be given a retention rule.
+
 Synchronous Functions
 ---------------------
 
