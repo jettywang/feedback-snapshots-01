@@ -5,6 +5,10 @@ en:
     errors:
       unexpected_key: "is not allowed"
 
+      conflicting_keys: "conflicts with another approved spelling"
+
+      alias_not_permitted: "alias is not permitted for this write interface"
+
       array?: "must be an array"
 
       empty?: "must be empty"

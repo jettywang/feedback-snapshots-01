@@ -14,26 +14,37 @@ module Dry
 
       TO_SYM = :to_sym.to_proc.freeze
 
-      attr_reader :key_map, :coercer
+      attr_reader :key_map, :coercer, :attribution_policy
 
       # @api private
-      def self.new(*args)
-        fetch_or_store(*args) { super }
+      def self.new(*args, **kwargs)
+        fetch_or_store(*args, kwargs) { super(*args, **kwargs) }
       end
 
       # @api private
-      def self.symbolized(*args)
-        new(*args, &TO_SYM)
+      def self.symbolized(*args, **kwargs)
+        new(*args, **kwargs, &TO_SYM)
       end
 
       # @api private
-      def initialize(key_map, &)
-        @key_map = key_map.coercible(&)
+      def initialize(key_map, attribution_policy: nil, &coercer)
+        @attribution_policy = attribution_policy && KeyAttribution::Policy.normalize(attribution_policy)
+        @key_map = key_map.coercible(&coercer)
       end
 
       # @api private
       def call(result)
-        key_map.write(result.to_h)
+        source = result.to_h
+
+        if attribution_policy
+          report = KeyAttribution::Report.new(attribution_policy)
+          coerced = key_map.write(source, EMPTY_HASH.dup, {tracker: report})
+          report.finalize!(coerced)
+          result.key_attribution = report
+          coerced
+        else
+          key_map.write(source)
+        end
       end
       alias_method :[], :call
     end

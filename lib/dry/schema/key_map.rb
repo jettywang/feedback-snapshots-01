@@ -72,8 +72,8 @@ module Dry
       # @return [Hash]
       #
       # @api public
-      def write(source, target = EMPTY_HASH.dup)
-        each { |key| key.write(source, target) }
+      def write(source, target = EMPTY_HASH.dup, context = EMPTY_HASH)
+        each { |key| key.write(source, target, context) }
         target
       end
 

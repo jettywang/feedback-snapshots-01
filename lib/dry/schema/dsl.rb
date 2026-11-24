@@ -137,12 +137,16 @@ module Dry
       #   required(:tags).filled { array? | str? }
       #
       # @param [Symbol] name The key name
+      # @param [Array<Symbol,String,Hash>, Symbol, String, Hash] aliases
+      #   Registered source aliases
       #
       # @return [Macros::Required]
       #
       # @api public
-      def required(name, &)
-        key(name, macro: Macros::Required, &)
+      def required(name, aliases: nil, **options, &block)
+        macro = key(name, macro: Macros::Required, &block)
+        register_inline_aliases(name, aliases, options)
+        macro
       end
 
       # Define an optional key
@@ -153,12 +157,41 @@ module Dry
       # @see DSL#required
       #
       # @param [Symbol] name The key name
+      # @param [Array<Symbol,String,Hash>, Symbol, String, Hash] aliases
+      #   Registered source aliases
       #
       # @return [Macros::Optional]
       #
       # @api public
-      def optional(name, &)
-        key(name, macro: Macros::Optional, &)
+      def optional(name, aliases: nil, **options, &block)
+        macro = key(name, macro: Macros::Optional, &block)
+        register_inline_aliases(name, aliases, options)
+        macro
+      end
+
+      # Register one or more aliases for an approved canonical key
+      #
+      # @return [self]
+      #
+      # @api public
+      def alias_key(canonical_name, *alias_names, permitted: true)
+        entries = alias_names.map { |name| {name: name, permitted: permitted} }
+        register_key_aliases(canonical_name, entries)
+        self
+      end
+
+      # Register a hash of canonical keys and their aliases
+      #
+      # @return [Hash]
+      #
+      # @api public
+      def aliases(mapping = nil)
+        if mapping
+          normalized = KeyAttribution::Policy.normalize_aliases(mapping)
+          config.key_aliases = config.key_aliases.merge(normalized)
+        end
+
+        config.key_aliases
       end
 
       # A generic method for defining keys
@@ -202,6 +235,19 @@ module Dry
         result_steps[:value_coercer] = value_coercer
         result_steps[:rule_applier] = rule_applier
         result_steps[:filter_schema] = filter_schema.rule_applier if filter_rules?
+
+        if key_attribution_enabled?
+          result_steps[:value_coercer] = attribution_value_coercer
+
+          result_steps.before(:rule_applier) do |result|
+            result.key_attribution.pending_violations.each do |violation|
+              result.add_error([
+                :key_attribution,
+                [violation.code, violation.path, violation.canonical_path]
+              ])
+            end
+          end
+        end
 
         processor_type.new(schema_dsl: self, steps: result_steps)
       end
@@ -407,13 +453,9 @@ module Dry
       # @api protected
       def key_map(types = self.types)
         keys = types.map { |key, type| key_spec(key, type) }
-        km = KeyMap.new(keys)
+        km = KeyAttribution::AliasMap.apply(KeyMap.new(keys), key_attribution_policy.aliases)
 
-        if key_map_type
-          km.public_send(key_map_type)
-        else
-          km
-        end
+        key_map_type ? km.public_send(key_map_type) : km
       end
 
       private
@@ -438,16 +480,55 @@ module Dry
       #
       # @api private
       def key_coercer
-        KeyCoercer.symbolized(key_map)
+        KeyCoercer.symbolized(
+          key_map,
+          attribution_policy: key_attribution_enabled? ? key_attribution_policy : nil
+        )
       end
 
-      # Build a value coercer
-      #
-      # @return [ValueCoercer]
-      #
+      # @api private
+      def key_attribution_policy
+        @key_attribution_policy ||= config.key_attribution_policy
+      end
+
+      # @api private
+      def key_attribution_enabled?
+        !key_attribution_policy.is_a?(KeyAttribution::NullPolicy)
+      end
+
+      # @api private
+      def register_key_aliases(canonical_name, entries)
+        normalized = KeyAttribution::Policy.normalize_aliases(
+          canonical_name => Array(entries)
+        )
+        config.key_aliases = config.key_aliases.merge(normalized)
+      end
+
+      # @api private
+      def register_inline_aliases(canonical_name, aliases, options)
+        entries = Array(aliases)
+        entries << options[:alias] if options.key?(:alias)
+        entries << options[:as] if options.key?(:as)
+        entries.compact!
+
+        register_key_aliases(canonical_name, entries) unless entries.empty?
+      end
+
       # @api private
       def value_coercer
         ValueCoercer.new(type_schema)
+      end
+
+      # @api private
+      def attribution_value_coercer
+        coercer = value_coercer
+
+        lambda do |result|
+          output = coercer.call(result)
+          report = result.key_attribution
+          report.refresh_values!(output) if report.enabled?
+          output
+        end
       end
 
       # Return type registry configured by the processor type

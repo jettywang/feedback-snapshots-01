@@ -110,6 +110,12 @@ module Dry
       end
 
       # @api private
+      def visit_key_attribution(node, opts)
+        code, path, _canonical_path = node
+        visit_predicate([code, []], opts.dup.update(path: Path[path]))
+      end
+
+      # @api private
       def visit_or(node, opts)
         left, right = node.map { |n| visit(n, opts) }
         Message::Or[left, right, or_translator]

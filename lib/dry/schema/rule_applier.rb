@@ -26,6 +26,8 @@ module Dry
 
         rules.each do |name, rule|
           next if input.error?(name)
+          next if input.respond_to?(:key_attribution) &&
+                  input.key_attribution.blocks_rule?(name)
 
           result = rule.(input.to_h)
           results << result if result.failure?

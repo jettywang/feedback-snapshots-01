@@ -64,6 +64,101 @@ module Dry
       # @api public
       setting :validate_keys, default: false
 
+      # @!method key_attribution
+      #
+      # Key attribution policy. Set to true or a policy hash to record which
+      # approved/registered source key supplied each canonical value.
+      #
+      # @return [Boolean, Hash, KeyAttribution::Policy]
+      #
+      # @api public
+      setting :key_attribution, default: false
+
+      # @!method key_aliases
+      #
+      # Registered aliases grouped by their canonical key path.
+      #
+      # @return [Hash]
+      #
+      # @api public
+      setting :key_aliases, default: EMPTY_HASH.dup
+
+      # @!method key_conflict_policy
+      #
+      # Policy used when multiple registered spellings supply one canonical key.
+      #
+      # @return [Symbol, #call]
+      #
+      # @api public
+      setting :key_conflict_policy, default: :reject
+
+      # @!method permit_key_aliases
+      #
+      # Global switch for registered alias sources.
+      #
+      # @return [Boolean]
+      #
+      # @api public
+      setting :permit_key_aliases, default: true
+
+      # @!method verify_key_ownership
+      #
+      # Descriptive alias for enabling key attribution checks.
+      #
+      # @return [Boolean]
+      #
+      # @api public
+      setting :verify_key_ownership, default: false
+
+      # @!method approved_fields
+      #
+      # Optional explicit list of approved canonical field paths.
+      #
+      # @return [Array]
+      #
+      # @api public
+      setting :approved_fields, default: EMPTY_ARRAY.dup
+
+      # @api private
+      def key_attribution_policy
+        return key_attribution if key_attribution.is_a?(KeyAttribution::Policy)
+
+        options = {
+          aliases: key_aliases,
+          approved_fields: approved_fields,
+          conflict: key_conflict_policy,
+          permit_aliases: permit_key_aliases
+        }
+
+        explicit_enabled = key_attribution
+
+        if key_attribution.is_a?(::Hash)
+          attribution_options = key_attribution.transform_keys(&:to_sym)
+          options.merge!(attribution_options)
+          explicit_enabled = options.delete(:enabled) { true }
+
+          configured_aliases =
+            attribution_options[:aliases] ||
+            attribution_options[:registered_aliases] ||
+            attribution_options[:key_aliases] ||
+            EMPTY_HASH
+
+          options[:aliases] = key_aliases.merge(configured_aliases)
+        elsif key_attribution.is_a?(::Symbol)
+          options[:conflict] = :merge if key_attribution == :permissive
+        end
+
+        enabled = explicit_enabled &&
+                  key_attribution != :disabled &&
+                  key_attribution != "disabled"
+        enabled ||= verify_key_ownership
+        enabled ||= !key_aliases.empty?
+
+        return KeyAttribution::NullPolicy.new unless enabled
+
+        KeyAttribution::Policy.normalize(options)
+      end
+
       # @api private
       def respond_to_missing?(meth, include_private = false)
         super || config.respond_to?(meth, include_private)

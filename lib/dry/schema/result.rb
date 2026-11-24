@@ -29,6 +29,8 @@ module Dry
       # @api private
       option :path, optional: true, reader: false
 
+      attr_writer :key_attribution
+
       # @api private
       def self.new(*, **)
         result = super
@@ -48,15 +50,63 @@ module Dry
       end
 
       # @api private
-      def new(output, **opts, &)
+      def new(output, **opts, &block)
+        attribution = opts.delete(:key_attribution) || key_attribution
+
         self.class.new(
           output,
           message_compiler: message_compiler,
           result_ast: result_ast,
-          **opts,
-          &
-        )
+          **opts
+        ) do |result|
+          result.key_attribution = attribution
+          block&.(result)
+        end
       end
+
+      # Key attribution report for this processor call
+      #
+      # @return [KeyAttribution::Report]
+      #
+      # @api public
+      def key_attribution
+        return @key_attribution if defined?(@key_attribution) && @key_attribution
+
+        KeyAttribution::Report.null
+      end
+
+      alias_method :attribution, :key_attribution
+      alias_method :key_provenance, :key_attribution
+      alias_method :key_ownership, :key_attribution
+
+      # Approved source paths indexed by canonical path
+      #
+      # @return [Hash]
+      #
+      # @api public
+      def key_origins
+        key_attribution.origins
+      end
+
+      alias_method :key_sources, :key_origins
+
+      # Serializable attribution context for this result
+      #
+      # @return [Hash]
+      #
+      # @api public
+      def attribution_context
+        key_attribution.to_h
+      end
+
+      alias_method :key_context, :attribution_context
+
+      # @api public
+      def key_source_path(path)
+        key_attribution.source_path_for(path)
+      end
+
+      alias_method :source_path_for, :key_source_path
 
       # @api private
       def update(hash)

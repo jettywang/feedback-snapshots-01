@@ -21,6 +21,14 @@ module Dry
       # @return [Proc, #call] A key name coercer function
       attr_reader :coercer
 
+      # @return [Symbol] The approved canonical key that receives the value
+      attr_reader :target
+
+      # @return [Boolean] Whether this key represents a registered alias
+      def alias?
+        @alias_source
+      end
+
       # @api private
       def self.[](name, **opts)
         new(name, **opts)
@@ -32,10 +40,25 @@ module Dry
       end
 
       # @api private
-      def initialize(id, name: id, coercer: DEFAULT_COERCER)
+      def initialize(
+        id,
+        name: id,
+        target: id,
+        alias_source: false,
+        permitted: true,
+        coercer: DEFAULT_COERCER
+      )
         @id = id
         @name = name
+        @target = target
+        @alias_source = alias_source
+        @permitted = permitted
         @coercer = coercer
+      end
+
+      # @api private
+      def permitted?
+        @permitted
       end
 
       # @api private
@@ -43,15 +66,29 @@ module Dry
         return unless source.is_a?(::Hash)
 
         if source.key?(name)
-          yield(source[name])
+          yield(source[name], name)
         elsif source.key?(coerced_name)
-          yield(source[coerced_name])
+          yield(source[coerced_name], coerced_name)
         end
       end
 
       # @api private
-      def write(source, target)
-        read(source) { |value| target[coerced_name] = value }
+      def write(source, target_hash, context = EMPTY_HASH)
+        tracker = context[:tracker]
+        path = context[:path] || EMPTY_ARRAY
+
+        read(source) do |value, source_name|
+          destination = target_name
+          target_hash[destination] = value
+
+          tracker&.record(
+            key: self,
+            value: value,
+            path: path,
+            destination: destination,
+            source_name: source_name
+          )
+        end
       end
 
       # @api private
@@ -71,12 +108,25 @@ module Dry
 
       # @api private
       def new(**new_opts)
-        self.class.new(id, name: name, coercer: coercer, **new_opts)
+        self.class.new(
+          id,
+          name: name,
+          target: target,
+          alias_source: alias?,
+          permitted: permitted?,
+          coercer: coercer,
+          **new_opts
+        )
       end
 
       # @api private
       def dump
         name
+      end
+
+      # @api private
+      def target_name
+        @__target_name__ ||= coercer[target]
       end
 
       private
@@ -106,10 +156,33 @@ module Dry
           super if source.is_a?(::Hash)
         end
 
-        def write(source, target)
-          read(source) { |value|
-            target[coerced_name] = value.is_a?(::Hash) ? members.write(value) : value
-          }
+        def write(source, target_hash, context = EMPTY_HASH)
+          tracker = context[:tracker]
+          path = context[:path] || EMPTY_ARRAY
+
+          read(source) do |value, source_name|
+            destination = target_name
+            field_path = path + [destination]
+
+            target_hash[destination] =
+              if value.is_a?(::Hash)
+                members.write(
+                  value,
+                  EMPTY_HASH.dup,
+                  {tracker: tracker, path: field_path}
+                )
+              else
+                value
+              end
+
+            tracker&.record(
+              key: self,
+              value: value,
+              path: path,
+              destination: destination,
+              source_name: source_name
+            )
+          end
         end
 
         # @api private
@@ -148,15 +221,39 @@ module Dry
         end
 
         # @api private
-        def write(source, target)
-          read(source) { |value|
-            target[coerced_name] =
+        def write(source, target_hash, context = EMPTY_HASH)
+          tracker = context[:tracker]
+          path = context[:path] || EMPTY_ARRAY
+
+          read(source) do |value, source_name|
+            destination = target_name
+            field_path = path + [destination]
+
+            target_hash[destination] =
               if value.is_a?(::Array)
-                value.map { |el| el.is_a?(::Hash) ? member.write(el) : el }
+                value.each_with_index.map do |element, index|
+                  if element.is_a?(::Hash)
+                    member.write(
+                      element,
+                      EMPTY_HASH.dup,
+                      {tracker: tracker, path: field_path + [index]}
+                    )
+                  else
+                    element
+                  end
+                end
               else
                 value
               end
-          }
+
+            tracker&.record(
+              key: self,
+              value: value,
+              path: path,
+              destination: destination,
+              source_name: source_name
+            )
+          end
         end
 
         # @api private
