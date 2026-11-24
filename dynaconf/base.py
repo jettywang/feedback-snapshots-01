@@ -20,6 +20,8 @@ from typing import Optional
 from typing import Union
 
 from dynaconf import default_settings
+from dynaconf.context import ContextState
+from dynaconf.context import LayeredStore
 from dynaconf.loaders import default_loader
 from dynaconf.loaders import enable_external_loaders
 from dynaconf.loaders import env_loader
@@ -228,27 +230,81 @@ class DynaconfCore:
         self.store = store
         self.validators = ValidatorList(obj, validators=validators)
 
+        # Context-local read state. When inactive, the shared config/store/
+        # cache above are used directly (the historical, single-reader
+        # behavior). Inside a read context each task gets an isolated,
+        # copy-on-write view over these stable snapshots.
+        self.context = ContextState(self)
+
+    # CONTEXT-LOCAL STATE
+
+    @property
+    def active_config(self):
+        """The config visible to the current read context."""
+        ctx = self.context.current
+        return ctx.config if ctx is not None else self.config
+
+    @property
+    def active_store(self):
+        """The store visible to the current read context."""
+        ctx = self.context.current
+        return ctx.store if ctx is not None else self.store
+
+    @property
+    def active_cache(self) -> dict:
+        """The cache visible to the current read context."""
+        ctx = self.context.current
+        return ctx.cache if ctx is not None else self._cache
+
+    def begin_read_context(self, setenv_owned=False):
+        """Enter an isolated read context.
+
+        Nested entries inside the same task inherit a copy-on-write view of
+        the enclosing context; sibling tasks (other asyncio tasks/threads)
+        each branch independently from the same stable snapshot and cannot
+        observe each other's temporary overrides, fresh reloads or history.
+        """
+        parent = self.context.current
+        if parent is None:
+            base_config = self.config
+            base_store = self.store
+            base_cache = self._cache
+        else:
+            base_config = parent.config
+            base_store = parent.store
+            base_cache = parent.cache
+
+        local_config = copy.deepcopy(base_config)
+        local_store = LayeredStore(base_store)
+        local_cache = dict(base_cache)
+        return self.context.push(
+            local_config,
+            local_store,
+            local_cache,
+            setenv_owned=setenv_owned,
+        )
+
     # CACHING
 
     def get_cached(self, key):
         """Return value or raises KeyError for key not found."""
         if not self.cache_enabled:
             raise KeyError
-        return self._cache[key]
+        return self.active_cache[key]
 
     def set_cached(self, key, value):
         # NOTE: remove support for this marker in a breaking change
         _is_lazy = hasattr(value, "_dynaconf_lazy_format")
         if not self.cache_enabled:
             return
-        fresh_vars = self.config.fresh_vars
+        fresh_vars = self.active_config.fresh_vars
         if key not in fresh_vars and not _is_lazy:
-            self._cache[key] = value
+            self.active_cache[key] = value
 
     def clear_cache(self):
         if not self.cache_enabled:
             return
-        self._cache.clear()
+        self.active_cache.clear()
 
     # COPYING
 
@@ -259,10 +315,14 @@ class DynaconfCore:
         memo[id(self)] = new_instance
 
         for key, value in self.__dict__.items():
-            if key != "_cache":
+            if key == "_cache":
+                new_instance._cache = {}
+            elif key == "context":
+                # A ContextVar cannot be shared across independent cores.
+                new_instance.context = ContextState(new_instance)
+            else:
                 setattr(new_instance, key, copy.deepcopy(value, memo))
 
-        new_instance._cache = {}
         return new_instance
 
 
@@ -335,7 +395,7 @@ class Settings:
 
     @property
     def filter_strategy(self):
-        return self.__core__.config.filter_strategy
+        return self.__core__.active_config.filter_strategy
 
     @property
     def validators(self):
@@ -344,7 +404,7 @@ class Settings:
     @property
     def store(self):
         """Gets internal storage"""
-        return self.__core__.store
+        return self.__core__.active_store
 
     def __getattr__(self, key):
         # do we have cached value?
@@ -364,7 +424,7 @@ class Settings:
         # This is to keep the only upper case mode working
         # __getattribute__ will only match exact casing, first levels always upper
         if _should_use_strict_uppercase(key, self):
-            value = core.store.__getattribute__(key)
+            value = core.active_store.__getattribute__(key)
         # Use regular .get which triggers hooks among other things
         else:
             value = self.get(key, default=empty)
@@ -406,13 +466,13 @@ class Settings:
     @invalidates_cache
     def __delattr__(self, name):
         """stores reference in `_deleted` for proper error management"""
-        self.__core__.config.deleted.add(name)
+        self.__core__.active_config.deleted.add(name)
         if hasattr(self, name):
             super().__delattr__(name)
 
     @invalidates_cache
     def __delitem__(self, name):
-        self.__core__.config.deleted.add(name)
+        self.__core__.active_config.deleted.add(name)
         self.set(name, "@del")
 
     def __contains__(self, item):
@@ -505,7 +565,10 @@ class Settings:
         """
         ctx_mgr = suppress() if env is None else self.using_env(env)
         with ctx_mgr:
-            data = to_dict(self.store)
+            store = self.store
+            if isinstance(store, LayeredStore):
+                store = store.materialize()
+            data = to_dict(store)
             # if not internal remove internal settings
             if not internal:
                 for name in UPPER_DEFAULT_SETTINGS:
@@ -589,7 +652,7 @@ class Settings:
         :return: The value if found, default or None
         """
         core = self.__core__
-        config = core.config
+        config = core.active_config
         if sysenv_fallback is None:
             sysenv_fallback = getattr(
                 self, "SYSENV_FALLBACK_FOR_DYNACONF", None
@@ -650,7 +713,7 @@ class Settings:
             self.unset(key)
             self.execute_loaders(key=key)
 
-        data = _get_with_default(parent or core.store, key, default)
+        data = _get_with_default(parent or core.active_store, key, default)
         if config.dynaboxify is False:
             data = recursively_evaluate_lazy_format(data, self)
         if cast:
@@ -665,7 +728,7 @@ class Settings:
         :return: Boolean
         """
         key = upperfy(key)
-        if key in self.__core__.config.deleted:
+        if key in self.__core__.active_config.deleted:
             return False
         return self.get(key, fresh=fresh, default=missing) is not missing
 
@@ -728,12 +791,12 @@ class Settings:
     @property
     def loaded_envs(self):
         """Get or create internal loaded envs list"""
-        return self.__core__.config.loaded_envs
+        return self.__core__.active_config.loaded_envs
 
     @loaded_envs.setter
     def loaded_envs(self, value):
         """Setter for env list"""
-        self.__core__.config.loaded_envs = value
+        self.__core__.active_config.loaded_envs = value
 
     # compat
     loaded_namespaces = loaded_envs
@@ -741,7 +804,7 @@ class Settings:
     @property
     def loaded_by_loaders(self):  # pragma: no cover
         """Gets the internal mapping of LOADER -> values"""
-        config = self.__core__.config
+        config = self.__core__.active_config
         return config.loaded_by_loaders
 
     @invalidates_cache
@@ -773,7 +836,7 @@ class Settings:
             keep {bool} -- Keep pre-existing values (default: {False})
             kwargs {dict} -- Passed directly to new instance.
         """
-        config = self.__core__.config
+        config = self.__core__.active_config
 
         cache_key = f"{env}_{keep}_{kwargs}"
         if cache_key in config.env_cache:
@@ -797,10 +860,13 @@ class Settings:
 
         if keep:
             # keep existing values from current env
+            store = self.store
+            if isinstance(store, LayeredStore):
+                store = store.materialize()
             new_data.update(
                 {
                     key: value
-                    for key, value in to_dict(self.store).items()
+                    for key, value in to_dict(store).items()
                     if key.isupper() and key not in RENAMED_VARS
                 }
             )
@@ -847,13 +913,16 @@ class Settings:
         :param filename: Custom filename to load (optional)
         :return: context
         """
+        core = self.__core__
+        token = core.begin_read_context()
         try:
             self.setenv(env, clean=clean, silent=silent, filename=filename)
             yield
         finally:
-            if env.lower() != self.ENV_FOR_DYNACONF.lower():
-                del self.loaded_envs[-1]
-            self.setenv(self.current_env, clean=clean, filename=filename)
+            # Dropping the whole read context restores the outer (or shared)
+            # config, store and cache in one step, regardless of whether the
+            # inner loading succeeded or raised.
+            core.context.pop(token)
 
     # compat
     using_namespace = using_env
@@ -879,10 +948,13 @@ class Settings:
 
         :return: context
         """
-
-        self.__core__.config.fresh = True
-        yield
-        self.__core__.config.fresh = False
+        core = self.__core__
+        token = core.begin_read_context()
+        core.active_config.fresh = True
+        try:
+            yield
+        finally:
+            core.context.pop(token)
 
     @property
     def current_env(self):
@@ -962,14 +1034,36 @@ class Settings:
 
         env = env.upper()
 
-        if env != self.ENV_FOR_DYNACONF:
-            self.loaded_envs.append(env)
-        else:
-            self.loaded_envs = []
+        core = self.__core__
+        ctx_state = core.context
+        # A direct setenv() (outside of using_env) still needs an isolated
+        # read context so an interactive env switch cannot leak into another
+        # task sharing the same settings object. A second direct setenv()
+        # replaces the previous setenv-owned context instead of nesting.
+        current = ctx_state.current
+        replacing = (
+            current is not None
+            and current.setenv_owned
+            and ctx_state.setenv_token is not None
+        )
+        if replacing:
+            ctx_state.pop(ctx_state.setenv_token)
+        token = core.begin_read_context(setenv_owned=True)
+        ctx_state.setenv_token = token
+        try:
+            if env != self.ENV_FOR_DYNACONF:
+                self.loaded_envs.append(env)
+            else:
+                self.loaded_envs = []
 
-        if clean:
-            self.clean(env=env)
-        self.execute_loaders(env=env, silent=silent, filename=filename)
+            if clean:
+                self.clean(env=env)
+            self.execute_loaders(env=env, silent=silent, filename=filename)
+        except BaseException:
+            ctx_state.pop(token)
+            ctx_state.setenv_token = None
+            raise
+        return token
 
     # compat
     namespace = setenv
@@ -987,7 +1081,7 @@ class Settings:
         :param key: The key to be unset
         :param force: Bypass default checks and force unset
         """
-        config = self.__core__.config
+        config = self.__core__.active_config
         key = upperfy(key.strip())
         if (
             key not in UPPER_DEFAULT_SETTINGS
@@ -1033,7 +1127,7 @@ class Settings:
             validate: Pass the flag to validate down
             list_merge: The strategy used for list merging
         """
-        config = self.__core__.config
+        config = self.__core__.active_config
         if validate is empty:
             validate = self.get(
                 "VALIDATE_ON_UPDATE_FOR_DYNACONF"
@@ -1160,7 +1254,7 @@ class Settings:
         :param tomlfy_filter: Optional tuple with the keys where tomlfy should apply
         """
         core = self.__core__
-        config = core.config
+        config = core.active_config
 
         # Ensure source_metadata always is set even if set is called
         # without a loader_identifier
@@ -1219,10 +1313,14 @@ class Settings:
         existing = None
         if not isinstance(parsed, Lazy):
             with suppress(AttributeError, KeyError):
-                if isinstance(self.store, DataDict):
-                    existing = self.store.get(key, bypass_eval=True)
+                store = self.store
+                if isinstance(store, DataDict) or (
+                    isinstance(store, LayeredStore)
+                    and isinstance(store._local, DataDict)
+                ):
+                    existing = store.get(key, bypass_eval=True)
                 else:
-                    existing = self.store.get(key)
+                    existing = store.get(key)
 
         if getattr(parsed, "_dynaconf_insert", False):
             # `@insert` calls insert in a list by index
@@ -1420,7 +1518,7 @@ class Settings:
     @property
     def loaders(self):  # pragma: no cover
         """Return available loaders"""
-        config = self.__core__.config
+        config = self.__core__.active_config
         if self.LOADERS_FOR_DYNACONF in (None, 0, "0", "false", False):
             return []
 
@@ -1432,7 +1530,7 @@ class Settings:
     @invalidates_cache
     def reload(self, env=None, silent=None):  # pragma: no cover
         """Clean end Execute all loaders"""
-        config = self.__core__.config
+        config = self.__core__.active_config
         self.clean()
         config.loaded_hooks.clear()
         for hook in config.post_hooks:
@@ -1452,7 +1550,7 @@ class Settings:
         :param filename: optional custom filename to load
         :param loaders: optional list of loader modules
         """
-        config = self.__core__.config
+        config = self.__core__.active_config
         if key is None:
             default_loader(self, config.defaults)
 
@@ -1523,7 +1621,7 @@ class Settings:
         :param run_hooks: Should run collected hooks?
         """
         core = self.__core__
-        config = core.config
+        config = core.active_config
 
         files = ensure_a_list(path)
         if not files:  # a glob pattern may return empty
@@ -1625,7 +1723,7 @@ class Settings:
     @property
     def _root_path(self):
         """ROOT_PATH_FOR_DYNACONF or the path of first loaded file or '.'"""
-        config = self.__core__.config
+        config = self.__core__.active_config
 
         if self.ROOT_PATH_FOR_DYNACONF is not None:
             return self.ROOT_PATH_FOR_DYNACONF
@@ -1862,7 +1960,7 @@ def _warn_incompatible_typed_dynaconf_arg():
 
 
 def _get_with_default(data: dict | list, key: str, default):
-    if isinstance(data, dict):
+    if isinstance(data, (dict, LayeredStore)):
         return data.get(key, default)
     elif isinstance(data, list):
         if not key.isdigit():
