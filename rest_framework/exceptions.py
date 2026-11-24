@@ -60,6 +60,307 @@ def _get_full_details(detail):
     }
 
 
+# Error codes that describe something a caller can act on. Any other code is
+# treated as an internal implementation detail and is not exposed verbatim in
+# projected bulk errors.
+BULK_ERROR_PUBLIC_CODES = frozenset({
+    'blank',
+    'date',
+    'datetime',
+    'does_not_exist',
+    'empty',
+    'incorrect_match',
+    'incorrect_type',
+    'invalid',
+    'invalid_choice',
+    'invalid_image',
+    'invalid_unicode',
+    'make_aware',
+    'max_decimal_places',
+    'max_digits',
+    'max_length',
+    'max_string_length',
+    'max_value',
+    'max_whole_digits',
+    'min_length',
+    'min_value',
+    'no_match',
+    'no_name',
+    'not_a_dict',
+    'not_a_list',
+    'null',
+    'overflow',
+    'required',
+    'unique',
+})
+
+BULK_ERROR_INTERNAL_CODE = 'internal'
+BULK_ERROR_INTERNAL_MESSAGE = _(
+    'This row failed an internal validation rule and cannot be corrected '
+    'from the submitted data.'
+)
+
+
+def _is_error_message_list(value):
+    return not any(
+        isinstance(item, (dict, list, tuple)) for item in value
+    )
+
+
+def _find_row_containers(detail, path, non_field_errors_key, containers):
+    """
+    Collect the mappings that describe submitted rows.
+
+    A row container is a non-empty mapping keyed by item indexes, or a list
+    whose items are mappings or lists. Containers may be nested under a field
+    name (eg. ``{'items': {1: {...}}}``); row positions recorded by callers
+    are always relative to the submitted list, so the container path is kept
+    alongside the rows.
+    """
+    if isinstance(detail, dict):
+        if detail and all(isinstance(key, int) for key in detail):
+            containers.append((path, detail))
+            return
+        for key, value in detail.items():
+            if key == non_field_errors_key:
+                # Errors for the containing object, not child positions.
+                continue
+            child_path = path + (key if isinstance(key, int) else str(key),)
+            _find_row_containers(
+                value, child_path, non_field_errors_key, containers
+            )
+        return
+    if isinstance(detail, (list, tuple)):
+        if detail and not _is_error_message_list(detail):
+            containers.append((path, detail))
+
+
+def _iter_error_leaves(detail, path, non_field_errors_key):
+    """
+    Yield ``(path, message)`` for every leaf error in a validation detail
+    tree. ``path`` contains submitted field names and indices only, so the
+    caller can rebuild the position in the original input.
+
+    A plain list may either contain error messages for the current position
+    (eg. ``{'name': ['required']}``) or error details for child items (eg.
+    ``[{'name': ['required']}, {}]``). Message lists do not add an index to
+    the path, while lists containing mappings or lists are treated as item
+    positions.
+    """
+    if isinstance(detail, str):
+        yield path, detail
+        return
+    if isinstance(detail, dict):
+        for key, value in detail.items():
+            if key == non_field_errors_key:
+                # Errors for the object itself, not for a child position.
+                yield from _iter_error_leaves(
+                    value, path, non_field_errors_key
+                )
+            elif isinstance(key, int):
+                yield from _iter_error_leaves(
+                    value, path + (key,), non_field_errors_key
+                )
+            else:
+                yield from _iter_error_leaves(
+                    value, path + (str(key),), non_field_errors_key
+                )
+        return
+    if isinstance(detail, (list, tuple)):
+        if not _is_error_message_list(detail):
+            for index, item in enumerate(detail):
+                if isinstance(item, (dict, list, tuple)):
+                    yield from _iter_error_leaves(
+                        item, path + (index,), non_field_errors_key
+                    )
+                else:
+                    # A message at the level of the containing collection.
+                    yield from _iter_error_leaves(
+                        item, path, non_field_errors_key
+                    )
+            return
+        for item in detail:
+            yield from _iter_error_leaves(item, path, non_field_errors_key)
+        return
+    yield path, detail
+
+
+def _iter_bulk_error_leaves(detail, non_field_errors_key):
+    """
+    Yield ``(container_path, row, row_path, message)`` for every leaf error
+    attached to a submitted row. ``row_path`` is relative to the row.
+    """
+    containers = []
+    _find_row_containers(detail, (), non_field_errors_key, containers)
+
+    for container_path, rows in containers:
+        items = rows.items() if isinstance(rows, dict) else enumerate(rows)
+        for row, row_detail in items:
+            for row_path, message in _iter_error_leaves(
+                    row_detail, (), non_field_errors_key):
+                yield container_path, row, row_path, message
+
+
+def _error_field_path(path):
+    """
+    Format a submitted-input path as ``items[0].sku`` style notation.
+    """
+    ret = ''
+    for part in path:
+        if isinstance(part, int):
+            ret += '[%d]' % part
+        else:
+            if ret:
+                ret += '.'
+            ret += part
+    return ret or None
+
+
+def _error_pointer(path):
+    """
+    Format a submitted-input path as an RFC 6901 JSON Pointer.
+    """
+    return ''.join(
+        '/' + str(part).replace('~', '~0').replace('/', '~1')
+        for part in path
+    )
+
+
+def _error_code(message):
+    code = getattr(message, 'code', None)
+    return str(code) if code is not None else ''
+
+
+def _position_sort_key(container_path, row, row_path=()):
+    """
+    Sort submitted positions numerically rather than by pointer text, so
+    row 10 follows row 9 and nested indices keep their natural order.
+    """
+    return (
+        tuple((0, part) if isinstance(part, int) else (1, part)
+              for part in container_path),
+        row,
+        tuple((0, part) if isinstance(part, int) else (1, part)
+              for part in row_path),
+    )
+
+
+def project_bulk_errors(detail, *, public_codes=None,
+                        non_field_errors_key='non_field_errors'):
+    """
+    Project a list-serializer error detail into a renderer-agnostic public
+    structure.
+
+    Each entry identifies the zero-based submitted row, the field path
+    relative to that row, an RFC 6901 JSON Pointer rooted at the submitted
+    payload, and a public classification code. Errors whose codes are not in
+    ``public_codes`` are collapsed into a single generic ``internal`` entry
+    for that row, so internal diagnostics never leak or move public
+    positions.
+
+    Return ``None`` if ``detail`` does not describe a list of items.
+    """
+    containers = []
+    _find_row_containers(detail, (), non_field_errors_key, containers)
+    if not containers:
+        return None
+
+    if public_codes is None:
+        public_codes = BULK_ERROR_PUBLIC_CODES
+    public_codes = frozenset(public_codes) - {BULK_ERROR_INTERNAL_CODE}
+
+    records = []
+    internal_rows = {}
+    seen = set()
+
+    for container_path, row, row_path, message in _iter_bulk_error_leaves(
+            detail, non_field_errors_key):
+        code = _error_code(message)
+        if code not in public_codes:
+            internal_rows[(container_path, row)] = _position_sort_key(
+                container_path, row
+            )
+            continue
+
+        pointer = _error_pointer(container_path + (row,) + row_path)
+        key = (pointer, code, force_str(message))
+        if key in seen:
+            continue
+        seen.add(key)
+        records.append((
+            _position_sort_key(container_path, row, row_path),
+            {
+                'row': row,
+                'field': _error_field_path(row_path),
+                'pointer': pointer,
+                'code': code,
+                'message': force_str(message),
+            },
+        ))
+
+    # Internal failures are collapsed to one stable, row-level entry. Adding
+    # or removing internal-only nodes therefore leaves every public row and
+    # field position untouched.
+    for (container_path, row), order in internal_rows.items():
+        records.append((
+            order,
+            {
+                'row': row,
+                'field': None,
+                'pointer': _error_pointer(container_path + (row,)),
+                'code': BULK_ERROR_INTERNAL_CODE,
+                'message': force_str(BULK_ERROR_INTERNAL_MESSAGE),
+            },
+        ))
+
+    records.sort(key=lambda item: (item[0], item[1]['code']))
+    return {'errors': [record for _, record in records]}
+
+
+def get_error_paths(detail, *, non_field_errors_key='non_field_errors'):
+    """
+    Return every leaf error with its absolute RFC 6901 JSON Pointer.
+
+    This is the support-facing view of a validation failure: unlike
+    ``project_bulk_errors()`` it retains internal codes and original messages.
+    For details that do not describe submitted rows, pointers are relative to
+    the top-level error structure.
+    """
+    containers = []
+    _find_row_containers(detail, (), non_field_errors_key, containers)
+
+    records = []
+    if containers:
+        for container_path, row, row_path, message in (
+                _iter_bulk_error_leaves(detail, non_field_errors_key)):
+            records.append((
+                _position_sort_key(container_path, row, row_path),
+                {
+                    'row': row,
+                    'pointer': _error_pointer(
+                        container_path + (row,) + row_path
+                    ),
+                    'code': _error_code(message) or None,
+                    'message': force_str(message),
+                },
+            ))
+    else:
+        for path, message in _iter_error_leaves(
+                detail, (), non_field_errors_key):
+            records.append((
+                _position_sort_key((), 0, path),
+                {
+                    'row': None,
+                    'pointer': _error_pointer(path),
+                    'code': _error_code(message) or None,
+                    'message': force_str(message),
+                },
+            ))
+
+    records.sort(key=lambda item: item[0])
+    return [record for _, record in records]
+
+
 class ErrorDetail(str):
     """
     A string-like object that can additionally have a code.
@@ -131,6 +432,31 @@ class APIException(Exception):
         Eg. {"name": [{"message": "This field is required.", "code": "required"}]}
         """
         return _get_full_details(self.detail)
+
+    def get_error_paths(self, *, non_field_errors_key='non_field_errors'):
+        """
+        Return the full diagnostic view of the error details as a flat list of
+        messages with RFC 6901 JSON Pointers.
+
+        Unlike projections used for external consumers, this retains internal
+        codes and original messages. It is intended for logging, support
+        tooling and custom exception handlers.
+        """
+        return get_error_paths(
+            self.detail, non_field_errors_key=non_field_errors_key
+        )
+
+    def get_bulk_errors(self, *, public_codes=None,
+                        non_field_errors_key='non_field_errors'):
+        """
+        Return a renderer-agnostic public projection of list-serializer
+        errors, or `None` if the details do not describe a list of items.
+        """
+        return project_bulk_errors(
+            self.detail,
+            public_codes=public_codes,
+            non_field_errors_key=non_field_errors_key,
+        )
 
 
 # The recommended style for using `ValidationError` is to keep it namespaced

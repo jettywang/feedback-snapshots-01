@@ -96,6 +96,17 @@ def exception_handler(exc, context):
         else:
             data = {'detail': exc.detail}
 
+        view = context.get('view') if context else None
+        project = getattr(view, 'get_bulk_error_projection', None)
+        if project is not None:
+            enabled = project()
+        else:
+            enabled = api_settings.BULK_ERROR_PROJECTION
+        if enabled:
+            projected = exceptions.project_bulk_errors(exc.detail)
+            if projected is not None:
+                data = projected
+
         set_rollback()
         return Response(data, status=exc.status_code, headers=headers)
 
@@ -301,6 +312,19 @@ class APIView(View):
         Returns the exception handler that this view uses.
         """
         return self.settings.EXCEPTION_HANDLER
+
+    def get_bulk_error_projection(self):
+        """
+        Returns whether list-serializer validation errors should be projected
+        onto a stable, public bulk error structure.
+
+        May be overridden per-view by setting the `bulk_error_projection`
+        attribute, otherwise the `BULK_ERROR_PROJECTION` API setting is used.
+        """
+        setting = getattr(self, 'bulk_error_projection', None)
+        if setting is None:
+            setting = self.settings.BULK_ERROR_PROJECTION
+        return setting
 
     # API policy implementation methods
 

@@ -235,6 +235,74 @@ By default this exception results in a response with the HTTP status code "400 B
 
 ---
 
+## Bulk error projection
+
+Bulk import endpoints commonly validate a list of submitted rows, where each
+row may fail several fields at different depths. Some failures come from
+rules that only the service can resolve; others are mistakes the caller can
+fix. Exposing the raw validation tree leaks internal details and makes it
+hard for an external partner to find the row they should edit.
+
+Set `BULK_ERROR_PROJECTION` to `True` to replace list-serializer validation
+errors with a stable public structure before any renderer sees the response.
+The same structure is therefore returned by `JSONRenderer`,
+`BrowsableAPIRenderer`, `TemplateHTMLRenderer` and any other renderer:
+
+    REST_FRAMEWORK = {
+        'BULK_ERROR_PROJECTION': True,
+    }
+
+It can also be enabled for a single view:
+
+    class BulkImportView(APIView):
+        bulk_error_projection = True
+
+For function-based views, use the global setting or a custom exception
+handler.
+
+The projected response contains one entry per error:
+
+    {
+        "errors": [
+            {
+                "row": 1,
+                "field": "lines[0].quantity",
+                "pointer": "/items/1/quantity",
+                "code": "invalid",
+                "message": "A valid integer is required."
+            },
+            {
+                "row": 2,
+                "field": null,
+                "pointer": "/items/2",
+                "code": "internal",
+                "message": "This row failed an internal validation rule and cannot be corrected from the submitted data."
+            }
+        ]
+    }
+
+* `row` is the zero-based index of the submitted item.
+* `field` is the path within that row, or `null` for a row-level failure.
+* `pointer` is an [RFC 6901][rfc6901] JSON Pointer rooted at the submitted
+  payload, so it identifies the same location in a nested `items` list.
+* `code` is a public classification. Codes not present in
+  `BULK_ERROR_PUBLIC_CODES` are replaced by `internal`.
+
+All internal-only failures for a row are collapsed into a single `internal`
+entry at the row's position. Adding, removing or changing internal error
+nodes therefore never moves an approved row or field location, and never
+changes the public codes reported for other rows.
+
+The full diagnostics are preserved on the exception itself, so custom
+exception handlers and support tooling can still inspect them:
+
+    exception.get_full_details()   # messages and codes, nested
+    exception.get_error_paths()    # flat list of {row, pointer, code, message}
+
+[rfc6901]: https://www.rfc-editor.org/rfc/rfc6901
+
+---
+
 ## Generic Error Views
 
 Django REST Framework provides two error views suitable for providing generic JSON `500` Server Error and
