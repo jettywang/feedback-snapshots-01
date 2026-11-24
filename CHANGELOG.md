@@ -8,6 +8,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ### Added
 
+- Add an opt-in `:manifest` extension that produces an offline-verifiable inventory of the predicates compiled into a schema. Each predicate occurrence records its field path, logical rule path, arguments, and the callable bound to it. Built-in `dry-logic` predicates receive a stable id derived from a gem-relative source anchor and a body digest; custom and runtime-defined bindings are reported as explicit evidence gaps. `Dry::Schema::Manifest.compare` reports `proof_order`, `rebound`, `added`, and `removed` changes so only fields whose predicate binding actually changed require re-approval. Generating a manifest never invokes a predicate or application callback.
+
+    ```ruby
+    Dry::Schema.load_extensions(:manifest)
+
+    parent_manifest = parent.manifest(name: "parent")
+    child_manifest = child.manifest(name: "child")
+
+    changes = Dry::Schema::Manifest.compare(parent_manifest, child_manifest)
+    changes.approval_required.map(&:field)
+    ```
+
 ### Changed
 
 ### Deprecated

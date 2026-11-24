@@ -19,3 +19,7 @@ end
 Dry::Schema.register_extension(:json_schema) do
   require "dry/schema/extensions/json_schema"
 end
+
+Dry::Schema.register_extension(:manifest) do
+  require "dry/schema/extensions/manifest"
+end
