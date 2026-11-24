@@ -130,7 +130,7 @@ module Dry
       #
       # @api public
       def error?(spec)
-        message_set.any? { |msg| Path[msg.path].include?(Path[spec]) }
+        errors.any? { |message| Path[message.path].include?(Path[spec]) }
       end
 
       # Check if the result is successful

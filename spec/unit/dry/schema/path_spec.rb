@@ -59,6 +59,15 @@ RSpec.describe Dry::Schema::Path do
         expect(left.include?(right)).to be(false)
       end
 
+      it "distinguishes a descendant covered by an indexed parent from its sibling" do
+        parent = Dry::Schema::Path.new([:items, 0])
+        covered_child = Dry::Schema::Path.new([:items, 0, :code])
+        sibling_child = Dry::Schema::Path.new([:items, 1, :code])
+
+        expect(covered_child.include?(parent)).to be(true)
+        expect(sibling_child.include?(parent)).to be(false)
+      end
+
       it "doens't blow up stack on specific input" do
         left = Dry::Schema::Path.new([:data, :relationships, :data])
         right = Dry::Schema::Path.new([:data, :relationships, :replacements, :data, 1])
