@@ -14,6 +14,7 @@ from django.utils.functional import SimpleLazyObject, empty
 
 from csp.constants import HEADER, HEADER_REPORT_ONLY
 from csp.exceptions import CSPNonceError
+from csp.policy_floor import SOURCE_EXISTING_HEADER, SOURCE_SETTINGS, SOURCE_VIEW
 from csp.utils import DIRECTIVES_T, build_policy
 
 if TYPE_CHECKING:
@@ -79,6 +80,14 @@ class CSPMiddleware(MiddlewareMixin):
         if response.status_code in exempted_debug_codes and settings.DEBUG:
             return response
 
+        # Track the origin of each delivered CSP header so a policy-floor check
+        # can report where an insufficient policy came from.
+        header_sources: dict[str, str] = {}
+        if HEADER in response:
+            header_sources[HEADER] = SOURCE_EXISTING_HEADER
+        if HEADER_REPORT_ONLY in response:
+            header_sources[HEADER_REPORT_ONLY] = SOURCE_EXISTING_HEADER
+
         policy_parts = self.get_policy_parts(request=request, response=response)
         csp = build_policy(**asdict(policy_parts))
         if csp:
@@ -90,6 +99,7 @@ class CSPMiddleware(MiddlewareMixin):
             is_not_excluded = not request.path_info.startswith(tuple(prefixes))
             if no_header and is_not_exempt and is_not_excluded:
                 response[HEADER] = csp
+                header_sources[HEADER] = self._policy_source(policy_parts)
 
         policy_parts_ro = self.get_policy_parts(request=request, response=response, report_only=True)
         csp_ro = build_policy(**asdict(policy_parts_ro), report_only=True)
@@ -102,6 +112,9 @@ class CSPMiddleware(MiddlewareMixin):
             is_not_excluded = not request.path_info.startswith(tuple(prefixes))
             if no_header and is_not_exempt and is_not_excluded:
                 response[HEADER_REPORT_ONLY] = csp_ro
+                header_sources[HEADER_REPORT_ONLY] = self._policy_source(policy_parts_ro)
+
+        response._csp_header_sources = header_sources
 
         # Once we've written the header, accessing the `request.csp_nonce` will no longer trigger
         # the nonce to be added to the header. Instead we throw an error here to catch this since
@@ -110,6 +123,17 @@ class CSPMiddleware(MiddlewareMixin):
             setattr(request, "csp_nonce", CheckableLazyObject(self._csp_nonce_post_response))
 
         return response
+
+    @staticmethod
+    def _policy_source(policy_parts: PolicyParts) -> str:
+        # A view contributed config/update/replace, so the delivered policy is
+        # the result of a view-level exception. Otherwise it is the settings.
+        if any(
+            part is not None
+            for part in (policy_parts.config, policy_parts.update, policy_parts.replace)
+        ):
+            return SOURCE_VIEW
+        return SOURCE_SETTINGS
 
     def build_policy(self, request: HttpRequest, response: HttpResponseBase) -> str:
         warnings.warn("deprecated in favor of get_policy_parts", DeprecationWarning)

@@ -321,6 +321,79 @@ The policy can be changed on a per-view (or even per-request) basis. See
 the :ref:`decorator documentation <decorator-chapter>` for more details.
 
 
+Enforcing a Policy Floor
+========================
+
+Some responses get their ``Content-Security-Policy`` header from another
+component (for example a resource middleware) rather than from django-csp.
+A *policy floor* lets you declare the minimum policy every response must
+satisfy, while still allowing each resource service to publish the stricter
+restrictions it needs.
+
+The floor is configured with two additional settings, which use the same
+``DIRECTIVES`` format as the regular policies:
+
+* ``CONTENT_SECURITY_POLICY_FLOOR`` is checked against the final, enforced
+  ``Content-Security-Policy`` header.
+* ``CONTENT_SECURITY_POLICY_REPORT_ONLY_FLOOR`` is checked independently
+  against the ``Content-Security-Policy-Report-Only`` header and may be
+  different (for example more permissive) from the enforced floor.
+
+.. code-block:: python
+
+    CONTENT_SECURITY_POLICY_FLOOR = {
+        "DIRECTIVES": {
+            "default-src": [SELF],
+            "object-src": [NONE],
+        },
+    }
+
+    CONTENT_SECURITY_POLICY_REPORT_ONLY_FLOOR = {
+        "DIRECTIVES": {
+            "default-src": [SELF, UNSAFE_INLINE],
+        },
+    }
+
+Add ``csp.policy_middleware.PolicyFloorMiddleware`` to ``MIDDLEWARE``. It never
+rewrites a response; it inspects the headers that will actually be delivered and
+records a :class:`~csp.policy_floor.PolicyFloorReport` on the response as
+``response._csp_floor_reports``, logging a warning for every conflict.
+
+.. code-block:: python
+
+    MIDDLEWARE = [
+        # ... other middleware ...
+        "csp.middleware.CSPMiddleware",
+        "csp.policy_middleware.PolicyFloorMiddleware",
+    ]
+
+.. note::
+
+   Place ``PolicyFloorMiddleware`` *after* ``CSPMiddleware`` (and any other
+   component that writes a CSP header). On the response phase middleware runs in
+   reverse order, so the floor middleware then runs last and audits the final
+   delivered headers. If it runs first, the CSP headers have not been written
+   yet and it reports them as missing.
+
+Each report identifies the ``header`` audited, whether it is ``enforced``, the
+``compliant`` verdict, the parsed ``effective_policy``, and a list of
+``conflicts``. Every :class:`~csp.policy_floor.DirectiveConflict` carries a
+human-readable ``reason`` plus the ``source`` of the audited header:
+
+* ``"settings"`` - django-csp generated the header from the global settings.
+* ``"view"`` - a view exception (``@csp``, ``@csp_update`` or
+  ``@csp_replace``) contributed to the generated header.
+* ``"existing_header"`` - the header was already present on the response and
+  django-csp deliberately left it untouched.
+* ``"absent"`` - no header was present when the floor was evaluated.
+
+For source-list directives, a delivered policy is compliant when every source
+it allows is also allowed by the floor (the delivered list must be a subset of
+the floor). A missing fetch directive falls back to ``default-src``, the
+``'none'`` keyword always satisfies a floor, and boolean directives such as
+``upgrade-insecure-requests`` only need to be present.
+
+
 .. _Content-Security-Policy: https://www.w3.org/TR/CSP/
 .. _Content-Security-Policy-L3: https://w3c.github.io/webappsec-csp/
 .. _spec: Content-Security-Policy_
