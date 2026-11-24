@@ -91,7 +91,15 @@ module Elastic
       #
       # @option arguments [Boolean] :reload_on_failure Reload connections after failure (false by default)
       #
-      # @option arguments [Integer] :request_timeout The request timeout to be passed to transport in options in seconds 
+      # @option arguments [Hash,Boolean,Elastic::Transport::Transport::CongestionControl] :congestion_control
+      #   Configurable congestion protection that reserves quota for healthy nodes. A `Hash` is used to build a
+      #   {Elastic::Transport::Transport::CongestionControl} (`true` enables defaults, `false`/nil disables it).
+      #   Keys include `:total_retry_limit` (shared retry budget), `:per_node_limit` (node quota),
+      #   `:discovery_limit`, `:resurrection_limit` and `:probe_limit` (small background budgets),
+      #   `:refill_interval`/`:refill_amount` (quota recovery) and an injectable `:clock`. Exhausted quota raises
+      #   {Elastic::Transport::Transport::CongestionLimitExceeded}, which is a `Transport::Error`.
+      #
+      # @option arguments [Integer] :request_timeout The request timeout to be passed to transport in options in seconds
       #                                              (the default value is taken from the transport)
       #
       # @option arguments [Symbol] :adapter A specific adapter for Faraday (e.g. `:patron`)

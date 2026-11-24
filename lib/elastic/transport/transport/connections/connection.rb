@@ -33,16 +33,19 @@ module Elastic
           DEFAULT_RESURRECT_TIMEOUT = 60
 
           attr_reader :host, :connection, :options, :failures, :dead_since
+          attr_accessor :clock
 
           # @option arguments [Hash]   :host       Host information (example: `{host: 'localhost', port: 9200}`)
           # @option arguments [Object] :connection The transport-specific physical connection or "session"
           # @option arguments [Hash]   :options    Options (usually passed in from transport)
+          # @option arguments [#now]   :clock      Clock used for dead/resurrection timestamps (defaults to Time)
           #
           def initialize(arguments={})
             @host       = arguments[:host].is_a?(Hash) ? Redacted.new(arguments[:host]) : arguments[:host]
             @connection = arguments[:connection]
             @options    = arguments[:options] || {}
             @state_mutex = Mutex.new
+            @clock      = arguments[:clock] || Time
 
             @options[:resurrect_timeout] ||= DEFAULT_RESURRECT_TIMEOUT
             @dead = false
@@ -88,7 +91,7 @@ module Elastic
             @state_mutex.synchronize do
               @dead       = true
               @failures  += 1
-              @dead_since = Time.now
+              @dead_since = @clock.now
             end
             self
           end
@@ -132,7 +135,7 @@ module Elastic
           #
           def resurrectable?
             @state_mutex.synchronize {
-              Time.now > @dead_since + ( @options[:resurrect_timeout] * 2 ** (@failures-1) )
+              @clock.now > @dead_since + ( @options[:resurrect_timeout] * 2 ** (@failures-1) )
             }
           end
 

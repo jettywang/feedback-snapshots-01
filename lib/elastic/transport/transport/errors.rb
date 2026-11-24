@@ -28,6 +28,22 @@ module Elastic
       #
       class SnifferTimeoutError < Timeout::Error; end
 
+      # Raised when the configurable congestion protection rejects an attempt
+      # because a total retry budget or a node-level quota is exhausted.
+      #
+      # The error is an Elastic::Transport::Transport::Error, so existing
+      # rescue clauses keep working, and exposes when quota recovers.
+      #
+      class CongestionLimitExceeded < Error
+        # @return [Float, nil] seconds until the next quota token is available
+        attr_reader :retry_after
+
+        def initialize(message = nil, retry_after: nil)
+          @retry_after = retry_after
+          super(message)
+        end
+      end
+
       # Elastic server error (HTTP status 5xx)
       #
       class ServerError < Error; end

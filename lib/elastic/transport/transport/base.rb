@@ -32,7 +32,8 @@ module Elastic
         DEFAULT_SERIALIZER_CLASS = Serializer::MultiJson
         SANITIZED_PASSWORD       = '*' * (rand(14) + 1)
 
-        attr_reader   :hosts, :options, :connections, :counter, :last_request_at, :protocol
+        attr_reader   :hosts, :options, :connections, :counter, :last_request_at, :protocol,
+                      :congestion_control
         attr_accessor :serializer, :sniffer, :logger, :tracer,
                       :reload_connections, :reload_after,
                       :resurrect_after
@@ -60,6 +61,7 @@ module Elastic
           validate_ca_fingerprint_options! if @options[:ca_fingerprint]
           @block       = block
           @compression = !!@options[:compression]
+          @congestion_control = __build_congestion_control(@options[:congestion_control])
           @connections = __build_connections
 
           @serializer  = options[:serializer] || ( options[:serializer_class] ? options[:serializer_class].new(self) : DEFAULT_SERIALIZER_CLASS.new(self))
@@ -96,9 +98,22 @@ module Elastic
 
         # Reloads and replaces the connection collection based on cluster information
         #
+        # Discovery is gated by the small `:discovery` congestion budget when
+        # congestion protection is enabled; an exhausted budget skips the
+        # sniff request instead of amplifying the failure.
+        #
         # @see Sniffer#hosts
         #
         def reload_connections!
+          if @congestion_control
+            decision = @congestion_control.reserve(CongestionControl::DISCOVERY)
+            if decision.denied?
+              log_warn "[Congestion] Discovery budget exhausted, skipping reload " \
+                       "(retry in #{decision.retry_after_seconds}s)"
+              return self
+            end
+          end
+
           hosts = sniffer.hosts
           __rebuild_connections(hosts: hosts, options: options)
           self
@@ -109,10 +124,82 @@ module Elastic
 
         # Tries to "resurrect" all eligible dead connections
         #
+        # Each processed connection spends one token from the small
+        # `:resurrection` budget when congestion protection is enabled; the
+        # pass stops once that budget is exhausted.
+        #
         # @see Connections::Connection#resurrect!
         #
         def resurrect_dead_connections!
-          connections.dead.each(&:resurrect!)
+          return connections.dead.each(&:resurrect!) unless @congestion_control
+
+          connections.dead.each do |connection|
+            # Don't spend the small resurrection budget on a node whose
+            # backoff window has not elapsed yet.
+            next unless connection.resurrectable?
+
+            decision = @congestion_control.reserve(
+              CongestionControl::RESURRECTION,
+              node: __node_quota_key(connection)
+            )
+            break if decision.denied?
+
+            connection.resurrect!
+          end
+        end
+
+        # Runs one budgeted background probe cycle over dead connections.
+        #
+        # Each probe spends one token from the small `:probe` budget (and, when
+        # `charge_node_quota: true`, node quota as well). The block receives
+        # the connection and should return truthy when the node answers.
+        #
+        # A successful probe is recorded but does not return the connection to
+        # the pool by itself: call {#resurrect_dead_connections!} to spend the
+        # separate resurrection budget and make it selectable again.
+        #
+        # @example
+        #   transport.probe_dead_connections! do |connection|
+        #     Faraday.get(connection.full_url('/')) rescue false
+        #   end
+        #
+        # @return [Array<Hash>] one `{node:, result:}` entry per processed node
+        #
+        def probe_dead_connections!(charge_node_quota: false)
+          raise ArgumentError, 'A probe block is required' unless block_given?
+
+          results = []
+          connections.dead.each do |connection|
+            node_key = __node_quota_key(connection)
+
+            if @congestion_control
+              decision = @congestion_control.reserve(
+                CongestionControl::PROBE,
+                node: node_key,
+                charge_node_quota: charge_node_quota
+              )
+              if decision.denied?
+                results << { node: node_key, result: :skipped,
+                             retry_after: decision.retry_after_seconds }
+                break
+              end
+            end
+
+            reachable = begin
+              !!yield(connection)
+            rescue StandardError => e
+              log_error "[Congestion] Probe for #{node_key} failed: #{e.class}: #{e.message}"
+              false
+            end
+
+            if reachable
+              results << { node: node_key, result: :reachable }
+            else
+              connection.dead!
+              results << { node: node_key, result: :unreachable }
+            end
+          end
+          results
         end
 
         # Rebuilds the connections collection in the transport.
@@ -148,11 +235,42 @@ module Elastic
         # @api    private
         #
         def __build_connections
-          Connections::Collection.new(
+          collection = Connections::Collection.new(
             connections: __connections_from_host,
             selector_class: options[:selector_class],
             selector: options[:selector]
           )
+          if @congestion_control
+            collection.all.each { |connection| connection.clock = @congestion_control.clock }
+          end
+          collection
+        end
+
+        # Builds the configured {CongestionControl}, accepting an instance, a
+        # configuration Hash, `true` for defaults, or `nil`/`false` (disabled).
+        #
+        # @api private
+        def __build_congestion_control(config)
+          case config
+          when nil, false
+            nil
+          when CongestionControl
+            config
+          when true
+            CongestionControl.new
+          when Hash
+            CongestionControl.new(config)
+          else
+            raise ArgumentError,
+                  'congestion_control must be a CongestionControl instance, a Hash, true or false'
+          end
+        end
+
+        # Stable quota scope for a connection, host Hash or node identifier.
+        #
+        # @api private
+        def __node_quota_key(connection)
+          CongestionControl.node_key(connection)
         end
 
         # Helper function: Maps over hosts, sets protocol, port and user/password and builds connections
@@ -288,11 +406,25 @@ module Elastic
           params = params.clone
           # Transforms ignore status codes to Integer
           ignore = Array(params.delete(:ignore)).compact.map(&:to_i)
+          # Internal callers such as the sniffer already paid the discovery
+          # budget; their HTTP request must not double-charge node quota.
+          congestion_bypass = opts[:congestion_bypass] || opts[:congestion] == false
+          node_quota_prepaid = false
 
           begin
             sleep(delay_on_retry / 1000.0) if tries > 0
             tries += 1
             connection = get_connection or raise Error.new('Cannot get new connection from pool.')
+
+            if @congestion_control && !congestion_bypass
+              if node_quota_prepaid
+                # reserve_retry already debited this attempt's node quota.
+                node_quota_prepaid = false
+              else
+                decision = @congestion_control.reserve_dispatch(__node_quota_key(connection))
+                raise __congestion_exceeded(decision) if decision.denied?
+              end
+            end
 
             if connection.connection.respond_to?(:params) &&
                connection.connection.params.respond_to?(:to_hash)
@@ -311,6 +443,8 @@ module Elastic
 
             log_warn "[#{e.class}] Attempt #{tries} to get response from #{url}"
             if tries <= (max_retries || DEFAULT_MAX_RETRIES)
+              __charge_retry_quota!(connection, congestion_bypass)
+              node_quota_prepaid = true
               retry
             else
               message = "[#{e.class}] Cannot get response from #{url} after #{tries} tries"
@@ -325,7 +459,10 @@ module Elastic
 
             if reload_on_failure && tries < connections.all.size
               log_warn "[#{e.class}] Reloading connections (attempt #{tries} of #{connections.all.size})"
-              reload_connections! and retry
+              reload_connections!
+              __charge_retry_quota!(connection, congestion_bypass)
+              node_quota_prepaid = true
+              retry
             end
 
             exception = Elastic::Transport::Transport::Error.new(e.message)
@@ -337,6 +474,8 @@ module Elastic
 
             log_warn "[#{e.class}] Attempt #{tries} connecting to #{connection.host.inspect}"
             if tries <= max_retries
+              __charge_retry_quota!(connection, congestion_bypass)
+              node_quota_prepaid = true
               retry
             else
               message = "[#{e.class}] Cannot connect to #{connection.host.inspect} after #{tries} tries"
@@ -407,6 +546,30 @@ module Elastic
 
         def max_retries(opts)
           opts[:retry_on_failure] == true ? DEFAULT_MAX_RETRIES : opts[:retry_on_failure]
+        end
+
+        # Atomically spends the total-retry and node-level token for the next
+        # attempt. Raises {CongestionLimitExceeded} when either budget is empty.
+        def __charge_retry_quota!(connection, bypass = false)
+          cc = @congestion_control
+          return unless cc
+          return if bypass
+
+          key = __node_quota_key(connection)
+          decision = cc.reserve_retry(key)
+          return if decision.allowed?
+
+          log_warn "[Congestion] Retry blocked for #{key}: #{decision.reason} " \
+                   "(retry_after=#{decision.retry_after_seconds}s)"
+          raise __congestion_exceeded(decision)
+        end
+
+        def __congestion_exceeded(decision)
+          CongestionLimitExceeded.new(
+            "#{decision.reason} (scope=#{decision.scope || decision.category}, " \
+            "retry_after=#{decision.retry_after_seconds}s)",
+            retry_after: decision.retry_after
+          )
         end
 
         def compress_request(body, headers)

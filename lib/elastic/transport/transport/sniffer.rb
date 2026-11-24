@@ -73,7 +73,8 @@ module Elastic
         def perform_sniff_request
           transport.perform_request(
             'GET', '_nodes/http', {}, nil, nil,
-            reload_on_failure: false
+            reload_on_failure: false,
+            congestion_bypass: true
           )
         end
 

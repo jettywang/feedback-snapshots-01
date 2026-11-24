@@ -1,3 +1,10 @@
+## Unreleased
+
+- Adds configurable congestion protection (`:congestion_control`) so a node failure cannot turn into an unbounded retry storm and starve healthy nodes. A shared **total retry budget** and a **per-node quota** are enforced atomically before every retry; each attempt to spend either limit is recorded in an audit ledger.
+  - Discovery (`reload_connections!`/sniff), dead-connection resurrection and background probes (`probe_dead_connections!`, `BackgroundProbe`) get independent small budgets (`:discovery_limit`, `:resurrection_limit`, `:probe_limit`) and write their spend, denial and clock-driven recovery ("recycled" quota) to `CongestionControl::Ledger`.
+  - Quotas refill with configurable `:refill_interval`/`:refill_amount` and an injectable `:clock`; `CongestionControl::FakeClock` makes congestion scenarios deterministic. Exhausted quota raises `Elastic::Transport::Transport::CongestionLimitExceeded < Transport::Error` with `retry_after`.
+  - Disabled by default; pass `congestion_control: { ... }`, `true` for defaults, or a `CongestionControl` instance. See `examples/congestion_scenario.rb` for a fake-clock partial-congestion walkthrough.
+
 ## 8.6.0
 
 - **Breaking:** fixes `ca_fingerprint` so it secures the connections used for requests. The certificate matching the fingerprint is fetched from the server's chain and used as the only trusted certificate on every connection, with chain and expiry verification left on. Host names aren't checked (a pinned intermediate can't be used on JRuby, and the certificate is fetched without a proxy), so a cluster reached by a name or IP that isn't in its certificate works (Faraday 1 and Manticore still check them). Previously the fingerprint was checked on a separate socket and matched any certificate the server sent, without checking that the server's certificate was signed by it.

@@ -104,8 +104,9 @@ class Elastic::Transport::Transport::Connections::ConnectionTest < Minitest::Tes
     should 'be resurrected if timeout passed' do
       c = Connection.new.dead!
 
-      now = Time.now + 60
-      Time.stubs(:now).returns(now)
+      # Anchor the stub to dead_since so the strict `>` holds even when the
+      # clock resolution makes two Time.now calls equal.
+      Time.stubs(:now).returns(c.dead_since + 61)
 
       assert(c.resurrect!, c.inspect)
       assert(!c.dead?, c.inspect)
@@ -114,8 +115,7 @@ class Elastic::Transport::Transport::Connections::ConnectionTest < Minitest::Tes
     should 'be resurrected if timeout passed for multiple failures' do
       c = Connection.new.dead!.dead!
 
-      now = Time.now + 60 * 2
-      Time.stubs(:now).returns(now)
+      Time.stubs(:now).returns(c.dead_since + (60 * 2) + 1)
 
       assert c.resurrect!, c.inspect
       assert !c.dead?, c.inspect
