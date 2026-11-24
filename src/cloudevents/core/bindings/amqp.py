@@ -18,8 +18,24 @@ from typing import Any, Final
 
 from dateutil.parser import isoparse
 
+from cloudevents.core.admission import (
+    AdmissionDeniedError as AdmissionDeniedError,
+)
+from cloudevents.core.admission import MemorySink as MemorySink
+from cloudevents.core.admission import ReceiveContext as ReceiveContext
+from cloudevents.core.admission import (
+    ReceiveResult,
+    finalize_reception,
+    normalize_reception_call,
+)
+from cloudevents.core.admission import (
+    SourceAdmissionPolicy as SourceAdmissionPolicy,
+)
 from cloudevents.core.base import BaseCloudEvent, EventFactory
 from cloudevents.core.bindings.common import get_event_factory_for_version
+from cloudevents.core.exceptions import (
+    SourceAdmissionError as SourceAdmissionError,
+)
 from cloudevents.core.formats.base import Format
 from cloudevents.core.formats.json import JSONFormat
 from cloudevents.core.spec import SPECVERSION_V1_0
@@ -152,9 +168,11 @@ def to_binary(event: BaseCloudEvent, event_format: Format) -> AMQPMessage:
 
 def from_binary(
     message: AMQPMessage,
-    event_format: Format,
+    event_format: Format | None = None,
     event_factory: EventFactory | None = None,
-) -> BaseCloudEvent:
+    *extra_args: Any,
+    **reception_options: Any,
+) -> BaseCloudEvent | ReceiveResult:
     """
     Parse an AMQP binary content mode message to a CloudEvent.
 
@@ -187,8 +205,14 @@ def from_binary(
     :param message: AMQPMessage to parse
     :param event_format: Format implementation for data deserialization
     :param event_factory: Factory function to create CloudEvent instances
-    :return: CloudEvent instance
+    :return: CloudEvent instance, or a reception result when requested.
     """
+    event_format, event_factory, reception_options = normalize_reception_call(
+        event_format, event_factory, extra_args, reception_options
+    )
+    if event_format is None:
+        event_format = JSONFormat()
+
     attributes: dict[str, Any] = {}
 
     for prop_name, prop_value in message.application_properties.items():
@@ -215,7 +239,15 @@ def from_binary(
     datacontenttype = attributes.get("datacontenttype")
     data = event_format.read_data(message.application_data, datacontenttype)
 
-    return event_factory(attributes, data)
+    event = event_factory(attributes, data)
+    return finalize_reception(
+        event,
+        protocol="amqp",
+        mode="binary",
+        message=message,
+        decoder=event_format,
+        options=reception_options,
+    )
 
 
 def to_structured(event: BaseCloudEvent, event_format: Format) -> AMQPMessage:
@@ -259,9 +291,11 @@ def to_structured(event: BaseCloudEvent, event_format: Format) -> AMQPMessage:
 
 def from_structured(
     message: AMQPMessage,
-    event_format: Format,
+    event_format: Format | None = None,
     event_factory: EventFactory | None = None,
-) -> BaseCloudEvent:
+    *extra_args: Any,
+    **reception_options: Any,
+) -> BaseCloudEvent | ReceiveResult:
     """
     Parse an AMQP structured content mode message to a CloudEvent.
 
@@ -293,15 +327,31 @@ def from_structured(
                          If None, the format will auto-detect the version.
     :return: CloudEvent instance
     """
-    # Delegate version detection to format layer
-    return event_format.read(event_factory, message.application_data)
+    event_format, event_factory, reception_options = normalize_reception_call(
+        event_format, event_factory, extra_args, reception_options
+    )
+    if event_format is None:
+        event_format = JSONFormat()
+
+    # Delegate version detection to format layer. Format.read is invoked once.
+    event = event_format.read(event_factory, message.application_data)
+    return finalize_reception(
+        event,
+        protocol="amqp",
+        mode="structured",
+        message=message,
+        decoder=event_format,
+        options=reception_options,
+    )
 
 
 def from_amqp(
     message: AMQPMessage,
-    event_format: Format,
+    event_format: Format | None = None,
     event_factory: EventFactory | None = None,
-) -> BaseCloudEvent:
+    *extra_args: Any,
+    **reception_options: Any,
+) -> BaseCloudEvent | ReceiveResult:
     """
     Parse an AMQP message to a CloudEvent with automatic mode detection.
 
@@ -339,14 +389,22 @@ def from_amqp(
     :param event_factory: Factory function to create CloudEvent instances (auto-detected if None)
     :return: CloudEvent instance
     """
+    event_format, event_factory, reception_options = normalize_reception_call(
+        event_format, event_factory, extra_args, reception_options
+    )
+    if event_format is None:
+        event_format = JSONFormat()
+
     content_type = message.properties.get(CONTENT_TYPE_PROPERTY, "")
 
     if isinstance(content_type, str) and content_type.lower().startswith(
         "application/cloudevents"
     ):
-        return from_structured(message, event_format, event_factory)
+        return from_structured(
+            message, event_format, event_factory, **reception_options
+        )
 
-    return from_binary(message, event_format, event_factory)
+    return from_binary(message, event_format, event_factory, **reception_options)
 
 
 def to_binary_event(
@@ -378,7 +436,8 @@ def to_binary_event(
 def from_binary_event(
     message: AMQPMessage,
     event_format: Format | None = None,
-) -> CloudEvent:
+    **reception_options: Any,
+) -> CloudEvent | ReceiveResult:
     """
     Convenience wrapper for from_binary with JSON format and CloudEvent as defaults.
 
@@ -392,7 +451,7 @@ def from_binary_event(
     """
     if event_format is None:
         event_format = JSONFormat()
-    return from_binary(message, event_format, CloudEvent)
+    return from_binary(message, event_format, CloudEvent, **reception_options)
 
 
 def to_structured_event(
@@ -424,7 +483,8 @@ def to_structured_event(
 def from_structured_event(
     message: AMQPMessage,
     event_format: Format | None = None,
-) -> CloudEvent:
+    **reception_options: Any,
+) -> CloudEvent | ReceiveResult:
     """
     Convenience wrapper for from_structured with JSON format and CloudEvent as defaults.
 
@@ -438,13 +498,14 @@ def from_structured_event(
     """
     if event_format is None:
         event_format = JSONFormat()
-    return from_structured(message, event_format, CloudEvent)
+    return from_structured(message, event_format, CloudEvent, **reception_options)
 
 
 def from_amqp_event(
     message: AMQPMessage,
     event_format: Format | None = None,
-) -> CloudEvent:
+    **reception_options: Any,
+) -> CloudEvent | ReceiveResult:
     """
     Convenience wrapper for from_amqp with JSON format and CloudEvent as defaults.
     Auto-detects binary or structured mode.
@@ -459,4 +520,31 @@ def from_amqp_event(
     """
     if event_format is None:
         event_format = JSONFormat()
-    return from_amqp(message, event_format, CloudEvent)
+    return from_amqp(message, event_format, CloudEvent, **reception_options)
+
+
+def receive(
+    message: AMQPMessage,
+    event_format: Format | None = None,
+    event_factory: EventFactory | None = None,
+    *extra_args: Any,
+    raise_on_denied: bool = False,
+    **reception_options: Any,
+) -> ReceiveResult:
+    """Receive an AMQP message and return a delivery/admission result."""
+    reception_options["return_result"] = True
+    reception_options["raise_on_denied"] = raise_on_denied
+    result = from_amqp(
+        message, event_format, event_factory, *extra_args, **reception_options
+    )
+    return (
+        result
+        if isinstance(result, ReceiveResult)
+        else ReceiveResult(
+            accepted=True, delivered=True, stage="delivered", event=result
+        )
+    )
+
+
+receive_event = receive
+receive_amqp = receive

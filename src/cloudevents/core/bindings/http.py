@@ -19,12 +19,28 @@ from urllib.parse import quote, unquote
 
 from dateutil.parser import isoparse
 
+from cloudevents.core.admission import (
+    AdmissionDeniedError as AdmissionDeniedError,
+)
+from cloudevents.core.admission import MemorySink as MemorySink
+from cloudevents.core.admission import ReceiveContext as ReceiveContext
+from cloudevents.core.admission import (
+    ReceiveResult,
+    finalize_reception,
+    normalize_reception_call,
+)
+from cloudevents.core.admission import (
+    SourceAdmissionPolicy as SourceAdmissionPolicy,
+)
 from cloudevents.core.base import BaseCloudEvent, EventFactory
 from cloudevents.core.bindings.common import (
     CONTENT_TYPE_HEADER,
     DATACONTENTTYPE_ATTR,
     TIME_ATTR,
     get_event_factory_for_version,
+)
+from cloudevents.core.exceptions import (
+    SourceAdmissionError as SourceAdmissionError,
 )
 from cloudevents.core.formats.base import Format
 from cloudevents.core.formats.json import JSONFormat
@@ -138,9 +154,11 @@ def to_binary(event: BaseCloudEvent, event_format: Format) -> HTTPMessage:
 
 def from_binary(
     message: HTTPMessage,
-    event_format: Format,
+    event_format: Format | None = None,
     event_factory: EventFactory | None = None,
-) -> BaseCloudEvent:
+    *extra_args: Any,
+    **reception_options: Any,
+) -> BaseCloudEvent | ReceiveResult:
     """
     Parse an HTTP binary content mode message to a CloudEvent.
 
@@ -165,8 +183,14 @@ def from_binary(
     :param message: HTTPMessage to parse
     :param event_format: Format implementation for data deserialization
     :param event_factory: Factory function to create CloudEvent instances (auto-detected if None)
-    :return: CloudEvent instance
+    :return: CloudEvent instance, or a reception result when requested.
     """
+    event_format, event_factory, reception_options = normalize_reception_call(
+        event_format, event_factory, extra_args, reception_options
+    )
+    if event_format is None:
+        event_format = JSONFormat()
+
     attributes: dict[str, Any] = {}
 
     for header_name, header_value in message.headers.items():
@@ -186,7 +210,15 @@ def from_binary(
     datacontenttype = attributes.get(DATACONTENTTYPE_ATTR)
     data = event_format.read_data(message.body, datacontenttype)
 
-    return event_factory(attributes, data)
+    event = event_factory(attributes, data)
+    return finalize_reception(
+        event,
+        protocol="http",
+        mode="binary",
+        message=message,
+        decoder=event_format,
+        options=reception_options,
+    )
 
 
 def to_structured(event: BaseCloudEvent, event_format: Format) -> HTTPMessage:
@@ -224,9 +256,11 @@ def to_structured(event: BaseCloudEvent, event_format: Format) -> HTTPMessage:
 
 def from_structured(
     message: HTTPMessage,
-    event_format: Format,
+    event_format: Format | None = None,
     event_factory: EventFactory | None = None,
-) -> BaseCloudEvent:
+    *extra_args: Any,
+    **reception_options: Any,
+) -> BaseCloudEvent | ReceiveResult:
     """
     Parse an HTTP structured content mode message to a CloudEvent.
 
@@ -256,15 +290,31 @@ def from_structured(
                          If None, the format will auto-detect the version.
     :return: CloudEvent instance
     """
-    # Delegate version detection to format layer
-    return event_format.read(event_factory, message.body)
+    event_format, event_factory, reception_options = normalize_reception_call(
+        event_format, event_factory, extra_args, reception_options
+    )
+    if event_format is None:
+        event_format = JSONFormat()
+
+    # Delegate version detection to format layer. Format.read is invoked once.
+    event = event_format.read(event_factory, message.body)
+    return finalize_reception(
+        event,
+        protocol="http",
+        mode="structured",
+        message=message,
+        decoder=event_format,
+        options=reception_options,
+    )
 
 
 def from_http(
     message: HTTPMessage,
-    event_format: Format,
+    event_format: Format | None = None,
     event_factory: EventFactory | None = None,
-) -> BaseCloudEvent:
+    *extra_args: Any,
+    **reception_options: Any,
+) -> BaseCloudEvent | ReceiveResult:
     """
     Parse an HTTP message to a CloudEvent with automatic mode detection.
 
@@ -300,10 +350,16 @@ def from_http(
     :param event_factory: Factory function to create CloudEvent instances (auto-detected if None)
     :return: CloudEvent instance
     """
-    if any(key.lower().startswith(CE_PREFIX) for key in message.headers.keys()):
-        return from_binary(message, event_format, event_factory)
+    event_format, event_factory, reception_options = normalize_reception_call(
+        event_format, event_factory, extra_args, reception_options
+    )
+    if event_format is None:
+        event_format = JSONFormat()
 
-    return from_structured(message, event_format, event_factory)
+    if any(key.lower().startswith(CE_PREFIX) for key in message.headers.keys()):
+        return from_binary(message, event_format, event_factory, **reception_options)
+
+    return from_structured(message, event_format, event_factory, **reception_options)
 
 
 def to_binary_event(
@@ -335,7 +391,8 @@ def to_binary_event(
 def from_binary_event(
     message: HTTPMessage,
     event_format: Format | None = None,
-) -> BaseCloudEvent:
+    **reception_options: Any,
+) -> BaseCloudEvent | ReceiveResult:
     """
     Convenience wrapper for from_binary with JSON format and auto-detection.
 
@@ -351,7 +408,7 @@ def from_binary_event(
     """
     if event_format is None:
         event_format = JSONFormat()
-    return from_binary(message, event_format, None)
+    return from_binary(message, event_format, None, **reception_options)
 
 
 def to_structured_event(
@@ -383,7 +440,8 @@ def to_structured_event(
 def from_structured_event(
     message: HTTPMessage,
     event_format: Format | None = None,
-) -> BaseCloudEvent:
+    **reception_options: Any,
+) -> BaseCloudEvent | ReceiveResult:
     """
     Convenience wrapper for from_structured with JSON format and auto-detection.
 
@@ -399,13 +457,14 @@ def from_structured_event(
     """
     if event_format is None:
         event_format = JSONFormat()
-    return from_structured(message, event_format, None)
+    return from_structured(message, event_format, None, **reception_options)
 
 
 def from_http_event(
     message: HTTPMessage,
     event_format: Format | None = None,
-) -> BaseCloudEvent:
+    **reception_options: Any,
+) -> BaseCloudEvent | ReceiveResult:
     """
     Convenience wrapper for from_http with JSON format and auto-detection.
     Auto-detects binary or structured mode, and CloudEvents version.
@@ -420,4 +479,31 @@ def from_http_event(
     """
     if event_format is None:
         event_format = JSONFormat()
-    return from_http(message, event_format, None)
+    return from_http(message, event_format, None, **reception_options)
+
+
+def receive(
+    message: HTTPMessage,
+    event_format: Format | None = None,
+    event_factory: EventFactory | None = None,
+    *extra_args: Any,
+    raise_on_denied: bool = False,
+    **reception_options: Any,
+) -> ReceiveResult:
+    """Receive an HTTP message and return a delivery/admission result."""
+    reception_options["return_result"] = True
+    reception_options["raise_on_denied"] = raise_on_denied
+    result = from_http(
+        message, event_format, event_factory, *extra_args, **reception_options
+    )
+    return (
+        result
+        if isinstance(result, ReceiveResult)
+        else ReceiveResult(
+            accepted=True, delivered=True, stage="delivered", event=result
+        )
+    )
+
+
+receive_event = receive
+receive_http = receive

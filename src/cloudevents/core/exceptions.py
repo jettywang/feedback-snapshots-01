@@ -15,6 +15,8 @@
 Common exceptions for CloudEvents (version-agnostic).
 """
 
+from typing import Any
+
 
 class BaseCloudEventException(Exception):
     """A CloudEvent generic exception."""
@@ -79,3 +81,48 @@ class InvalidAttributeValueError(BaseCloudEventException, ValueError):
     def __init__(self, attribute_name: str, msg: str) -> None:
         self.attribute_name: str = attribute_name
         super().__init__(msg)
+
+
+class AdmissionDeniedError(BaseCloudEventException, PermissionError):
+    """
+    Raised when a host admission policy refuses to deliver an event.
+
+    The stage intentionally defaults to ``"source_admission"``: policy is
+    evaluated after wire decoding so structured-mode source claims are visible,
+    but before the event is handed to application code.
+    """
+
+    def __init__(
+        self,
+        message: str = "CloudEvent source admission denied",
+        *,
+        stage: Any = None,
+        context: Any = None,
+        decision: Any = None,
+        event: Any = None,
+        source: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.stage: Any = stage if stage is not None else "source_admission"
+        self.context = context
+        self.decision = decision
+        self.event = event
+        self.source = source
+        self.phase = "after_decode"
+        self.completed_stages: tuple[str, ...] = (
+            "mode_selection",
+            "decode",
+        )
+
+
+# Common semantic aliases used by host applications and acceptance tests.
+SourceAdmissionDenied = AdmissionDeniedError
+SourceAdmissionDeniedError = AdmissionDeniedError
+SourceAdmissionError = AdmissionDeniedError
+AdmissionError = AdmissionDeniedError
+AdmissionDenied = AdmissionDeniedError
+AdmissionRejectedError = AdmissionDeniedError
+SourceNotAdmittedError = AdmissionDeniedError
+SourceRejectedError = AdmissionDeniedError
+BoundaryPolicyDeniedError = AdmissionDeniedError
+PolicyDeniedError = AdmissionDeniedError

@@ -25,6 +25,24 @@ from urllib.parse import quote, unquote
 
 from dateutil.parser import isoparse
 
+from cloudevents.core.admission import (
+    ADMISSION_STAGE,
+    AdmissionContext,
+    AdmissionDecision,
+    AdmissionDeniedError,
+    AdmissionPolicy,
+    ConnectionContext,
+    ConnectionSourcePolicy,
+    MemorySink,
+    ReceiveContext,
+    ReceiveReceipt,
+    ReceiveResult,
+    SourceAdmission,
+    SourceAdmissionDeniedError,
+    SourceAdmissionError,
+    SourceAdmissionPolicy,
+    finalize_reception,
+)
 from cloudevents.core.base import EventFactory
 from cloudevents.core.spec import SPECVERSION_V0_3
 from cloudevents.core.v03.event import CloudEvent as CloudEventV03
@@ -87,3 +105,23 @@ def get_event_factory_for_version(specversion: str) -> EventFactory:
         return CloudEventV03
     # Default to v1.0 for unknown versions
     return CloudEvent
+
+
+__all__ = [
+    "ADMISSION_STAGE",
+    "AdmissionContext",
+    "AdmissionDecision",
+    "AdmissionDeniedError",
+    "AdmissionPolicy",
+    "ConnectionContext",
+    "ConnectionSourcePolicy",
+    "MemorySink",
+    "ReceiveContext",
+    "ReceiveReceipt",
+    "ReceiveResult",
+    "SourceAdmission",
+    "SourceAdmissionDeniedError",
+    "SourceAdmissionError",
+    "SourceAdmissionPolicy",
+    "finalize_reception",
+]
