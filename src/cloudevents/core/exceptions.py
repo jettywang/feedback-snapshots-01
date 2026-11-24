@@ -15,9 +15,49 @@
 Common exceptions for CloudEvents (version-agnostic).
 """
 
+from enum import Enum
+
 
 class BaseCloudEventException(Exception):
     """A CloudEvent generic exception."""
+
+
+class ConversionStage(str, Enum):
+    """
+    Stages of the strict structured-to-binary conversion at which a failure
+    can be reported.
+    """
+
+    DECODE = "decode"
+    ATTRIBUTE = "attribute"
+    DATA = "data"
+
+
+class StrictConversionError(BaseCloudEventException):
+    """
+    Raised when a structured CloudEvent cannot be strictly converted to a
+    binary binding message.
+
+    Carries the name of the attribute that failed conversion (None for
+    envelope-level failures) and the conversion stage at which the failure
+    was detected. Raised before any target message is created.
+    """
+
+    def __init__(
+        self, attribute_name: "str | None", stage: ConversionStage, msg: str
+    ) -> None:
+        """
+        :param attribute_name: The attribute that failed conversion, or None
+            if the failure is not tied to a single attribute.
+        :param stage: The conversion stage at which the failure occurred.
+        :param msg: A human-readable description of the failure.
+        """
+        self.attribute_name: str | None = attribute_name
+        self.stage: ConversionStage = stage
+        super().__init__(
+            f"Conversion failed at stage '{stage.value}'"
+            f" for attribute '{attribute_name}': {msg}"
+        )
 
 
 class CloudEventValidationError(BaseCloudEventException):
