@@ -417,11 +417,11 @@ class Elastic::Transport::Transport::BaseTest < Minitest::Test
     end
 
     should "log the request and response" do
-      @transport.logger.expects(:info).  with do |line|
-        line =~ %r|POST localhost\:9200/_search\?size=1 \[status\:200, request:.*s, query:n/a\]|
+      @transport.logger.expects(:info).with do |line|
+        line =~ %r|POST localhost\:9200/_search\?size=1 \[request:[0-9a-f]{16}, attempt:1, node:.*\] \[status\:200, request:.*s, query:n/a\]|
       end
-      @transport.logger.expects(:debug). with '> {"foo":"bar"}'
-      @transport.logger.expects(:debug). with '< {"foo":"bar"}'
+      @transport.logger.expects(:debug).with '> [OMITTED]'
+      @transport.logger.expects(:debug).with '< {"foo":"bar"}'
 
       @transport.perform_request 'POST', '_search', {:size => 1}, {:foo => 'bar'} do
                    Elastic::Transport::Transport::Response.new 200, '{"foo":"bar"}'
@@ -437,7 +437,9 @@ class Elastic::Transport::Transport::BaseTest < Minitest::Test
       @transport.stubs(:get_connection).returns(fake_connection)
 
       @transport.logger.expects(:info).with do |message|
-        assert_match(/http:\/\/user:\*{1,15}@localhost\:9200/, message)
+        assert_match(%r{http://:<REDACTED>@localhost:9200}, message)
+        refute_match(/password/, message)
+        assert_match(/request:[0-9a-f]{16}, attempt:1, node:/, message)
         true
       end
 
@@ -503,18 +505,14 @@ class Elastic::Transport::Transport::BaseTest < Minitest::Test
     end
 
     should "trace the request" do
-      @transport.tracer.expects(:info).  with do |message|
-        message == <<-CURL.gsub(/^            /, '')
-            curl -X POST 'http://localhost:9200/_search?pretty&size=1' -d '{
-              "foo" : {
-                "bar" : {
-                  "bam" : true
-                }
-              }
-            }
-            '
-          CURL
+      @transport.tracer.expects(:info).with do |message|
+        message =~ /# request:[0-9a-f]{16} attempt:1 node:/
       end.once
+      @transport.tracer.expects(:info).with do |message|
+        message == "curl -X POST 'localhost:9200/_search?size=1'"
+      end.once
+      @transport.tracer.expects(:debug).with { |message| message.start_with?('# ') && message.include?('[200]') }.once
+      @transport.tracer.expects(:debug).with { |message| message.start_with?('# ') && message.include?('foo') }.once
 
       @transport.perform_request 'POST', '_search', {:size => 1}, {:q => 'foo'} do
                    Elastic::Transport::Transport::Response.new 200, '{"foo":"bar"}'

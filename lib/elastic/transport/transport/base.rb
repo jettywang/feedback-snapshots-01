@@ -30,9 +30,9 @@ module Elastic
         DEFAULT_RESURRECT_AFTER  = 60     # Seconds
         DEFAULT_MAX_RETRIES      = 3      # Requests
         DEFAULT_SERIALIZER_CLASS = Serializer::MultiJson
-        SANITIZED_PASSWORD       = '*' * (rand(14) + 1)
 
-        attr_reader   :hosts, :options, :connections, :counter, :last_request_at, :protocol
+        attr_reader   :hosts, :options, :connections, :counter, :last_request_at, :protocol,
+                      :publishing_policy
         attr_accessor :serializer, :sniffer, :logger, :tracer,
                       :reload_connections, :reload_after,
                       :resurrect_after
@@ -67,6 +67,7 @@ module Elastic
 
           @logger      = options[:logger]
           @tracer      = options[:tracer]
+          @publishing_policy = options[:publishing_policy] || PublishingPolicy.new(options)
 
           @sniffer     = options[:sniffer_class] ? options[:sniffer_class].new(self) : Sniffer.new(self)
           @counter     = 0
@@ -195,37 +196,56 @@ module Elastic
           # A hook point for specific adapters when they need to close connections
         end
 
-        # Log request and response information
+        # Log request and response information.
+        #
+        # Only fields allowed by the shared {PublishingPolicy} are logged: the
+        # sanitized URL, correlation identifiers and the redacted response body.
+        # Credentials, request bodies and sensitive response fields never reach
+        # the logger.
         #
         # @api private
         #
-        def __log_response(method, path, params, body, url, response, json, took, duration)
-          if logger
-            sanitized_url = sanitize_url(url.to_s)
-            log_info "#{method.to_s.upcase} #{sanitized_url} " +
-                         "[status:#{response.status}, request:#{sprintf('%.3fs', duration)}, query:#{took}]"
-            log_debug "> #{__convert_to_json(body)}" if body
-            log_debug "< #{response.body}"
-          end
+        def __log_response(method, url, response, took, duration, attempt)
+          return unless logger
+
+          sanitized_url = publishing_policy.sanitize_url(url.to_s)
+          log_info "#{publishing_record_prefix(method, sanitized_url, attempt)} " +
+                       "[status:#{response.status}, request:#{sprintf('%.3fs', duration)}, query:#{took}]"
+          log_debug "> #{publishing_policy.sanitize_request_body(nil)}"
+          published_body = publishing_policy.sanitize_response_body(response.body, serializer)
+          log_debug "< #{render_published_body(published_body)}" if published_body
         end
 
-        # Trace the request in the `curl` format
+        # Trace the request in the `curl` format.
+        #
+        # The curl command is built exclusively from sanitized material, so it
+        # is safe to hand to an external maintainer: credentials are stripped
+        # from the URL, sensitive headers are redacted and the request body is
+        # omitted rather than printed.
         #
         # @api private
         #
-        def __trace(method, path, params, headers, body, url, response, json, took, duration)
-          trace_url  = "http://localhost:9200/#{path}?pretty" +
-              (params.empty? ? '' : "&#{::Faraday::Utils::ParamsHash[params].to_query}")
-          trace_body = body ? " -d '#{__convert_to_json(body, :pretty => true)}'" : ''
+        def __trace(method, url, headers, response, duration, attempt)
+          return unless tracer
+
+          trace_url = publishing_policy.sanitize_url(url.to_s)
           trace_command = "curl -X #{method.to_s.upcase}"
-          trace_command += " -H '#{headers.collect { |k, v| "#{k}: #{v}" }.join(", ")}'" if headers && !headers.empty?
-          trace_command += " '#{trace_url}'#{trace_body}\n"
+          sanitized_headers = publishing_policy.sanitize_headers(headers)
+          if sanitized_headers && !sanitized_headers.empty?
+            trace_command += " -H '#{sanitized_headers.collect { |k, v| "#{k}: #{v}" }.join(', ')}'"
+          end
+          trace_command += " '#{trace_url}'"
+          tracer.info "# #{trace_correlation_line(attempt)}"
           tracer.info trace_command
-          tracer.debug "# #{Time.now.iso8601} [#{response.status}] (#{format('%.3f', duration)}s)\n#"
-          tracer.debug json ? serializer.dump(json, pretty: true).gsub(/^/, '# ').sub(/\}$/, "\n# }")+"\n" : "# #{response.body}\n"
+          tracer.debug "# #{Time.now.iso8601} [#{response.status}] (#{format('%.3f', duration)}s)"
+          published_body = publishing_policy.sanitize_response_body(response.body, serializer)
+          tracer.debug(published_body ? dump_published_body(published_body) : '# [OMITTED]')
         end
 
         # Raise error specific for the HTTP response status or a generic server error
+        #
+        # The raised message keeps the original response body for callers, but any
+        # value captured for telemetry is filtered by the shared publishing policy.
         #
         # @api private
         #
@@ -282,6 +302,10 @@ module Elastic
           pin_ca_certificate! if options[:ca_fingerprint]
           start = Time.now
           tries = 0
+          # Correlation identifier shared by every published record (tracer line,
+          # log line and span attribute) of this request and all of its retries.
+          request_id = PublishingPolicy.request_id
+          attempts = []
           reload_on_failure = opts.fetch(:reload_on_failure, @options[:reload_on_failure])
           delay_on_retry = opts.fetch(:delay_on_retry, @options[:delay_on_retry])
           max_retries = max_retries(opts) || max_retries(options)
@@ -300,6 +324,8 @@ module Elastic
             end
 
             url = connection.full_url(path, params)
+            attempt = build_attempt(request_id, tries, connection, url)
+            capture_otel_attempt_attributes(attempt)
             response = block.call(connection, url)
             connection.healthy! if connection.failures.positive?
 
@@ -307,19 +333,21 @@ module Elastic
             __raise_transport_error(response) if response.status.to_i >= 300 &&
                                                  @retry_on_status.include?(response.status.to_i)
           rescue Elastic::Transport::Transport::ServerError => e
+            record_failed_attempt(attempts, attempt, response, e) if defined?(attempt)
             raise e unless response && @retry_on_status.include?(response.status)
 
-            log_warn "[#{e.class}] Attempt #{tries} to get response from #{url}"
+            log_warn "[#{e.class}] Attempt #{tries} to get response from #{publishing_policy.sanitize_url(url)}"
             if tries <= (max_retries || DEFAULT_MAX_RETRIES)
               retry
             else
-              message = "[#{e.class}] Cannot get response from #{url} after #{tries} tries"
-              log_fatal(message)
-              capture_otel_error_attributes(message)
+              message = "[#{e.class}] Cannot get response from #{publishing_policy.sanitize_url(url)} after #{tries} tries"
+              log_fatal(publishing_policy.sanitize_error_message(message))
+              capture_otel_error_attributes(message, attempt)
               raise e
             end
           rescue *host_unreachable_exceptions => e
-            log_error "[#{e.class}] #{e.message} #{connection.host.inspect}"
+            record_failed_attempt(attempts, attempt, response, e) if defined?(attempt)
+            log_error "[#{e.class}] #{publishing_policy.sanitize_error_message(e.message)} #{connection.host.inspect}"
 
             connection.dead!
 
@@ -330,8 +358,11 @@ module Elastic
 
             exception = Elastic::Transport::Transport::Error.new(e.message)
 
+            # Record the failure on the span even when a later retry succeeds,
+            # so a published trace keeps the failed-node history.
+            capture_otel_error_attributes(exception.message, attempt)
+
             unless max_retries
-              capture_otel_error_attributes(exception.message)
               raise exception
             end
 
@@ -341,24 +372,28 @@ module Elastic
             else
               message = "[#{e.class}] Cannot connect to #{connection.host.inspect} after #{tries} tries"
               log_fatal(message)
-              capture_otel_error_attributes(message)
+              capture_otel_error_attributes(message, attempt)
               raise exception
             end
           rescue Exception => e
+            record_failed_attempt(attempts, attempt, response, e) if defined?(attempt)
             message = "[#{e.class}] #{e.message} (#{connection.host.inspect if connection})"
-            log_fatal message
-            capture_otel_error_attributes(message)
+            log_fatal(publishing_policy.sanitize_error_message(message))
+            capture_otel_error_attributes(message, defined?(attempt) ? attempt : nil)
             raise e
           end #/begin
 
           duration = Time.now - start
+          attempt[:status] = response.status
+          attempts << attempt
+
+          publish_attempts(method, response, duration, attempts)
 
           if response.status.to_i >= 300
-            __log_response(method, path, params, body, url, response, nil, 'N/A', duration)
-            __trace(method, path, params, connection_headers(connection), body, url, response, nil, 'N/A', duration) if tracer
-
             # Log the failure only when `ignore` doesn't match the response status
-            log_fatal("[#{response.status}] #{response.body}") unless ignore.include?(response.status.to_i)
+            unless ignore.include?(response.status.to_i)
+              log_fatal(publishing_policy.sanitize_error_message("[#{response.status}] #{response.body}"))
+            end
             __raise_transport_error response unless ignore.include?(response.status.to_i)
           end
 
@@ -368,9 +403,6 @@ module Elastic
              response.headers['content-type'] =~ /json/
             json = serializer.load(response.body)
           end
-          took = (json['took'] ? sprintf('%.3fs', json['took'] / 1000.0) : 'n/a') rescue 'n/a'
-          __log_response(method, path, params, body, url, response, json, took, duration) unless ignore.include?(response.status.to_i)
-          __trace(method, path, params, connection_headers(connection), body, url, response, nil, 'N/A', duration) if tracer
           log_warn(response.headers['warning']) if response.headers&.[]('warning')
 
           if opentelemetry? && response.status
@@ -488,24 +520,102 @@ module Elastic
         end
 
         def sanitize_url(url)
-          url.to_s.gsub(/\/\/(.+):(.+)@/, '//' + '\1:' + SANITIZED_PASSWORD + '@')
+          publishing_policy.sanitize_url(url)
         end
 
         def opentelemetry?
           defined?(::OpenTelemetry)
         end
 
-        def capture_otel_span_attributes(connection, url)
-          if opentelemetry?
-            ::OpenTelemetry::Trace.current_span&.set_attribute('url.full', sanitize_url(url))
-            ::OpenTelemetry::Trace.current_span&.set_attribute('server.address', connection.host[:host])
-            ::OpenTelemetry::Trace.current_span&.set_attribute('server.port', connection.host[:port].to_i)
+        # Builds the shared, correlation-enabled record for a single attempt.
+        # The same record feeds the tracer, the logger and the span.
+        def build_attempt(request_id, tries, connection, url)
+          {
+            request_id: request_id,
+            attempt: tries,
+            node: PublishingPolicy.node_id(connection),
+            url: url,
+            connection: connection
+          }
+        end
+
+        # Stores a failed attempt so its trace/log record can be published after
+        # the request settles, keeping the retry history together.
+        def record_failed_attempt(attempts, attempt, response, error)
+          return unless attempt
+          return if attempts.include?(attempt)
+
+          attempt[:status] = response.status if response
+          attempt[:error] = publishing_policy.sanitize_error_message("#{error.class}: #{error.message}")
+          attempts << attempt
+        end
+
+        # Publishes every attempt (failed retries and the final one) through the
+        # tracer and the logger, each in its own output format but with the same
+        # sanitized fields and correlation identifiers.
+        def publish_attempts(method, response, duration, attempts)
+          attempts.each_with_index do |attempt, index|
+            attempt_response = index == attempts.size - 1 ? response : attempt_response_placeholder(attempt)
+            if logger
+              __log_response(method, attempt[:url], attempt_response, 'n/a', duration, attempt)
+            end
+            if tracer
+              __trace(method, attempt[:url], connection_headers(attempt[:connection]),
+                      attempt_response, duration, attempt)
+            end
           end
         end
 
-        def capture_otel_error_attributes(error)
-          if opentelemetry?
-            ::OpenTelemetry::Trace.current_span&.set_attribute('error.type', error)
+        def attempt_response_placeholder(attempt)
+          Response.new(attempt[:status] || 0, attempt[:error] || PublishingPolicy::OMITTED, {})
+        end
+
+        def publishing_record_prefix(method, sanitized_url, attempt)
+          "#{method.to_s.upcase} #{sanitized_url} [request:#{attempt[:request_id]}, " +
+            "attempt:#{attempt[:attempt]}, node:#{attempt[:node]}]"
+        end
+
+        def trace_correlation_line(attempt)
+          "request:#{attempt[:request_id]} attempt:#{attempt[:attempt]} node:#{attempt[:node]}"
+        end
+
+        def dump_published_body(published_body)
+          if published_body.is_a?(String)
+            "# #{published_body}"
+          else
+            serializer.dump(published_body, pretty: true).gsub(/^/, '# ')
+          end
+        end
+
+        def render_published_body(published_body)
+          published_body.is_a?(String) ? published_body : serializer.dump(published_body)
+        end
+
+        # Per-attempt span attributes: node identity and retry number join the
+        # existing url/server attributes, all filtered by the publishing policy.
+        def capture_otel_attempt_attributes(attempt)
+          return unless opentelemetry?
+
+          span = ::OpenTelemetry::Trace.current_span
+          return unless span
+
+          span.set_attribute('url.full', publishing_policy.sanitize_url(attempt[:url]))
+          span.set_attribute('server.address', attempt[:connection].host[:host])
+          span.set_attribute('server.port', attempt[:connection].host[:port].to_i)
+          span.set_attribute('elastic.attempt.node', attempt[:node])
+          span.set_attribute('elastic.attempt.number', attempt[:attempt])
+        end
+
+        def capture_otel_error_attributes(error, attempt = nil)
+          return unless opentelemetry?
+
+          span = ::OpenTelemetry::Trace.current_span
+          return unless span
+
+          span.set_attribute('error.type', publishing_policy.sanitize_error_message(error))
+          if attempt
+            span.set_attribute('error.attempt.node', attempt[:node])
+            span.set_attribute('error.attempt.number', attempt[:attempt])
           end
         end
       end

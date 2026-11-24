@@ -1,3 +1,12 @@
+## Unreleased
+
+- **Breaking:** introduces one shared publication policy (`Elastic::Transport::PublishingPolicy`) for the curl-style tracer, the logger and OpenTelemetry spans, so records handed to external maintainers can no longer leak credentials, request bodies or sensitive response fields.
+  - Request bodies are never published: the tracer omits the `-d` payload and the logger prints `[OMITTED]` instead of the request body. The OpenTelemetry `db.query.text` attribute and the legacy `OTEL_RUBY_INSTRUMENTATION_ELASTICSEARCH_CAPTURE_SEARCH_QUERY` / `..._SEARCH_QUERY_SANITIZE_KEYS` body-capture options are no longer used; `Elastic::Transport::OpenTelemetry.process_body`, its `Sanitizer` and the search-endpoint list are removed.
+  - URL userinfo is replaced with `:<REDACTED>` consistently across logs, traces and the `url.full` span attribute, and sensitive request headers (`Authorization`, cookies, token/secret/auth headers) are redacted in the curl trace.
+  - Response bodies are parsed and sensitive keys (passwords, tokens, keys, secrets and configurable extras via `:sensitive_keys`) are redacted before logging or tracing; unparseable bodies are omitted.
+  - Free-form error messages and the `error.type` span attribute are filtered through the same policy before they leave the process.
+  - Every published record now carries a shared correlation id plus the attempt number and node id (`elastic.attempt.number` / `elastic.attempt.node` on spans), so a failed node and the successful retry are traceable across the tracer, logger and telemetry. The actual request still uses the original connection parameters, headers and body; only published output is filtered.
+
 ## 8.6.0
 
 - **Breaking:** fixes `ca_fingerprint` so it secures the connections used for requests. The certificate matching the fingerprint is fetched from the server's chain and used as the only trusted certificate on every connection, with chain and expiry verification left on. Host names aren't checked (a pinned intermediate can't be used on JRuby, and the certificate is fetched without a proxy), so a cluster reached by a name or IP that isn't in its certificate works (Faraday 1 and Manticore still check them). Previously the fingerprint was checked on a separate socket and matched any certificate the server sent, without checking that the server's certificate was signed by it.

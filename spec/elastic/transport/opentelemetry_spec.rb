@@ -69,7 +69,8 @@ if defined?(::OpenTelemetry)
         expect(span.attributes['db.operation.parameter.index']).to eql('users')
         expect(span.attributes['db.operation.parameter.id']).to eq('abc')
         expect(span.attributes['db.operation.name']).to eq('create')
-        expect(span.attributes['db.statement']).to be_nil
+        expect(span.attributes['db.query.text']).to be_nil
+        expect(span.attributes['elastic.attempt.number']).to eq(1)
         expect(span.attributes['http.request.method']).to eq('POST')
         expect(span.attributes['server.address']).to eq('localhost')
         expect(span.attributes['server.port']).to eq(TEST_PORT.to_i)
@@ -116,117 +117,23 @@ if defined?(::OpenTelemetry)
         expect(span.attributes['server.port']).to eq(TEST_PORT.to_i)
       end
 
-      context 'when body is sanitized' do
-        context 'no custom keys' do
-          let(:sanitized_body) do
-            { query: { match: { password: 'REDACTED' } } }
-          end
+      it 'publishes per-attempt node and retry attributes from the shared policy' do
+        client.perform_request('GET', '/_search', nil, body, nil, endpoint: 'search')
 
-          around(:example) do |ex|
-            body_strategy = ENV[described_class::ENV_VARIABLE_BODY_STRATEGY]
-            ENV[described_class::ENV_VARIABLE_BODY_STRATEGY]  = 'sanitize'
-            ex.run
-            ENV[described_class::ENV_VARIABLE_BODY_STRATEGY] = body_strategy
-          end
-
-          it 'sanitizes the body' do
-            client.perform_request('GET', '/_search', nil, body, nil, endpoint: 'search')
-
-            expect(span.attributes['db.query.text']).to eq(sanitized_body.to_json)
-          end
-        end
-
-        context 'with deprecated ENV variable' do
-          let(:sanitized_body) do
-            { query: { match: { password: 'REDACTED' } } }
-          end
-
-          around(:example) do |ex|
-            body_strategy = ENV[described_class::ENV_VARIABLE_DEPRECATED_BODY_STRATEGY]
-            ENV[described_class::ENV_VARIABLE_DEPRECATED_BODY_STRATEGY]  = 'sanitize'
-            ex.run
-            ENV[described_class::ENV_VARIABLE_DEPRECATED_BODY_STRATEGY] = body_strategy
-          end
-
-          it 'sanitizes the body' do
-            client.perform_request('GET', '/_search', nil, body, nil, endpoint: 'search')
-
-            expect(span.attributes['db.query.text']).to eq(sanitized_body.to_json)
-          end
-        end
-
-        context 'with custom keys' do
-          let(:body) do
-            { query: { match: { sensitive: { query: 'secret' } } } }
-          end
-
-          let(:sanitized_body) do
-            { query: { match: { sensitive: 'REDACTED' } } }
-          end
-
-          around(:example) do |ex|
-            body_strategy = ENV[described_class::ENV_VARIABLE_BODY_STRATEGY]
-            ENV[described_class::ENV_VARIABLE_BODY_STRATEGY] = 'sanitize'
-
-            keys = ENV[described_class::ENV_VARIABLE_BODY_SANITIZE_KEYS]
-            ENV[described_class::ENV_VARIABLE_BODY_SANITIZE_KEYS] = 'sensitive'
-
-            ex.run
-
-            ENV[described_class::ENV_VARIABLE_BODY_STRATEGY] = body_strategy
-            ENV[described_class::ENV_VARIABLE_BODY_SANITIZE_KEYS] = keys
-          end
-
-          it 'sanitizes the body' do
-            client.perform_request('GET', '/_search', nil, body, nil, endpoint: 'search')
-
-            expect(span.attributes['db.query.text']).to eq(sanitized_body.to_json)
-          end
-        end
+        expect(span.attributes['elastic.attempt.number']).to eq(1)
+        expect(span.attributes['elastic.attempt.node']).to match(%r{\Ahttp://localhost:#{TEST_PORT}\z})
       end
 
-      context 'when body strategy is set to raw' do
-        let(:body) do
-          { query: { match: { sensitive: { query: 'secret'} } } }
-        end
+      context 'regardless of any legacy body capture preference' do
+        %w[sanitize raw omit].each do |strategy|
+          it "does not capture db.query.text even when raw bodies were preferred (#{strategy})" do
+            allow(ENV).to receive(:[]).and_call_original
+            allow(ENV).to receive(:[]).with('OTEL_RUBY_INSTRUMENTATION_ELASTICSEARCH_CAPTURE_SEARCH_QUERY').and_return(strategy)
 
-        around(:example) do |ex|
-          body_strategy = ENV[described_class::ENV_VARIABLE_BODY_STRATEGY]
-          ENV[described_class::ENV_VARIABLE_BODY_STRATEGY]  = 'raw'
-          ex.run
-          ENV[described_class::ENV_VARIABLE_BODY_STRATEGY] = body_strategy
-        end
-
-        context 'when the body is a string' do
-          it 'includes the raw body' do
-            client.perform_request('GET', '/_search', nil, body.to_json, nil, endpoint: 'search')
-            expect(span.attributes['db.query.text']).to eq(body.to_json)
-          end
-        end
-
-        context' when the body is a hash' do
-          it 'includes the raw body' do
             client.perform_request('GET', '/_search', nil, body, nil, endpoint: 'search')
-            expect(span.attributes['db.query.text']).to eq(body.to_json)
+
+            expect(span.attributes['db.query.text']).to be_nil
           end
-        end
-      end
-
-      context 'when body strategy is set to omit' do
-        let(:body) do
-          { query: { match: { sensitive: { query: 'secret'} } } }
-        end
-
-        around(:example) do |ex|
-          body_strategy = ENV[described_class::ENV_VARIABLE_BODY_STRATEGY]
-          ENV[described_class::ENV_VARIABLE_BODY_STRATEGY] = 'omit'
-          ex.run
-          ENV[described_class::ENV_VARIABLE_BODY_STRATEGY]= body_strategy
-        end
-
-        it 'does not include anything' do
-          client.perform_request('GET', '/_search', nil, body, nil, endpoint: 'search')
-          expect(span.attributes['db.query.text']).to be_nil
         end
       end
 
@@ -303,53 +210,20 @@ if defined?(::OpenTelemetry)
       end
     end
 
-    describe Elastic::Transport::OpenTelemetry::Sanitizer do
-      let(:key_patterns) { nil }
+    context 'sanitize in URL' do
+      let(:client) {
+        Elastic::Transport::Client.new(host: "http://elastic:changeme@#{ELASTICSEARCH_HOSTS.first}")
+      }
 
-      context '#sanitize' do
-        let(:body) do
-          { query: { match: { password: "test" } } }
-        end
+      it 'sanitizes URL' do
+        client.perform_request(
+          'GET', '/', {}, nil, {}
+        )
 
-        let(:expected_body) do
-          { query: { match: { password: "REDACTED" } } }
-        end
-
-        it 'redacts sensitive values' do
-          expect(described_class.sanitize(body, key_patterns)).to eq(expected_body)
-        end
-
-        context 'with specified key patterns' do
-          let(:key_patterns) { [/something/] }
-
-          let(:body) do
-            { query: { match: { something: 'test' } } }
-          end
-
-          let(:expected_body) do
-            { query: { match: { something: 'REDACTED' } } }
-          end
-
-          it 'redacts sensitive values' do
-            expect(described_class.sanitize(body, key_patterns)).to eq(expected_body)
-          end
-        end
-      end
-
-      context 'sanitize in URL' do
-        let(:client) {
-          Elastic::Transport::Client.new(host: "http://elastic:changeme@#{ELASTICSEARCH_HOSTS.first}")
-        }
-
-        it 'sanitizes URL' do
-          client.perform_request(
-            'GET', '/', {}, nil, {}
-          )
-
-          span = exporter.finished_spans.find { |s| s.name == 'GET' }
-          expect(span.name).to eql('GET')
-          expect(span.attributes['url.full']).to match(/http:\/\/elastic:\*+@localhost:/)
-        end
+        span = exporter.finished_spans.find { |s| s.name == 'GET' }
+        expect(span.name).to eql('GET')
+        expect(span.attributes['url.full']).to match(%r{http://:<REDACTED>@localhost:})
+        expect(span.attributes['url.full']).not_to include('changeme')
       end
     end
   end

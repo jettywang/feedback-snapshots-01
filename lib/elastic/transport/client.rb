@@ -187,9 +187,7 @@ module Elastic
                                                       v
                                                     end
             end
-            if (body_as_json = @otel.process_body(body, opts[:endpoint]))
-              span['db.query.text'] = body_as_json
-            end
+            # The request body is never written to the span, see PublishingPolicy.
             span['db.operation.name'] = opts[:endpoint] if opts[:endpoint]
             transport.perform_request(method, path, params || {}, body, headers)
           end
