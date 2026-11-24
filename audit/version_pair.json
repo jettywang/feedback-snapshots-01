@@ -1,0 +1,176 @@
+{
+  "library": "dry-schema 1.17.0",
+  "note": "Params and JSON exports are byte-identical for the same rule AST; runtime admission differs.",
+  "v1": {
+    "params_export": {
+      "$schema": "http://json-schema.org/draft-06/schema#",
+      "type": "object",
+      "properties": {
+        "tenant_id": {
+          "type": "integer"
+        },
+        "role": {
+          "type": "string"
+        },
+        "scopes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "expires_on": {
+          "type": "string",
+          "format": "date"
+        },
+        "channel": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "tenant_id",
+        "role"
+      ]
+    },
+    "json_export": {
+      "$schema": "http://json-schema.org/draft-06/schema#",
+      "type": "object",
+      "properties": {
+        "tenant_id": {
+          "type": "integer"
+        },
+        "role": {
+          "type": "string"
+        },
+        "scopes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "expires_on": {
+          "type": "string",
+          "format": "date"
+        },
+        "channel": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "tenant_id",
+        "role"
+      ]
+    }
+  },
+  "v2": {
+    "params_export": {
+      "$schema": "http://json-schema.org/draft-06/schema#",
+      "type": "object",
+      "properties": {
+        "tenant_id": {
+          "type": "integer",
+          "exclusiveMinimum": 0
+        },
+        "role": {
+          "type": "string",
+          "enum": [
+            "admin",
+            "editor",
+            "viewer"
+          ]
+        },
+        "scopes": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 5,
+          "items": {
+            "type": "string",
+            "enum": [
+              "read",
+              "write",
+              "approve"
+            ]
+          }
+        },
+        "expires_on": {
+          "type": "string",
+          "format": "date"
+        },
+        "channel": {
+          "type": [
+            "null",
+            "string"
+          ],
+          "enum": [
+            "web",
+            "mobile"
+          ]
+        },
+        "tier": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "tenant_id",
+        "role",
+        "scopes",
+        "expires_on",
+        "tier"
+      ]
+    },
+    "json_export": {
+      "$schema": "http://json-schema.org/draft-06/schema#",
+      "type": "object",
+      "properties": {
+        "tenant_id": {
+          "type": "integer",
+          "exclusiveMinimum": 0
+        },
+        "role": {
+          "type": "string",
+          "enum": [
+            "admin",
+            "editor",
+            "viewer"
+          ]
+        },
+        "scopes": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 5,
+          "items": {
+            "type": "string",
+            "enum": [
+              "read",
+              "write",
+              "approve"
+            ]
+          }
+        },
+        "expires_on": {
+          "type": "string",
+          "format": "date"
+        },
+        "channel": {
+          "type": [
+            "null",
+            "string"
+          ],
+          "enum": [
+            "web",
+            "mobile"
+          ]
+        },
+        "tier": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "tenant_id",
+        "role",
+        "scopes",
+        "expires_on",
+        "tier"
+      ]
+    }
+  }
+}
