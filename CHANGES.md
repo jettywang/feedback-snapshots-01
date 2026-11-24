@@ -157,6 +157,11 @@ an error when nonce is accessed after response if not already generated.
 - Made changes to simplify middleware logic and make `CSPMiddleware` easier to subclass. The updated
 middleware returns a PolicyParts dataclass that can be modified before the policy is built.
 ([#237](https://github.com/mozilla/django-csp/pull/237))
+- Added `csp.evidence.export_policy_evidence()` for producing a shareable policy review report
+alongside an internal receipt. The public report records directive names, policy modes, change
+origins, and keyed fingerprints for private-network and runtime-generated values; the internal
+receipt retains the original values and observed response headers. The export is read-only and does
+not modify the response or generate a nonce.
 
 ## Other Changes
 
