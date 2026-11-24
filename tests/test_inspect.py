@@ -11,6 +11,10 @@ from textwrap import dedent
 import pytest
 
 from dynaconf import Dynaconf
+from dynaconf.utils.files import content_digest
+from dynaconf.utils.forensics import compare_snapshots
+from dynaconf.utils.forensics import get_forensic_snapshot
+from dynaconf.utils.forensics import verify_file_digest
 from dynaconf.utils.inspect import _ensure_serializable
 from dynaconf.utils.inspect import _get_data_by_key
 from dynaconf.utils.inspect import EnvNotFoundError
@@ -1039,3 +1043,428 @@ def test_get_debug_info(tmp_path):
     assert debug_info["history"][10]["data"] == {}
     assert debug_info["loaded_hooks"][0]["data"] == {}
     assert debug_info["loaded_hooks"][1]["data"] == {}
+
+
+# ---------------------------------------------------------------------------
+# Forensic snapshots: existing loading records -> evidence, generations, gaps
+# ---------------------------------------------------------------------------
+
+
+def _snapshot_run(
+    files, *, env_name=None, env=None, label=None, previous=None
+):
+    """Build a settings generation and its forensic snapshot."""
+    if env_name is not None:
+        os.environ["DYNACONF_NAME"] = env_name
+    settings = Dynaconf(settings_file=files, environments=True)
+    return settings, get_forensic_snapshot(
+        settings, label=label, previous=previous
+    )
+
+
+def _sources_by_file(snapshot, filename):
+    return [
+        source
+        for source in snapshot["sources"]
+        if os.path.basename(source["identifier"]) == filename
+    ]
+
+
+def test_forensic_snapshot_separates_direct_and_merged_evidence(tmp_path):
+    """Three sources: two files and one envvar.
+
+    The direct value from each source is recorded separately from the value
+    that was effective after merging, and the winning source per key is known.
+    """
+    base = create_file(
+        tmp_path / "base.toml",
+        """\
+        [default]
+        name = "from_base"
+        port = 8000
+        nested = {a = 1, b = 2}
+        items = [1, 2]
+        """,
+    )
+    overrides = create_file(
+        tmp_path / "overrides.toml",
+        """\
+        [default]
+        port = 9000
+        nested = {b = 3}
+        items = [3, "dynaconf_merge"]
+        """,
+    )
+    _, snapshot = _snapshot_run(
+        [base, overrides], env_name="from_env", label="run-1"
+    )
+
+    # Application sources: base file, override file, its merge record and the
+    # envvar. The merge record is kept apart from the plain file record.
+    assert [source["identifier"] for source in snapshot["sources"]] == [
+        str(base),
+        str(overrides),
+        str(overrides),
+        "DYNACONF",
+    ]
+    assert [source["merged"] for source in snapshot["sources"]] == [
+        False,
+        False,
+        True,
+        False,
+    ]
+
+    base_source = _sources_by_file(snapshot, "base.toml")[0]
+    assert base_source["keys"]["PORT"]["direct"] == 8000
+    assert base_source["keys"]["PORT"]["effective"] == 8000
+    assert base_source["keys"]["PORT"]["changed"] is True
+
+    override_source = _sources_by_file(snapshot, "overrides.toml")[0]
+    # File defaults still replace earlier values as usual.
+    assert override_source["keys"]["PORT"] == {
+        "direct": 9000,
+        "before": 8000,
+        "effective": 9000,
+        "changed": True,
+        "change": "modified",
+    }
+    # A plain nested override replaces the mapping (no implicit merge).
+    assert override_source["keys"]["NESTED"]["direct"] == {"b": 3}
+    assert override_source["keys"]["NESTED"]["before"] == {"a": 1, "b": 2}
+    assert override_source["keys"]["NESTED"]["effective"] == {"b": 3}
+
+    # The merge record is a distinct source record with its own digest/merge
+    # evidence; the raw marker is kept separate from the merged outcome.
+    merge_record = _sources_by_file(snapshot, "overrides.toml")[1]
+    assert merge_record["merged"] is True
+    item = merge_record["keys"]["ITEMS"]
+    assert item["direct"] == [3, "dynaconf_merge"]
+    assert item["effective"] == [1, 2, 3]
+    assert item["merged"] is True
+    assert merge_record["merged_keys"] == ["ITEMS"]
+
+    env_source = snapshot["sources"][-1]
+    assert env_source["loader"] == "env_global"
+    assert env_source["keys"]["NAME"] == {
+        "direct": "from_env",
+        "before": "from_base",
+        "effective": "from_env",
+        "changed": True,
+        "change": "modified",
+    }
+
+    # Final merged state and its winning sources.
+    assert snapshot["current"] == {
+        "NAME": "from_env",
+        "PORT": 9000,
+        "NESTED": {"b": 3},
+        "ITEMS": [1, 2, 3],
+    }
+    assert snapshot["keys"]["NAME"]["source"]["identifier"] == "DYNACONF"
+    assert snapshot["keys"]["PORT"]["source"]["identifier"] == str(overrides)
+    assert snapshot["keys"]["ITEMS"]["source"]["merged"] is True
+    assert snapshot["keys"]["ITEMS"]["direct"] == [3, "dynaconf_merge"]
+
+    # Each file source carries a digest that can be looked up again.
+    assert override_source["digest"]["algorithm"] == "sha256"
+    assert snapshot["files"][str(overrides)]["value"] == content_digest(
+        overrides
+    )["value"]
+
+
+def test_forensic_snapshot_two_runs_report_changed_keys_and_order(tmp_path):
+    """Two generations: content change in one file plus an envvar change."""
+    base = create_file(
+        tmp_path / "base.toml", '[default]\nname = "base"\nport = 8000\n'
+    )
+    overrides = create_file(
+        tmp_path / "overrides.toml", "[default]\nport = 9000\n"
+    )
+
+    _, first = _snapshot_run(
+        [base, overrides], env_name="first", label="run-1"
+    )
+    assert first["generation"]["label"] == "run-1"
+    assert first["current"]["NAME"] == "first"
+    assert first["generation"]["id"].startswith("sha256:")
+
+    create_file(
+        tmp_path / "base.toml", '[default]\nname = "base"\nport = 8100\n'
+    )
+    _, second = _snapshot_run(
+        [base, overrides],
+        env_name="second",
+        label="run-2",
+        previous=first,
+    )
+
+    assert second["generation"]["id"] != first["generation"]["id"]
+
+    # Only NAME changes in the final state: PORT is still overridden by the
+    # later file, even though base.toml's raw default for PORT changed.
+    changes = {change["key"]: change for change in second["changes"]}
+    assert set(changes) == {"NAME"}
+    assert changes["NAME"]["previous"] == "first"
+    assert changes["NAME"]["current"] == "second"
+    assert changes["NAME"]["source"]["identifier"] == "DYNACONF"
+    assert changes["NAME"]["previous_source"]["identifier"] == "DYNACONF"
+
+    # The base file content change is still visible in the source evidence,
+    # including the keys whose raw contributed value changed.
+    source_changes = {
+        change["change"]: change
+        for change in second["comparison"]["source_changes"]
+    }
+    content_change = source_changes["content_changed"]
+    assert content_change["identifier"] == str(base)
+    assert (
+        content_change["previous_digest"]
+        != content_change["current_digest"]
+    )
+    assert set(content_change["changed_keys"]) == {"NAME", "PORT"}
+
+    # Override order is preserved across generations.
+    assert [source["identifier"] for source in second["sources"]] == [
+        str(base),
+        str(overrides),
+        "DYNACONF",
+    ]
+
+
+def test_forensic_snapshot_missing_source_reports_evidence_gap(tmp_path):
+    """Dropping a source must produce an explicit evidence gap."""
+    base = create_file(
+        tmp_path / "base.toml", '[default]\nname = "base"\nport = 8000\n'
+    )
+    overrides = create_file(
+        tmp_path / "overrides.toml", "[default]\nport = 9000\n"
+    )
+
+    _, first = _snapshot_run([base, overrides], env_name="one", label="run-1")
+    _, second = _snapshot_run(
+        [base], env_name="one", label="run-2", previous=first
+    )
+
+    # Runtime behaviour is unchanged: base.toml default wins again.
+    assert second["current"]["PORT"] == 8000
+
+    missing = [
+        gap for gap in second["gaps"] if gap["kind"] == "source_missing"
+    ]
+    assert len(missing) == 1
+    gap = missing[0]
+    assert gap["identifier"] == str(overrides)
+    assert gap["previous_digest"]["value"] == content_digest(overrides)[
+        "value"
+    ]
+    assert gap["keys_previously_loaded"] == ["PORT"]
+    assert gap["keys_no_longer_covered"] == ["PORT"]
+
+    source_change = [
+        change
+        for change in second["comparison"]["source_changes"]
+        if change["change"] == "source_missing"
+    ]
+    assert len(source_change) == 1
+    assert source_change[0]["source"] == (
+        f"toml|{overrides}|default|direct"
+    )
+
+
+def test_forensic_snapshot_missing_source_not_a_gap_when_covered(tmp_path):
+    """A dropped source is not a gap when another source still covers a key."""
+    base = create_file(
+        tmp_path / "base.toml", '[default]\nshared = "base"\nbase_only = 1\n'
+    )
+    extra = create_file(
+        tmp_path / "extra.toml",
+        '[default]\nshared = "extra"\nextra_only = 2\n',
+    )
+    _, first = _snapshot_run([base], env_name="one", label="run-1")
+    _, second = _snapshot_run(
+        [base, extra], env_name="one", label="run-2", previous=first
+    )
+
+    # Adding a source is not a gap.
+    assert second["gaps"] == []
+    assert second["comparison"]["source_changes"] == [
+        {
+            "source": f"toml|{extra}|default|direct",
+            "change": "source_added",
+            "loader": "toml",
+            "identifier": str(extra),
+            "env": "default",
+            "changed_keys": ["EXTRA_ONLY", "SHARED"],
+        }
+    ]
+    # The newly added source changes only the keys it actually overtakes.
+    added = second["comparison"]["source_changes"][0]
+    assert added["changed_keys"] == ["EXTRA_ONLY", "SHARED"]
+    assert second["keys"]["SHARED"]["source"]["identifier"] == str(extra)
+    assert second["keys"]["BASE_ONLY"]["source"]["identifier"] == str(base)
+
+
+def test_forensic_snapshot_missing_file_is_recorded_even_on_first_run(
+    tmp_path,
+):
+    """A requested-but-absent source must be a gap without a previous run."""
+    base = create_file(
+        tmp_path / "base.toml", "[default]\nname = \"base\"\n"
+    )
+    missing = tmp_path / "missing.toml"
+
+    _, snapshot = _snapshot_run(
+        [base, missing], env_name=None, label="run-1"
+    )
+
+    gaps = [
+        gap
+        for gap in snapshot["gaps"]
+        if gap["kind"] == "source_unavailable"
+    ]
+    assert len(gaps) == 1
+    assert gaps[0]["identifier"] == str(missing)
+    assert gaps[0]["missing"] is True
+    assert "not evidenced" in gaps[0]["detail"]
+
+
+def test_forensic_snapshot_verify_file_digest(tmp_path):
+    """The recorded file digest can be re-checked against current bytes."""
+    base = create_file(tmp_path / "base.toml", "[default]\nname = \"base\"\n")
+    _, snapshot = _snapshot_run([base], label="run-1")
+
+    match = verify_file_digest(snapshot, str(base))
+    assert match["status"] == "match"
+    assert match["match"] is True
+
+    create_file(tmp_path / "base.toml", "[default]\nname = \"changed\"\n")
+    mismatch = verify_file_digest(snapshot, str(base))
+    assert mismatch["status"] == "mismatch"
+    assert mismatch["match"] is False
+    assert mismatch["expected"]["value"] != mismatch["actual"]["value"]
+
+    unknown = verify_file_digest(snapshot, "does-not-exist.toml")
+    assert unknown["status"] == "not_recorded"
+
+
+def test_forensic_snapshot_compare_snapshots_is_order_independent(tmp_path):
+    """Comparison uses source identity, not incidental list ordering."""
+    base = create_file(tmp_path / "base.toml", "[default]\na = 1\n")
+    _, first = _snapshot_run([base], label="run-1")
+
+    shuffled = copy.deepcopy(first)
+    shuffled["sources"].reverse()
+    shuffled["keys"] = dict(reversed(list(shuffled["keys"].items())))
+
+    assert compare_snapshots(shuffled, first)["changes"] == []
+    assert compare_snapshots(shuffled, first)["source_changes"] == []
+
+
+def test_forensic_snapshot_winner_matches_parent_after_from_env(tmp_path):
+    """from_env merges child records into the parent.
+
+    The snapshot must keep the winning source consistent with the value that
+    is actually effective on the object being inspected.
+    """
+    filename = create_file(
+        tmp_path / "a.toml",
+        """\
+        [default]
+        name = "base"
+        [production]
+        name = "prod"
+        port = 7000
+        """,
+    )
+    settings = Dynaconf(settings_file=filename, environments=True)
+    settings.from_env("production")
+
+    snapshot = get_forensic_snapshot(settings)
+
+    # The parent object is still on the default/development env.
+    assert settings.current_env == "DEVELOPMENT"
+    assert snapshot["current"]["NAME"] == "base"
+    assert snapshot["keys"]["NAME"]["source"]["env"] == "default"
+    # A key loaded only by the child env is retained as historical evidence,
+    # but it is explicitly not effective on the parent.
+    assert snapshot["keys"]["PORT"]["state"] == "not_effective"
+    assert snapshot["keys"]["PORT"]["source"] is None
+
+
+def test_forensic_snapshot_runtime_set_merge_is_evidenced(tmp_path):
+    """A runtime `set("@merge ...")` is direct evidence, not internals."""
+    filename = create_file(tmp_path / "a.toml", "[default]\nitems = [1, 2]\n")
+    settings = Dynaconf(settings_file=filename, environments=True)
+    settings.set("ITEMS", "@merge [9]")
+
+    snapshot = get_forensic_snapshot(settings)
+
+    runtime_sources = [
+        source
+        for source in snapshot["sources"]
+        if source["loader"] == "set_method"
+        and source["identifier"] == "undefined"
+    ]
+    assert len(runtime_sources) == 1
+    runtime = runtime_sources[0]
+    assert runtime["merged"] is True
+    assert runtime["keys"]["ITEMS"]["direct"] == "@merge [9]"
+    assert runtime["keys"]["ITEMS"]["before"] == [1, 2]
+    assert runtime["keys"]["ITEMS"]["effective"] == [1, 2, 9]
+    assert snapshot["current"]["ITEMS"] == [1, 2, 9]
+    # No Dynaconf internal setting leaks into a default snapshot.
+    assert "RENAMED_VARS" not in snapshot["current"]
+    assert not any(
+        key.endswith("_FOR_DYNACONF") for key in snapshot["current"]
+    )
+
+
+def test_forensic_snapshot_three_loader_types_and_generation_sequence(
+    tmp_path,
+):
+    """TOML, YAML and envvar sources, with generations numbered per run."""
+    toml_file = create_file(
+        tmp_path / "a.toml", '[default]\nport = 8000\nname = "toml"\n'
+    )
+    yaml_file = create_file(
+        tmp_path / "b.yaml",
+        """\
+        default:
+          port: 8100
+          name: yaml
+        """,
+    )
+    os.environ["DYNACONF_NAME"] = "envvar"
+
+    settings = Dynaconf(
+        settings_file=[toml_file, yaml_file], environments=True
+    )
+    first = get_forensic_snapshot(settings, label="run-1")
+
+    assert first["generation"]["sequence"] == 1
+    assert [source["loader"] for source in first["sources"]] == [
+        "toml",
+        "yaml",
+        "env_global",
+    ]
+    assert [source["order"] for source in first["sources"]] == sorted(
+        source["order"] for source in first["sources"]
+    )
+    # YAML overrides TOML defaults; envvar overrides both.
+    assert first["keys"]["PORT"]["source"]["loader"] == "yaml"
+    assert first["keys"]["NAME"]["source"]["loader"] == "env_global"
+    assert first["current"] == {"PORT": 8100, "NAME": "envvar"}
+
+    os.environ["DYNACONF_NAME"] = "envvar-2"
+    settings = Dynaconf(
+        settings_file=[toml_file, yaml_file], environments=True
+    )
+    second = get_forensic_snapshot(
+        settings, label="run-2", previous=first
+    )
+
+    assert second["generation"]["sequence"] == 2
+    assert [change["key"] for change in second["changes"]] == ["NAME"]
+    assert second["changes"][0]["source"]["loader"] == "env_global"
+    # The file sources are unchanged, so no content change is reported.
+    assert second["comparison"]["source_changes"] == []

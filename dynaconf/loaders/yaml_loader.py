@@ -8,6 +8,7 @@ from dynaconf.constants import YAML_EXTENSIONS
 from dynaconf.loaders.base import BaseLoader
 from dynaconf.loaders.base import SourceMetadata
 from dynaconf.utils import object_merge
+from dynaconf.utils.files import content_digest
 from dynaconf.utils.parse_conf import try_to_encode
 from dynaconf.vendor.ruamel import yaml
 
@@ -42,9 +43,20 @@ class AllLoader(BaseLoader):
                     with open(source_file, **self.opener_params) as open_file:
                         content = self.file_reader(open_file)
                         config.loaded_files.append(source_file)
+                        config.loaded_file_digests[source_file] = (
+                            content_digest(source_file)
+                        )
                         self._assign_data(data, source_file, content)
                 except OSError as e:
                     if ".local." not in source_file:
+                        config.loaded_source_errors.append(
+                            {
+                                "loader": self.identifier,
+                                "identifier": source_file,
+                                "error": f"{type(e).__name__}: {e}",
+                                "missing": isinstance(e, FileNotFoundError),
+                            }
+                        )
                         warn(
                             f"{self.identifier}_loader: {source_file} "
                             f":{str(e)}"

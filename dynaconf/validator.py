@@ -333,6 +333,19 @@ class Validator:
                 d2 = env_settings.loaded_by_loaders  # type: ignore
                 d1.update(d2)
 
+                config = settings.__core__.config
+                env_config = env_settings.__core__.config
+                config.loaded_effects.update(env_config.loaded_effects)
+                config.loaded_file_digests.update(
+                    env_config.loaded_file_digests
+                )
+                config.loaded_source_digests.update(
+                    env_config.loaded_source_digests
+                )
+                config.loaded_source_errors.extend(
+                    env_config.loaded_source_errors
+                )
+
     def _validate_names(
         self,
         settings: Settings | dict,

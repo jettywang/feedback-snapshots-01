@@ -222,10 +222,82 @@ Kwargs-only:
 Returns a list of history-records (the same as in the `history` key of `inspect_settings` records. In fact, `inspect_settings` uses `get_history`, so this is just available if your main goal is to use the data directly. It offer some basic filtering capabilities, but it is assumed that if you choose to use this you'll probably want to process and filter the data by your own.
 
 
+### Forensic snapshots
+
+> **NEW** in version 3.3.6
+
+The inspection history records every source and the raw value it provided. A
+forensic snapshot turns that record into evidence: which source changed which
+key, which generation of the settings was in effect, and which exact file
+content was loaded. It is aimed at the "some values changed after a restart"
+kind of investigation.
+
+```python
+from dynaconf import Dynaconf
+from dynaconf import get_forensic_snapshot
+
+settings = Dynaconf(settings_file=["defaults.toml", "overrides.toml"])
+snapshot = get_forensic_snapshot(settings, label="run-1")
+```
+
+A snapshot has the following top-level keys:
+
+- `generation`: an `id` digest for the whole generation (values + sources),
+  plus a `values_digest`, the label, current env and loaded files.
+- `current`: the fully merged settings as they are effective now.
+- `sources`: one record per loading source, in loading order. Each record
+  contains `loader`, `identifier`, `env`, `merged`, a file `digest`, and a
+  `keys` mapping. For each key it keeps the `direct` raw value and the
+  `effective` value after that source was applied, plus `before` and whether
+  it `changed`.
+- `keys`: per key, the final `effective` value, the winning `source` and the
+  full `history`.
+- `files`: content digests (`sha256` + size) for every loaded file.
+- `gaps`: explicit evidence gaps (sources requested but unavailable, or files
+  whose digest could not be captured).
+
+Direct source values and merged results are deliberately separate. For
+example, a `dynaconf_merge` list records its raw marker value in `direct` and
+the merged list in `effective`, so the report never claims the source
+literally contained the merged result.
+
+Runtime behaviour is unchanged: environment variables still override file
+values, and file defaults still merge/replace exactly as configured.
+
+#### Comparing two runs
+
+Pass the previous snapshot to produce a diff and evidence gaps:
+
+```python
+snapshot_1 = get_forensic_snapshot(settings, label="before-restart")
+# ... restart, reload settings from the same paths ...
+snapshot_2 = get_forensic_snapshot(
+    settings, label="after-restart", previous=snapshot_1
+)
+```
+
+`snapshot_2["changes"]` lists added/removed/modified keys with their previous
+and current winning sources. `snapshot_2["comparison"]["source_changes"]`
+reports sources whose file content changed, whose effects changed, that were
+added, or that disappeared from the current generation. A source that is
+present in the previous snapshot but absent now also becomes a `source_missing`
+gap, listing the keys that are no longer evidenced by it.
+
+The digest can be re-checked against the bytes on disk:
+
+```python
+from dynaconf import verify_file_digest
+
+result = verify_file_digest(snapshot_2, "overrides.toml")
+assert result["status"] in {"match", "mismatch", "file_unavailable"}
+```
+
+Finally, `dump_forensic_snapshot(snapshot, to_file="report.json", dumper="json")`
+serialises the snapshot with the same dumpers used by `inspect_settings`.
+
 ### `get_debug_info`
 
 Returns a dictionary containing debug information about the settings object. This information includes the current environment, the settings file, the loaders, and the history of the settings object.
-
 ```python
 from dynaconf.utils.inspect_settings import get_debug_info
 get_debug_info(settings.DYNACONF, verbosity=0, key="data")

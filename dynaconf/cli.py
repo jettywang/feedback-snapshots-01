@@ -30,6 +30,8 @@ from dynaconf.utils.inspect import inspect_settings
 from dynaconf.utils.inspect import KeyNotFoundError
 from dynaconf.utils.inspect import OutputFormatError
 from dynaconf.utils.inspect import print_debug_info
+from dynaconf.utils.forensics import dump_forensic_snapshot
+from dynaconf.utils.forensics import get_forensic_snapshot
 from dynaconf.utils.parse_conf import parse_conf_data
 from dynaconf.utils.parse_conf import unparse_conf_data
 from dynaconf.validator import ValidationError
@@ -908,7 +910,7 @@ INSPECT_FORMATS = list(builtin_dumpers.keys())
     "report_mode",
     "-m",
     default="inspect",
-    type=click.Choice(["inspect", "debug"]),
+    type=click.Choice(["inspect", "debug", "forensic"]),
 )
 @click.option(
     "-v",
@@ -916,8 +918,23 @@ INSPECT_FORMATS = list(builtin_dumpers.keys())
     count=True,
     help="Increase verbosity of the output on --report-mode=debug.",
 )
+@click.option(
+    "--previous-snapshot",
+    "previous_snapshot",
+    default=None,
+    type=click.Path(dir_okay=False, exists=True),
+    help="Compare against a snapshot file on --report-mode=forensic.",
+)
 def inspect(
-    key, env, format, new_first, history_limit, _all, report_mode, verbose
+    key,
+    env,
+    format,
+    new_first,
+    history_limit,
+    _all,
+    report_mode,
+    verbose,
+    previous_snapshot,
 ):  # pragma: no cover
     """
     Inspect the loading history of the given settings instance.
@@ -932,6 +949,18 @@ def inspect(
             verbosity=verbose,
             key=key,
         )
+        click.echo()
+    elif report_mode == "forensic":
+        previous = None
+        if previous_snapshot:
+            with open(previous_snapshot, encoding="utf-8") as file:
+                previous = json.load(file)
+        snapshot = get_forensic_snapshot(
+            settings,
+            previous=previous,
+            include_internal=_all,
+        )
+        dump_forensic_snapshot(snapshot, dumper=format, print_report=True)
         click.echo()
     elif report_mode == "inspect":
         try:

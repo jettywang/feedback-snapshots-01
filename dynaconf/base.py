@@ -43,6 +43,7 @@ from dynaconf.utils import object_merge
 from dynaconf.utils import RENAMED_VARS
 from dynaconf.utils import to_dict
 from dynaconf.utils import upperfy
+from dynaconf.utils.files import content_digest
 from dynaconf.utils.files import find_file
 from dynaconf.utils.files import glob
 from dynaconf.utils.files import has_magic
@@ -173,6 +174,10 @@ class DynaconfConfig:
         default_factory=lambda: defaultdict(dict)
     )
     loaded_by_loaders: dict[SourceMetadata, Any] = field(default_factory=dict)
+    loaded_effects: dict[SourceMetadata, Any] = field(default_factory=dict)
+    loaded_file_digests: dict[str, Any] = field(default_factory=dict)
+    loaded_source_digests: dict[Any, Any] = field(default_factory=dict)
+    loaded_source_errors: list[dict[str, Any]] = field(default_factory=list)
     loaded_py_modules: list[str] = field(default_factory=list)
     loaded_files: list[str] = field(default_factory=list)
     loaders: list[str] = field(default_factory=list)
@@ -192,6 +197,10 @@ class DynaconfConfig:
             "defaults",
             "loaded_envs",
             "loaded_hooks",
+            "loaded_effects",
+            "loaded_file_digests",
+            "loaded_source_digests",
+            "loaded_source_errors",
             "loaded_py_modules",
             "loaded_files",
             "deleted",
@@ -817,6 +826,18 @@ class Settings:
 
         # update source metadata for inspecting
         self.loaded_by_loaders.update(new_settings.loaded_by_loaders)
+        config.loaded_effects.update(
+            new_settings.__core__.config.loaded_effects
+        )
+        config.loaded_file_digests.update(
+            new_settings.__core__.config.loaded_file_digests
+        )
+        config.loaded_source_digests.update(
+            new_settings.__core__.config.loaded_source_digests
+        )
+        config.loaded_source_errors.extend(
+            new_settings.__core__.config.loaded_source_errors
+        )
 
         return new_settings
 
@@ -1298,6 +1319,29 @@ class Settings:
             self.loaded_by_loaders[source_metadata][key] = value
         else:
             self.loaded_by_loaders[source_metadata] = {key: value}
+
+        # Track the effective value produced by this source. The raw value is
+        # kept in `loaded_by_loaders`; this sidecar holds what the setting
+        # looked like right after the source was applied (i.e. after merges).
+        try:
+            effect = copy.deepcopy(parsed)
+        except (TypeError, copy.Error):  # pragma: no cover
+            effect = parsed
+        if source_metadata in config.loaded_effects:
+            config.loaded_effects[source_metadata][key] = effect
+        else:
+            config.loaded_effects[source_metadata] = {key: effect}
+
+        # Associate the digest of the backing file (if any) with the exact
+        # source metadata, so a snapshot can point each source at its bytes.
+        source_file = source_metadata.identifier
+        if isinstance(source_file, str) and os.path.isfile(source_file):
+            digest = config.loaded_file_digests.get(source_file)
+            if digest is None:
+                digest = content_digest(source_file)
+                config.loaded_file_digests[source_file] = digest
+            if digest is not None:
+                config.loaded_source_digests[source_metadata] = digest
 
         if loader_identifier is None:
             # if .set is called without loader identifier it becomes

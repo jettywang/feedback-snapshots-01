@@ -318,6 +318,10 @@ class DynaconfDict(dict):
         self._store = {}
         self._env_cache = {}
         self._loaded_by_loaders = {}
+        self._loaded_effects = {}
+        self._loaded_file_digests = {}
+        self._loaded_source_digests = {}
+        self._loaded_source_errors = []
         self._loaders = []
         self._defaults = {}
         self.environ = os.environ

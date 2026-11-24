@@ -280,6 +280,7 @@ def settings_loader(
 
     found_files = []
     modules_names = []
+    unresolved_files = []
     for item in files:
         item = str(item)  # Ensure str in case of LocalPath/Path is passed.
         p_root = obj._root_path or (
@@ -298,9 +299,24 @@ def settings_loader(
             found = obj.find_file(item, project_root=p_root)
             if found:
                 found_files.append(found)
+            else:
+                unresolved_files.append(item)
         else:
             # a bare python module name w/o extension
             modules_names.append(item)
+
+    if unresolved_files:
+        config = obj.__core__.config
+        for requested in unresolved_files:
+            config.loaded_source_errors.append(
+                {
+                    "loader": identifier,
+                    "identifier": requested,
+                    "error": "FileNotFoundError: requested settings file "
+                    "was not found",
+                    "missing": True,
+                }
+            )
 
     enabled_core_loaders = [
         item.upper() for item in obj.get("CORE_LOADERS_FOR_DYNACONF") or []

@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import hashlib
 import inspect
 import os
 import re
 import sys
 from glob import glob as python_glob
+from pathlib import Path
 
 from dynaconf.utils import deduplicate
 
@@ -94,6 +96,29 @@ def read_file(path, **kwargs):
     with open(path, **kwargs) as open_file:
         content = open_file.read().strip()
     return content
+
+
+def content_digest(path) -> dict[str, str | int | None] | None:
+    """Return a reproducible digest of a loaded settings source.
+
+    The digest is computed from the raw bytes on disk, so it can be used to
+    later prove which exact file content produced a set of settings. Returns
+    ``None`` when building a digest is not possible (path is not a regular
+    file, cannot be read, etc) so callers can record an explicit evidence gap.
+    """
+    try:
+        filepath = Path(path)
+        if not filepath.is_file():
+            return None
+        raw = filepath.read_bytes()
+    except OSError:  # pragma: no cover - depends on filesystem failures
+        return None
+
+    return {
+        "algorithm": "sha256",
+        "value": hashlib.sha256(raw).hexdigest(),
+        "size": len(raw),
+    }
 
 
 def get_local_filename(filename):

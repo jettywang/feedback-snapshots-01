@@ -12,6 +12,7 @@ from dynaconf.loaders.base import SourceMetadata
 from dynaconf.utils import DynaconfDict
 from dynaconf.utils import object_merge
 from dynaconf.utils import upperfy
+from dynaconf.utils.files import content_digest
 from dynaconf.utils.files import find_file
 from dynaconf.utils.functional import empty
 
@@ -82,6 +83,7 @@ def load_from_python_object(
                 config.post_hooks.append(setting_value)
     config.loaded_py_modules.append(mod.__name__)
     config.loaded_files.append(mod.__file__)
+    config.loaded_file_digests[mod.__file__] = content_digest(mod.__file__)
 
 
 def try_to_load_from_py_module_name(

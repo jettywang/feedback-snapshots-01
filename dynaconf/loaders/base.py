@@ -6,6 +6,7 @@ from typing import NamedTuple
 from dynaconf.utils import build_env_list
 from dynaconf.utils import ensure_a_list
 from dynaconf.utils import upperfy
+from dynaconf.utils.files import content_digest
 from dynaconf.utils.functional import empty
 
 
@@ -100,10 +101,23 @@ class BaseLoader:
                     with open(source_file, **self.opener_params) as open_file:
                         content = self.file_reader(open_file)
                         config.loaded_files.append(source_file)
+                        config.loaded_file_digests[source_file] = (
+                            content_digest(source_file)
+                        )
                         if content:
                             data[source_file] = content
                 except OSError as e:
                     if ".local." not in source_file:
+                        config.loaded_source_errors.append(
+                            {
+                                "loader": self.identifier,
+                                "identifier": source_file,
+                                "error": f"{type(e).__name__}: {e}",
+                                "missing": isinstance(
+                                    e, FileNotFoundError
+                                ),
+                            }
+                        )
                         warnings.warn(
                             f"{self.identifier}_loader: {source_file} "
                             f":{str(e)}"

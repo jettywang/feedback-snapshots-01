@@ -136,9 +136,11 @@ Options:
                                   --report-mode=inspect.
 
   -a, --all                       Show dynaconf internal settings?
-  -m, --report-mode [inspect|debug]
+  -m, --report-mode [inspect|debug|forensic]
   -v, --verbose                   Increase verbosity of the output on
                                   --report-mode=debug.
+  --previous-snapshot FILE        Compare against a snapshot file on
+                                  --report-mode=forensic.
 
   --help                          Show this message and exit.
                     Show this message and exit.
@@ -176,6 +178,27 @@ To save to a file, use regular stream redirect methods:
 ```bash
 $ dynaconf -i app.settings inspect -k foo -f yaml > dump.yaml
 ```
+
+#### Inspect Forensic Snapshot
+
+> **NEW** in version 3.3.6
+
+Produce a forensic snapshot from the loading records, optionally comparing it
+against a snapshot captured on a previous run:
+
+```bash
+# capture the current generation
+dynaconf -i app.settings inspect -m forensic -f json > snapshot.json
+
+# after a restart, diff against the previous generation
+dynaconf -i app.settings inspect -m forensic -f json \
+    --previous-snapshot snapshot.json > diff.json
+```
+
+The snapshot separates each source's direct value from the merged result,
+identifies the winning source per key, records file digests, and lists
+evidence gaps when a source is missing. See
+[forensic snapshots](advanced.md#forensic-snapshots) for the data model.
 
 #### Inspect Debug Info
 

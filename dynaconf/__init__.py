@@ -6,6 +6,10 @@ from dynaconf.contrib import DjangoDynaconf
 from dynaconf.contrib import FlaskDynaconf
 from dynaconf.hooking import post_hook
 from dynaconf.nodes import DataDict
+from dynaconf.utils.forensics import compare_snapshots
+from dynaconf.utils.forensics import dump_forensic_snapshot
+from dynaconf.utils.forensics import get_forensic_snapshot
+from dynaconf.utils.forensics import verify_file_digest
 from dynaconf.utils.inspect import get_history
 from dynaconf.utils.inspect import inspect_settings
 from dynaconf.utils.parse_conf import add_converter
@@ -40,6 +44,10 @@ __all__ = [
     "add_converter",
     "inspect_settings",
     "get_history",
+    "get_forensic_snapshot",
+    "compare_snapshots",
+    "verify_file_digest",
+    "dump_forensic_snapshot",
     "DynaconfFormatError",
     "DynaconfParseError",
     "post_hook",
