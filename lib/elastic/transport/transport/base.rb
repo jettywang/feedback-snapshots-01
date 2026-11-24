@@ -60,6 +60,7 @@ module Elastic
           validate_ca_fingerprint_options! if @options[:ca_fingerprint]
           @block       = block
           @compression = !!@options[:compression]
+          @connection_trust_signature = __trust_options_signature(@options)
           @connections = __build_connections
 
           @serializer  = options[:serializer] || ( options[:serializer_class] ? options[:serializer_class].new(self) : DEFAULT_SERIALIZER_CLASS.new(self))
@@ -125,17 +126,27 @@ module Elastic
         #
         def __rebuild_connections(arguments = {})
           @state_mutex.synchronize do
+            trust_options_changed =
+              @connection_trust_signature != __trust_options_signature(arguments[:options] || {})
+
             @hosts       = arguments[:hosts]    || []
             @options     = arguments[:options]  || {}
 
             __close_connections
 
             new_connections = __build_connections
-            stale_connections = @connections.all.reject { |c| new_connections.include?(c) }
-            new_connections = new_connections.reject { |c| @connections.all.include?(c) }
 
-            @connections.remove(stale_connections)
-            @connections.add(new_connections)
+            if trust_options_changed
+              @connections = new_connections
+            else
+              stale_connections = @connections.all.reject { |c| new_connections.include?(c) }
+              new_connections = new_connections.reject { |c| @connections.all.include?(c) }
+
+              @connections.remove(stale_connections)
+              @connections.add(new_connections)
+            end
+
+            @connection_trust_signature = __trust_options_signature(@options)
             @connections
           end
         end
@@ -153,6 +164,15 @@ module Elastic
             selector_class: options[:selector_class],
             selector: options[:selector]
           )
+        end
+
+        # @api private
+        def __trust_options_signature(options)
+          [options[:ssl], options.dig(:transport_options, :ssl)].map do |ssl|
+            next unless ssl.is_a?(Hash)
+
+            ssl.keys.sort_by(&:to_s).map { |key| [key, ssl[key]] }
+          end
         end
 
         # Helper function: Maps over hosts, sets protocol, port and user/password and builds connections
