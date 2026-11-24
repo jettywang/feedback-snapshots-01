@@ -21,6 +21,7 @@ from typing import Any, Final, Pattern
 from dateutil.parser import isoparse
 
 from cloudevents.core.base import BaseCloudEvent, EventFactory
+from cloudevents.core.diagnostics import FailureStage, mark_failure_stage
 from cloudevents.core.formats.base import Format
 from cloudevents.core.spec import SPECVERSION_V0_3, SPECVERSION_V1_0
 
@@ -68,15 +69,24 @@ class JSONFormat(Format):
         """
         decoded_data: str
         if isinstance(data, bytes):
-            decoded_data = data.decode("utf-8")
+            try:
+                decoded_data = data.decode("utf-8")
+            except UnicodeDecodeError as exception:
+                mark_failure_stage(exception, FailureStage.CONTENT_DECODING)
+                raise
         else:
             decoded_data = data
 
         # JSON null attributes have the same meaning as omitted attributes.
         # Only filter the envelope; null values inside data are payload content.
+        try:
+            loaded_attributes = loads(decoded_data)
+        except ValueError as exception:
+            mark_failure_stage(exception, FailureStage.CONTENT_DECODING)
+            raise
         event_attributes = {
             key: value
-            for key, value in loads(decoded_data).items()
+            for key, value in loaded_attributes.items()
             if value is not None
         }
 
@@ -104,15 +114,27 @@ class JSONFormat(Format):
             encoding = event_attributes.get("datacontentencoding", "").lower()
             if encoding == "base64" and isinstance(event_data, str):
                 # Decode base64 encoded data in v0.3
-                event_data = base64.b64decode(event_data)
+                try:
+                    event_data = base64.b64decode(event_data)
+                except ValueError as exception:
+                    mark_failure_stage(exception, FailureStage.CONTENT_DECODING)
+                    raise
 
         # v1.0: Check for data_base64 field (when data is None)
         if event_data is None:
             event_data_base64 = event_attributes.pop("data_base64", None)
             if event_data_base64 is not None:
-                event_data = base64.b64decode(event_data_base64)
+                try:
+                    event_data = base64.b64decode(event_data_base64)
+                except ValueError as exception:
+                    mark_failure_stage(exception, FailureStage.CONTENT_DECODING)
+                    raise
 
-        return event_factory(event_attributes, event_data)
+        try:
+            return event_factory(event_attributes, event_data)
+        except Exception as exception:
+            mark_failure_stage(exception, FailureStage.EVENT_CONSTRUCTION)
+            raise
 
     def write(self, event: BaseCloudEvent) -> bytes:
         """

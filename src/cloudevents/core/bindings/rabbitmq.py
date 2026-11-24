@@ -31,6 +31,12 @@ from cloudevents.core.bindings.common import (
     TIME_ATTR,
     get_event_factory_for_version,
 )
+from cloudevents.core.diagnostics import (
+    ContentMode,
+    FailureStage,
+    ReceptionBinding,
+    diagnostic_receipt,
+)
 from cloudevents.core.formats.base import Format
 from cloudevents.core.formats.json import JSONFormat
 from cloudevents.core.spec import SPECVERSION_V1_0
@@ -170,9 +176,21 @@ def from_binary(
         event_factory = get_event_factory_for_version(specversion)
 
     datacontenttype = attributes.get(DATACONTENTTYPE_ATTR)
-    data = event_format.read_data(message.body, datacontenttype)
+    with diagnostic_receipt(
+        binding=ReceptionBinding.RABBITMQ,
+        content_mode=ContentMode.BINARY,
+        raw_content=message.body,
+        default_stage=FailureStage.CONTENT_DECODING,
+    ):
+        data = event_format.read_data(message.body, datacontenttype)
 
-    return event_factory(attributes, data)
+    with diagnostic_receipt(
+        binding=ReceptionBinding.RABBITMQ,
+        content_mode=ContentMode.BINARY,
+        raw_content=message.body,
+        default_stage=FailureStage.EVENT_CONSTRUCTION,
+    ):
+        return event_factory(attributes, data)
 
 
 def to_structured(event: BaseCloudEvent, event_format: Format) -> RabbitMQMessage:
@@ -237,7 +255,13 @@ def from_structured(
                          If None, the format will auto-detect the version.
     :return: CloudEvent instance
     """
-    return event_format.read(event_factory, message.body)
+    with diagnostic_receipt(
+        binding=ReceptionBinding.RABBITMQ,
+        content_mode=ContentMode.STRUCTURED,
+        raw_content=message.body,
+        default_stage=FailureStage.CONTENT_DECODING,
+    ):
+        return event_format.read(event_factory, message.body)
 
 
 def from_rabbitmq(
