@@ -93,6 +93,7 @@ def pytest_configure(config):
             'tests.authentication',
             'tests.generic_relations',
             'tests.importable',
+            'tests.field_visibility_demo',
             'tests',
         ),
         PASSWORD_HASHERS=(
