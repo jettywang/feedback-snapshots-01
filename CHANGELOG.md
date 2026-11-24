@@ -8,6 +8,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ### Added
 
+- `role_views` extension: build stackable, role-specific views over one compiled
+  schema via `Processor#view`, `#register_role`, `#for_role` and `#role?`. Views
+  inherit the base rules for their permitted keys, reject non-permitted keys and
+  relax required keys so the same rules back partial updates (via `dry-schema#63`)
+
 ### Changed
 
 ### Deprecated

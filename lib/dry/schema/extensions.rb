@@ -19,3 +19,7 @@ end
 Dry::Schema.register_extension(:json_schema) do
   require "dry/schema/extensions/json_schema"
 end
+
+Dry::Schema.register_extension(:role_views) do
+  require "dry/schema/extensions/role_views"
+end
