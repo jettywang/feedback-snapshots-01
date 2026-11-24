@@ -8,6 +8,29 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ### Added
 
+- Optional phase permits for sensitive processor callbacks. A callback registered with
+  `before(step, permit: phase)` or `after(step, permit: phase)` only runs when the call
+  grants that phase; results expose per-call diagnostics with the first failing phase,
+  performed and skipped actions, and whether the output is deliverable.
+
+    ```ruby
+    schema = Dry::Schema.Params do
+      required(:token).filled(:string)
+
+      after(:rule_applier, permit: :finalization) do |result|
+        result.update(token: authorize!(result[:token]))
+      end
+    end
+
+    result = schema.(params, permit: :finalization)
+    result.diagnostics.deliverable?    # => true
+    result.diagnostics.first_failure   # => nil
+    result.diagnostics.skipped         # => []
+    ```
+
+    Callbacks may raise `Dry::Schema::PhaseFailure` to stop processing at a known phase
+    without propagating an exception; the failure is recorded in diagnostics.
+
 ### Changed
 
 ### Deprecated

@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require "dry/schema/constants"
+require "dry/schema/phase"
 
 module Dry
   module Schema
@@ -18,13 +19,39 @@ module Dry
       # @api private
       attr_reader :path
 
+      # Phase in which this step runs
+      #
+      # @return [Symbol]
+      #
+      # @api public
+      attr_reader :phase
+
+      # Phase required for this step to run, or nil when it always runs
+      #
+      # @return [Symbol, nil]
+      #
+      # @api public
+      attr_reader :permit
+
       # @api private
-      def initialize(type:, name:, executor:, path: Path::EMPTY)
+      def initialize(type:, name:, executor:, path: Path::EMPTY, permit: nil)
+        validate_name(name)
+
         @type = type
         @name = name
         @executor = executor
         @path = path
-        validate_name(name)
+        @phase = Phase.for(type: type, name: name)
+        @permit = validate_permit(permit)
+      end
+
+      # Check if running this step requires a permit
+      #
+      # @return [Boolean]
+      #
+      # @api public
+      def sensitive?
+        !permit.nil?
       end
 
       # @api private
@@ -42,7 +69,8 @@ module Dry
           type: type,
           name: name,
           executor: executor,
-          path: Path.new([*parent_path, *path])
+          path: Path.new([*parent_path, *path]),
+          permit: permit
         )
       end
 
@@ -53,6 +81,13 @@ module Dry
         return if STEPS_IN_ORDER.include?(name)
 
         raise ArgumentError, "Undefined step name #{name}. Available names: #{STEPS_IN_ORDER}"
+      end
+
+      # @api private
+      def validate_permit(permit)
+        return if permit.nil?
+
+        Phase.fetch!(permit)
       end
     end
   end

@@ -69,14 +69,29 @@ module Dry
 
       # Apply processing steps to the provided input
       #
+      # @example without permits
+      #   schema.(name: "Jane")
+      #
+      # @example granting permits for sensitive callbacks
+      #   schema.(params, permit: [:validation, :finalization])
+      #
       # @param [Hash] input
+      # @param [nil, true, Symbol, Array<Symbol>] permit Phase permit granted
+      #   to sensitive callbacks for this call
+      # @param [Hash] input_kwargs Input passed as keyword arguments
       #
       # @return [Result]
       #
       # @api public
-      def call(input)
+      def call(input = Undefined, permit: nil, **input_kwargs)
+        input = input_kwargs if input.equal?(Undefined)
+
+        if input.equal?(Undefined)
+          raise ::ArgumentError, "wrong number of arguments (given 0, expected 1)"
+        end
+
         Result.new(input.dup, message_compiler: message_compiler) do |result|
-          steps.call(result)
+          steps.call(result, permit: permit)
         end
       end
       alias_method :[], :call

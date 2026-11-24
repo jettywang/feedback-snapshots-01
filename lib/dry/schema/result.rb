@@ -29,6 +29,18 @@ module Dry
       # @api private
       option :path, optional: true, reader: false
 
+      # Per-call diagnostics recorded while processing
+      #
+      # @return [Diagnostics, nil]
+      #
+      # @api public
+      option :diagnostics, optional: true
+
+      # Diagnostics are attached after construction, before the result is frozen
+      #
+      # @api private
+      attr_writer :diagnostics
+
       # @api private
       def self.new(*, **)
         result = super
@@ -53,6 +65,7 @@ module Dry
           output,
           message_compiler: message_compiler,
           result_ast: result_ast,
+          diagnostics: diagnostics,
           **opts,
           &
         )
@@ -149,6 +162,19 @@ module Dry
       # @api public
       def failure?
         !success?
+      end
+
+      # Check if the result may be delivered
+      #
+      # A result is deliverable only when processing completed without a failed
+      # phase and every sensitive callback actually ran. This is stricter than
+      # {#success?}, which only reflects validation errors.
+      #
+      # @return [Boolean]
+      #
+      # @api public
+      def deliverable?
+        diagnostics ? diagnostics.deliverable? : success?
       end
 
       # Get human-readable error representation

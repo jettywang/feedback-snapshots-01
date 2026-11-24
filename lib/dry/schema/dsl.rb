@@ -241,31 +241,49 @@ module Dry
 
       # Method allows steps injection to the processor
       #
+      # Use `permit:` to mark a callback as sensitive. Sensitive callbacks only
+      # run when a call grants the phase named by the permit and no earlier
+      # phase failed. Otherwise the callback is skipped and the result becomes
+      # non-deliverable.
+      #
       # @example
       #   before(:rule_applier) do |input|
       #     input.compact
       #   end
       #
+      # @example a sensitive callback
+      #   after(:rule_applier, permit: :finalization) do |result|
+      #     result.update(token: authorize!(result[:token]))
+      #   end
+      #
+      # @param [Symbol] key The step name
+      # @param [Symbol, nil] permit The phase permit required to run the callback
+      #
       # @return [DSL]
       #
       # @api public
-      def before(key, &)
-        steps.before(key, &)
+      def before(key, permit: nil, &)
+        steps.before(key, permit: permit, &)
         self
       end
 
       # Method allows steps injection to the processor
+      #
+      # @see #before for the meaning of `permit:`
       #
       # @example
       #   after(:rule_applier) do |input|
       #     input.compact
       #   end
       #
+      # @param [Symbol] key The step name
+      # @param [Symbol, nil] permit The phase permit required to run the callback
+      #
       # @return [DSL]
       #
       # @api public
-      def after(key, &)
-        steps.after(key, &)
+      def after(key, permit: nil, &)
+        steps.after(key, permit: permit, &)
         self
       end
 
