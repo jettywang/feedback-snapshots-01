@@ -80,6 +80,35 @@ be helpful in :doc:`/topics/testing` or for local-development purposes:
     result in sub-optimal performance, and ultimately data-loss in a
     multi-instance environment.
 
+Replayable room history
+-----------------------
+
+``InMemoryChannelLayer`` also provides an opt-in, process-local history
+contract for reconnect tests. It retains the latest ``history_size`` events per
+group (defaulting to 100); set ``history_size`` to ``0`` to disable retention.
+Group events receive a monotonic ``sequence``; ``history_range()`` reports the
+available inclusive interval and ``read_history()`` reads retained events
+without consuming the live queue.
+
+The WebSocket helper ``AsyncReplayWebsocketConsumer`` keeps live subscription
+and history authorization separate. Override ``can_read_history()``; its
+secure default denies history. No retained event is read or sent until that
+asynchronous check returns. Return ``True`` for the whole requested interval,
+a ``SequenceRange`` for a permitted segment, or ``False`` to deny it. The
+consumer sends explicit ``room.history_denied`` ranges and uses a per-room
+``ReplayCursor`` to suppress an event that was both replayed and queued as a
+live broadcast.
+
+Clients can send ``{"type": "room.replay", "room": "room-1",
+"after_sequence": 12}`` and later acknowledge a boundary with
+``{"type": "room.ack", "room": "room-1", "sequence": 15}``. Set
+``auto_replay_on_connect = True`` to read the same boundary from the
+``after_sequence`` query parameter after the WebSocket is accepted.
+
+This history support is intentionally local to the in-memory layer; other
+channel layers should expose their own retention implementation or omit the
+``history`` extension.
+
 Synchronous Functions
 ---------------------
 

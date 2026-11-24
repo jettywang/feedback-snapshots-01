@@ -290,3 +290,18 @@ class AsyncJsonWebsocketConsumer(AsyncWebsocketConsumer):
     @classmethod
     async def encode_json(cls, content):
         return json.dumps(content)
+
+
+def __getattr__(name):
+    if name in {
+        "AsyncReplayWebsocketConsumer",
+        "ReplayWebsocketMixin",
+    }:
+        from .replay import AsyncReplayWebsocketConsumer, ReplayWebsocketMixin
+
+        exports = {
+            "AsyncReplayWebsocketConsumer": AsyncReplayWebsocketConsumer,
+            "ReplayWebsocketMixin": ReplayWebsocketMixin,
+        }
+        return exports[name]
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

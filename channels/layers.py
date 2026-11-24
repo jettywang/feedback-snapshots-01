@@ -5,6 +5,7 @@ import re
 import string
 import time
 import warnings
+from collections import deque
 from copy import deepcopy
 
 from django.conf import settings
@@ -14,6 +15,7 @@ from django.utils.module_loading import import_string
 from channels import DEFAULT_CHANNEL_LAYER
 
 from .exceptions import ChannelFull, InvalidChannelLayerError
+from .replay import SequenceRange
 
 
 class ChannelLayerManager:
@@ -234,6 +236,17 @@ class BaseChannelLayer:
         return self.require_valid_group_name(group_name)
 
 
+class HistoryRegistry(dict):
+    """Mapping of retained room logs that is also directly awaitable/callable."""
+
+    def __init__(self, layer):
+        super().__init__()
+        self.layer = layer
+
+    async def __call__(self, group, *args, **kwargs):
+        return await self.layer.read_history(group, *args, **kwargs)
+
+
 class InMemoryChannelLayer(BaseChannelLayer):
     """
     In-memory channel layer implementation
@@ -245,8 +258,13 @@ class InMemoryChannelLayer(BaseChannelLayer):
         group_expiry=86400,
         capacity=100,
         channel_capacity=None,
+        history_size=100,
+        history_ttl=None,
+        history_limit=None,
         **kwargs,
     ):
+        if history_limit is not None:
+            history_size = history_limit
         super().__init__(
             expiry=expiry,
             capacity=capacity,
@@ -256,10 +274,16 @@ class InMemoryChannelLayer(BaseChannelLayer):
         self.channels = {}
         self.groups = {}
         self.group_expiry = group_expiry
+        self.history_size = history_size
+        self.history_ttl = expiry if history_ttl is None else history_ttl
+        self.history_enabled = bool(history_size) and history_size > 0
+        # group/room -> deque[(expiry, sequence, message)]
+        self.history = HistoryRegistry(self)
+        self.room_sequences = {}
 
     # Channel layer API
 
-    extensions = ["groups", "flush"]
+    extensions = ["groups", "flush", "history", "replay"]
 
     async def send(self, channel, message):
         """
@@ -313,6 +337,124 @@ class InMemoryChannelLayer(BaseChannelLayer):
             "".join(random.choice(string.ascii_letters) for i in range(12)),
         )
 
+    # History/replay extension.  Unlike receive(), these reads are
+    # non-destructive and never represent a current subscription.
+
+    def _clean_history(self, group=None):
+        groups = [group] if group is not None else list(self.history)
+        for room in groups:
+            records = self.history.get(room)
+            if records is None:
+                continue
+            while records and records[0][0] < time.time():
+                records.popleft()
+            if not records:
+                self.history.pop(room, None)
+
+    def _prepare_group_message(self, group, message):
+        if not self.history_enabled:
+            return message
+
+        supplied_sequence = message.get("sequence")
+        if (
+            isinstance(supplied_sequence, int)
+            and not isinstance(supplied_sequence, bool)
+            and supplied_sequence > 0
+        ):
+            sequence = supplied_sequence
+            sequenced_message = deepcopy(message)
+        else:
+            sequence = self.room_sequences.get(group, 0) + 1
+            sequenced_message = {**deepcopy(message), "sequence": sequence}
+
+        self.room_sequences[group] = max(self.room_sequences.get(group, 0), sequence)
+        expiry = time.time() + self.history_ttl
+        records = self.history.setdefault(group, deque(maxlen=self.history_size))
+        records.append((expiry, sequence, sequenced_message))
+        return sequenced_message
+
+    async def publish(self, group, message):
+        """
+        Assign a room sequence, retain the event when history is enabled, and
+        broadcast it through the normal group path.
+        """
+        assert isinstance(message, dict), "Message is not a dict"
+        self.require_valid_group_name(group)
+        sequence = self.room_sequences.get(group, 0) + 1
+        self.room_sequences[group] = sequence
+        event = {**deepcopy(message), "sequence": sequence}
+        await self.group_send(group, event)
+        return sequence
+
+    async def history_range(self, group):
+        """Return the inclusive ``(oldest, latest)`` sequence interval."""
+        self.require_valid_group_name(group)
+        self._clean_history(group)
+        records = self.history.get(group)
+        if not records:
+            return None
+        return SequenceRange(records[0][1], records[-1][1])
+
+    async def read_history(
+        self,
+        group,
+        after_sequence=None,
+        *,
+        after=None,
+        since=None,
+        from_sequence=None,
+        to_sequence=None,
+        before_sequence=None,
+        limit=None,
+    ):
+        """
+        Read retained room events without removing them or subscribing to the
+        live channel queue.
+        """
+        self.require_valid_group_name(group)
+        self._clean_history(group)
+        records = self.history.get(group)
+        if not records:
+            return []
+
+        if after_sequence is None:
+            after_sequence = after if after is not None else since
+        lower_boundary = max(0, int(after_sequence or 0))
+        if from_sequence is not None:
+            lower_boundary = max(lower_boundary, int(from_sequence) - 1)
+
+        upper_boundary = None
+        if to_sequence is not None:
+            upper_boundary = int(to_sequence)
+        if before_sequence is not None:
+            exclusive_boundary = int(before_sequence) - 1
+            if upper_boundary is None:
+                upper_boundary = exclusive_boundary
+            else:
+                upper_boundary = min(upper_boundary, exclusive_boundary)
+
+        messages = []
+        for _, sequence, message in records:
+            if sequence <= lower_boundary:
+                continue
+            if upper_boundary is not None and sequence > upper_boundary:
+                break
+            messages.append(deepcopy(message))
+            if limit is not None and len(messages) >= int(limit):
+                break
+        return messages
+
+    get_history_range = history_range
+    get_available_range = history_range
+    available_range = history_range
+    get_history = read_history
+    fetch_history = read_history
+    query_history = read_history
+    replay = read_history
+    replay_history = read_history
+    peek_history = read_history
+    receive_history = read_history
+
     # Expire cleanup
 
     def _clean_expired(self):
@@ -341,11 +483,15 @@ class InMemoryChannelLayer(BaseChannelLayer):
                     # Delete from group
                     channels.pop(name, None)
 
+        self._clean_history()
+
     # Flush extension
 
     async def flush(self):
         self.channels = {}
         self.groups = {}
+        self.history.clear()
+        self.room_sequences.clear()
 
     async def close(self):
         # Nothing to go
@@ -390,6 +536,7 @@ class InMemoryChannelLayer(BaseChannelLayer):
         self.require_valid_group_name(group)
         # Run clean
         self._clean_expired()
+        message = self._prepare_group_message(group, message)
 
         # Send to each channel
         ops = []
