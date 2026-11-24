@@ -1,0 +1,804 @@
+{
+  "provenance": {
+    "time": "2026-11-25T02:05:12+08:00",
+    "ruby": "ruby 4.0.7 (2026-09-15 revision 229531a6cf) +PRISM [arm64-darwin25]",
+    "faraday": "2.15.1",
+    "elastic_transport": "8.6.0",
+    "checkout": "3c61c95",
+    "local_binding": "unavailable (Errno::EPERM: Operation not permitted - bind(2) for \"127.0.0.1\" port 0)",
+    "ambient_proxy_env": {
+      "proxy_env_keys": [
+        "ALL_PROXY",
+        "CLOUDSDK_PROXY_ADDRESS",
+        "CLOUDSDK_PROXY_PASSWORD",
+        "CLOUDSDK_PROXY_PORT",
+        "CLOUDSDK_PROXY_TYPE",
+        "CLOUDSDK_PROXY_USERNAME",
+        "DOCKER_HTTPS_PROXY",
+        "DOCKER_HTTP_PROXY",
+        "FTP_PROXY",
+        "GRPC_PROXY",
+        "HTTPS_PROXY",
+        "HTTP_PROXY",
+        "NO_PROXY",
+        "RSYNC_PROXY",
+        "all_proxy",
+        "ftp_proxy",
+        "grpc_proxy",
+        "http_proxy",
+        "https_proxy",
+        "no_proxy"
+      ],
+      "http_proxy": "http://<redacted>@localhost:59031",
+      "HTTP_PROXY": "http://<redacted>@localhost:59031",
+      "https_proxy": "http://<redacted>@localhost:59031",
+      "HTTPS_PROXY": "http://<redacted>@localhost:59031",
+      "all_proxy": "http://<redacted>@localhost:59031",
+      "ALL_PROXY": "http://<redacted>@localhost:59031",
+      "no_proxy": "localhost,127.0.0.1,::1,169.254.0.0/16,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16",
+      "NO_PROXY": "localhost,127.0.0.1,::1,169.254.0.0/16,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
+    }
+  },
+  "generated_at": "2026-11-25T02:05:12+08:00",
+  "expectation_failures": 0,
+  "cases": [
+    {
+      "id": "A-styles",
+      "title": "publish_address parsing",
+      "checks": [
+        {
+          "name": "bare IPv4 parses to \"10.0.0.11\"",
+          "pass": true,
+          "detail": "usable candidate"
+        },
+        {
+          "name": "bare private FQDN parses to \"node-1.es.private\"",
+          "pass": true,
+          "detail": "usable candidate"
+        },
+        {
+          "name": "fqdn/ip:port (uses name) parses to \"node-1.es.private\"",
+          "pass": true,
+          "detail": "usable candidate"
+        },
+        {
+          "name": "fqdn/[ipv6]:port parses to \"node-1.es.private\"",
+          "pass": true,
+          "detail": "usable candidate"
+        },
+        {
+          "name": "bare bracketed IPv6 parses to \"2001:db8::11\"",
+          "pass": true,
+          "detail": "usable candidate"
+        },
+        {
+          "name": "legacy inet[/ip:port] parses to \"10.0.0.11\"",
+          "pass": true,
+          "detail": "usable candidate"
+        },
+        {
+          "name": "TRAP inet[name/ip:port] parses to \"ode-1.es.private/10.0.0.11\"",
+          "pass": true,
+          "detail": "CURRENT IMPLEMENTATION MIS-PARSES (first char dropped / slash kept)"
+        },
+        {
+          "name": "TRAP inet[name:port] parses to \"ode-1.es.private\"",
+          "pass": true,
+          "detail": "CURRENT IMPLEMENTATION MIS-PARSES (first char dropped / slash kept)"
+        }
+      ]
+    },
+    {
+      "id": "A-build",
+      "title": "hostname/IPv4 candidates build into the pool",
+      "checks": [
+        {
+          "name": "all five buildable candidates built into the pool",
+          "pass": true,
+          "detail": "[\"10.0.0.11\", \"node-1.es.private\", \"node-1.es.private\", \"node-1.es.private\", \"10.0.0.11\"]"
+        }
+      ]
+    },
+    {
+      "id": "A-ipv6-build",
+      "title": "bare IPv6 candidate is not re-bracketed when building the URL",
+      "checks": [
+        {
+          "name": "reload raises a URI/Faraday argument error for unbracketed IPv6",
+          "pass": true,
+          "detail": "URI::InvalidURIError: bad URI (is not URI?): \"http://2001:db8::11:9200\""
+        }
+      ]
+    },
+    {
+      "id": "A-trap-reload",
+      "title": "mis-parsed inet name does not reach the private name",
+      "checks": [
+        {
+          "name": "reload never yields intended node-1.es.private",
+          "pass": true,
+          "detail": "[\"ode-1.es.private/10.0.0.11\"]"
+        }
+      ]
+    },
+    {
+      "id": "M1",
+      "title": "sniffing disabled (default): static hosts never change",
+      "checks": [
+        {
+          "name": "no discovery request was made",
+          "pass": true,
+          "detail": null
+        },
+        {
+          "name": "round-robin alternates old-a / old-b",
+          "pass": true,
+          "detail": null
+        },
+        {
+          "name": "100% of requests still target the OLD domain",
+          "pass": true,
+          "detail": null
+        }
+      ],
+      "configured": [
+        "http://old-a.corp:9200",
+        "http://old-b.corp:9200"
+      ],
+      "calls": [
+        {
+          "seq": 1,
+          "kind": "data",
+          "method": "GET",
+          "scheme": "http",
+          "host": "old-a.corp",
+          "port": 9200,
+          "path": "/ping",
+          "target": "old-a.corp:9200",
+          "proxy": "direct",
+          "proxy_peer": null,
+          "tcp_peer": "old-a.corp:9200",
+          "wire": "GET /ping direct to http://old-a.corp:9200"
+        },
+        {
+          "seq": 2,
+          "kind": "data",
+          "method": "GET",
+          "scheme": "http",
+          "host": "old-b.corp",
+          "port": 9200,
+          "path": "/ping",
+          "target": "old-b.corp:9200",
+          "proxy": "direct",
+          "proxy_peer": null,
+          "tcp_peer": "old-b.corp:9200",
+          "wire": "GET /ping direct to http://old-b.corp:9200"
+        },
+        {
+          "seq": 3,
+          "kind": "data",
+          "method": "GET",
+          "scheme": "http",
+          "host": "old-a.corp",
+          "port": 9200,
+          "path": "/ping",
+          "target": "old-a.corp:9200",
+          "proxy": "direct",
+          "proxy_peer": null,
+          "tcp_peer": "old-a.corp:9200",
+          "wire": "GET /ping direct to http://old-a.corp:9200"
+        },
+        {
+          "seq": 4,
+          "kind": "data",
+          "method": "GET",
+          "scheme": "http",
+          "host": "old-b.corp",
+          "port": 9200,
+          "path": "/ping",
+          "target": "old-b.corp:9200",
+          "proxy": "direct",
+          "proxy_peer": null,
+          "tcp_peer": "old-b.corp:9200",
+          "wire": "GET /ping direct to http://old-b.corp:9200"
+        }
+      ],
+      "selected_data": [
+        "old-a.corp:9200",
+        "old-b.corp:9200",
+        "old-a.corp:9200",
+        "old-b.corp:9200"
+      ],
+      "gate": {
+        "discovery_invoked": false,
+        "no_old_discovered": true,
+        "no_old_in_pool": false,
+        "selected_all_new": false,
+        "full_selector_cycle_covered": true,
+        "eligible_to_remove_old_config": false
+      },
+      "verdict": "Long-lived processes with sniffing off keep using the old targets until restart/redeploy."
+    },
+    {
+      "id": "M2",
+      "title": "sniff adopts the new private publish addresses",
+      "checks": [
+        {
+          "name": "old connections removed after reload",
+          "pass": true,
+          "detail": null
+        },
+        {
+          "name": "a full cycle selects only NEW private hosts",
+          "pass": true,
+          "detail": null
+        }
+      ],
+      "configured": [
+        "http://old-a.corp:9200",
+        "http://old-b.corp:9200"
+      ],
+      "pool_before": [
+        {
+          "oid": 768,
+          "host": "old-a.corp",
+          "port": 9200,
+          "key": "http://old-a.corp:9200",
+          "dead": false,
+          "failures": 0,
+          "proxy_peer": null
+        },
+        {
+          "oid": 776,
+          "host": "old-b.corp",
+          "port": 9200,
+          "key": "http://old-b.corp:9200",
+          "dead": false,
+          "failures": 0,
+          "proxy_peer": null
+        }
+      ],
+      "discovered_list": [
+        "node-1.es.private",
+        "node-2.es.private",
+        "node-3.es.private"
+      ],
+      "pool_after": [
+        {
+          "oid": 784,
+          "host": "node-1.es.private",
+          "port": 9200,
+          "key": "http://node-1.es.private:9200",
+          "dead": false,
+          "failures": 0,
+          "proxy_peer": null
+        },
+        {
+          "oid": 792,
+          "host": "node-2.es.private",
+          "port": 9200,
+          "key": "http://node-2.es.private:9200",
+          "dead": false,
+          "failures": 0,
+          "proxy_peer": null
+        },
+        {
+          "oid": 800,
+          "host": "node-3.es.private",
+          "port": 9200,
+          "key": "http://node-3.es.private:9200",
+          "dead": false,
+          "failures": 0,
+          "proxy_peer": null
+        }
+      ],
+      "calls": [
+        {
+          "seq": 1,
+          "kind": "discovery",
+          "method": "GET",
+          "scheme": "http",
+          "host": "old-a.corp",
+          "port": 9200,
+          "path": "/_nodes/http",
+          "target": "old-a.corp:9200",
+          "proxy": "direct",
+          "proxy_peer": null,
+          "tcp_peer": "old-a.corp:9200",
+          "wire": "GET /_nodes/http direct to http://old-a.corp:9200"
+        },
+        {
+          "seq": 2,
+          "kind": "data",
+          "method": "GET",
+          "scheme": "http",
+          "host": "node-2.es.private",
+          "port": 9200,
+          "path": "/ping",
+          "target": "node-2.es.private:9200",
+          "proxy": "direct",
+          "proxy_peer": null,
+          "tcp_peer": "node-2.es.private:9200",
+          "wire": "GET /ping direct to http://node-2.es.private:9200"
+        },
+        {
+          "seq": 3,
+          "kind": "data",
+          "method": "GET",
+          "scheme": "http",
+          "host": "node-3.es.private",
+          "port": 9200,
+          "path": "/ping",
+          "target": "node-3.es.private:9200",
+          "proxy": "direct",
+          "proxy_peer": null,
+          "tcp_peer": "node-3.es.private:9200",
+          "wire": "GET /ping direct to http://node-3.es.private:9200"
+        },
+        {
+          "seq": 4,
+          "kind": "data",
+          "method": "GET",
+          "scheme": "http",
+          "host": "node-1.es.private",
+          "port": 9200,
+          "path": "/ping",
+          "target": "node-1.es.private:9200",
+          "proxy": "direct",
+          "proxy_peer": null,
+          "tcp_peer": "node-1.es.private:9200",
+          "wire": "GET /ping direct to http://node-1.es.private:9200"
+        }
+      ],
+      "selected_data": [
+        "node-2.es.private:9200",
+        "node-3.es.private:9200",
+        "node-1.es.private:9200"
+      ],
+      "gate": {
+        "discovery_invoked": true,
+        "no_old_discovered": true,
+        "no_old_in_pool": true,
+        "selected_all_new": true,
+        "full_selector_cycle_covered": true,
+        "eligible_to_remove_old_config": true
+      },
+      "verdict": "Once discovery publishes only new names and a reload runs, real targets move to the private domain."
+    },
+    {
+      "id": "M3",
+      "title": "mixed rollout: old publish address + == retention + persisted selector",
+      "checks": [
+        {
+          "name": "same Connections::Collection/selector reused by rebuild",
+          "pass": true,
+          "detail": null
+        },
+        {
+          "name": "equal old-c connection object physically retained",
+          "pass": true,
+          "detail": null
+        },
+        {
+          "name": "old-a (absent from discovery) removed",
+          "pass": true,
+          "detail": null
+        },
+        {
+          "name": "retained old-c is still selected within the round-robin cycle",
+          "pass": true,
+          "detail": "new-1.es.private:9200 -> new-2.es.private:9200 -> old-c.corp:9200"
+        }
+      ],
+      "pool_after": [
+        {
+          "oid": 816,
+          "host": "old-c.corp",
+          "port": 9200,
+          "key": "http://old-c.corp:9200",
+          "dead": false,
+          "failures": 0,
+          "proxy_peer": null
+        },
+        {
+          "oid": 824,
+          "host": "new-1.es.private",
+          "port": 9200,
+          "key": "http://new-1.es.private:9200",
+          "dead": false,
+          "failures": 0,
+          "proxy_peer": null
+        },
+        {
+          "oid": 832,
+          "host": "new-2.es.private",
+          "port": 9200,
+          "key": "http://new-2.es.private:9200",
+          "dead": false,
+          "failures": 0,
+          "proxy_peer": null
+        }
+      ],
+      "calls": [
+        {
+          "seq": 1,
+          "kind": "discovery",
+          "method": "GET",
+          "scheme": "http",
+          "host": "old-a.corp",
+          "port": 9200,
+          "path": "/_nodes/http",
+          "target": "old-a.corp:9200",
+          "proxy": "direct",
+          "proxy_peer": null,
+          "tcp_peer": "old-a.corp:9200",
+          "wire": "GET /_nodes/http direct to http://old-a.corp:9200"
+        },
+        {
+          "seq": 2,
+          "kind": "data",
+          "method": "GET",
+          "scheme": "http",
+          "host": "new-1.es.private",
+          "port": 9200,
+          "path": "/ping",
+          "target": "new-1.es.private:9200",
+          "proxy": "direct",
+          "proxy_peer": null,
+          "tcp_peer": "new-1.es.private:9200",
+          "wire": "GET /ping direct to http://new-1.es.private:9200"
+        },
+        {
+          "seq": 3,
+          "kind": "data",
+          "method": "GET",
+          "scheme": "http",
+          "host": "new-2.es.private",
+          "port": 9200,
+          "path": "/ping",
+          "target": "new-2.es.private:9200",
+          "proxy": "direct",
+          "proxy_peer": null,
+          "tcp_peer": "new-2.es.private:9200",
+          "wire": "GET /ping direct to http://new-2.es.private:9200"
+        },
+        {
+          "seq": 4,
+          "kind": "data",
+          "method": "GET",
+          "scheme": "http",
+          "host": "old-c.corp",
+          "port": 9200,
+          "path": "/ping",
+          "target": "old-c.corp:9200",
+          "proxy": "direct",
+          "proxy_peer": null,
+          "tcp_peer": "old-c.corp:9200",
+          "wire": "GET /ping direct to http://old-c.corp:9200"
+        }
+      ],
+      "selected_data": [
+        "new-1.es.private:9200",
+        "new-2.es.private:9200",
+        "old-c.corp:9200"
+      ],
+      "discovered_list": [
+        "new-1.es.private",
+        "new-2.es.private",
+        "old-c.corp"
+      ],
+      "gate": {
+        "discovery_invoked": true,
+        "no_old_discovered": false,
+        "no_old_in_pool": false,
+        "selected_all_new": false,
+        "full_selector_cycle_covered": true,
+        "eligible_to_remove_old_config": false
+      },
+      "verdict": "Not-yet-migrated nodes keep publishing old targets, and equal keys keep their physical session."
+    },
+    {
+      "id": "M4",
+      "title": "dead connections are retried on the same old key (resurrect / all-dead fallback)",
+      "checks": [
+        {
+          "name": "selector skips dead old-a while old-b is alive",
+          "pass": true,
+          "detail": "[\"old-b.corp\", \"old-b.corp\", \"old-b.corp\"]"
+        },
+        {
+          "name": "old-a becomes alive and returns to rotation on the SAME old key",
+          "pass": true,
+          "detail": "[\"old-b.corp\", \"old-a.corp\"]"
+        },
+        {
+          "name": "when all are dead the collection falls back to least-failures (still an old target)",
+          "pass": true,
+          "detail": "old-b.corp"
+        }
+      ],
+      "verdict": "Dead old entries never change hostname; resurrect and all-dead fallback retry the old target."
+    },
+    {
+      "id": "S1",
+      "title": "https static host without :scheme option rebuilds sniffed nodes as http",
+      "checks": [
+        {
+          "name": "sniffed pool protocol falls back to DEFAULT_PROTOCOL http",
+          "pass": true,
+          "detail": "http://node-1.es.private:9200"
+        },
+        {
+          "name": "data request actually goes out as cleartext http in the double",
+          "pass": true,
+          "detail": null
+        }
+      ],
+      "verdict": "publish_address has no scheme; pass scheme: \"https\" explicitly for TLS clusters (base.rb:165)."
+    },
+    {
+      "id": "S2",
+      "title": "scheme: https keeps sniffed connections on https",
+      "checks": [
+        {
+          "name": "sniffed pool uses https",
+          "pass": true,
+          "detail": "https://node-1.es.private:9200"
+        },
+        {
+          "name": "actual request scheme is https",
+          "pass": true,
+          "detail": null
+        }
+      ]
+    },
+    {
+      "id": "F1",
+      "title": "sniffer timeout is rescued: last-known pool is retained",
+      "checks": [
+        {
+          "name": "timeout aborted quickly (< 0.3s)",
+          "pass": true,
+          "detail": "0.052s"
+        },
+        {
+          "name": "pool still contains old-a",
+          "pass": true,
+          "detail": null
+        },
+        {
+          "name": "data request still served by retained old-a",
+          "pass": true,
+          "detail": null
+        }
+      ],
+      "calls": [
+        {
+          "seq": 1,
+          "kind": "discovery",
+          "method": "GET",
+          "scheme": "http",
+          "host": "old-a.corp",
+          "port": 9200,
+          "path": "/_nodes/http",
+          "target": "old-a.corp:9200",
+          "proxy": "direct",
+          "proxy_peer": null,
+          "tcp_peer": "old-a.corp:9200",
+          "wire": "GET /_nodes/http direct to http://old-a.corp:9200"
+        },
+        {
+          "seq": 2,
+          "kind": "data",
+          "method": "GET",
+          "scheme": "http",
+          "host": "old-a.corp",
+          "port": 9200,
+          "path": "/ping",
+          "target": "old-a.corp:9200",
+          "proxy": "direct",
+          "proxy_peer": null,
+          "tcp_peer": "old-a.corp:9200",
+          "wire": "GET /ping direct to http://old-a.corp:9200"
+        }
+      ]
+    },
+    {
+      "id": "F2",
+      "title": "hard discovery error on direct reload!: raises, keeps pool, marks probe dead",
+      "checks": [
+        {
+          "name": "reload_connections! raises Elastic::Transport::Transport::Error",
+          "pass": true,
+          "detail": "Elastic::Transport::Transport::Error"
+        },
+        {
+          "name": "the discovery-selected connection is marked dead",
+          "pass": true,
+          "detail": "[\"old-a.corp\"]"
+        },
+        {
+          "name": "a later data request is still served by the other old host",
+          "pass": true,
+          "detail": "[\"old-b.corp:9200\"]"
+        }
+      ],
+      "verdict": "Only SnifferTimeoutError is rescued inside reload_connections!; hard errors propagate."
+    },
+    {
+      "id": "F3",
+      "title": "hard discovery error during periodic reload fails the triggering user request",
+      "checks": [
+        {
+          "name": "first request succeeds",
+          "pass": true,
+          "detail": null
+        },
+        {
+          "name": "second request (counter hits reload threshold) raises Transport::Error",
+          "pass": true,
+          "detail": "Elastic::Transport::Transport::Error"
+        },
+        {
+          "name": "the user's /ping on the failing request never reached an adapter",
+          "pass": true,
+          "detail": "[\"data:/ping\", \"discovery:/_nodes/http\"]"
+        }
+      ],
+      "verdict": "A fast hard failure of _nodes/http on the reload path is NOT swallowed (only timeout is)."
+    },
+    {
+      "id": "F4",
+      "title": "reload_on_failure: dead old bootstrap triggers discovery then retry on new pool",
+      "checks": [
+        {
+          "name": "request ultimately succeeds",
+          "pass": true,
+          "detail": null
+        },
+        {
+          "name": "chain is old-a data fail -> discovery on old-b -> retry on a NEW host",
+          "pass": true,
+          "detail": "[\"old-a.corp/ping\", \"old-b.corp/_nodes/http\", \"new-2.es.private/ping\"]"
+        },
+        {
+          "name": "final target is private domain",
+          "pass": true,
+          "detail": null
+        }
+      ],
+      "verdict": "Keep one reachable old bootstrap long enough to serve _nodes/http publishing the new names."
+    },
+    {
+      "id": "P1",
+      "title": "explicit transport_options proxy: same proxy peer, selected authorities differ",
+      "checks": [
+        {
+          "name": "every Faraday connection carries the explicit proxy",
+          "pass": true,
+          "detail": "[\"proxy.corp:3128\"]"
+        },
+        {
+          "name": "adapter saw the proxy on every request",
+          "pass": true,
+          "detail": null
+        },
+        {
+          "name": "authority still follows the round-robin selected host",
+          "pass": true,
+          "detail": null
+        }
+      ],
+      "calls": [
+        {
+          "seq": 1,
+          "kind": "data",
+          "method": "GET",
+          "scheme": "http",
+          "host": "node-1.es.private",
+          "port": 9200,
+          "path": "/ping",
+          "target": "node-1.es.private:9200",
+          "proxy": "http://proxy.corp:3128",
+          "proxy_peer": "proxy.corp:3128",
+          "tcp_peer": "proxy.corp:3128",
+          "wire": "GET http://node-1.es.private:9200/ping via proxy proxy.corp:3128 (absolute-form)"
+        },
+        {
+          "seq": 2,
+          "kind": "data",
+          "method": "GET",
+          "scheme": "http",
+          "host": "node-2.es.private",
+          "port": 9200,
+          "path": "/ping",
+          "target": "node-2.es.private:9200",
+          "proxy": "http://proxy.corp:3128",
+          "proxy_peer": "proxy.corp:3128",
+          "tcp_peer": "proxy.corp:3128",
+          "wire": "GET http://node-2.es.private:9200/ping via proxy proxy.corp:3128 (absolute-form)"
+        }
+      ]
+    },
+    {
+      "id": "P2",
+      "title": "ambient env proxy + no_proxy splits new (direct) vs old (proxy) targets",
+      "checks": [
+        {
+          "name": "new private host matches no_proxy and goes direct",
+          "pass": true,
+          "detail": null
+        },
+        {
+          "name": "old corp host does NOT match no_proxy and uses env proxy",
+          "pass": true,
+          "detail": "\"env-proxy.corp:8080\""
+        }
+      ],
+      "calls": [
+        {
+          "seq": 1,
+          "kind": "data",
+          "method": "GET",
+          "scheme": "http",
+          "host": "node-1.es.private",
+          "port": 9200,
+          "path": "/ping",
+          "target": "node-1.es.private:9200",
+          "proxy": "direct",
+          "proxy_peer": null,
+          "tcp_peer": "node-1.es.private:9200",
+          "wire": "GET /ping direct to http://node-1.es.private:9200"
+        },
+        {
+          "seq": 2,
+          "kind": "data",
+          "method": "GET",
+          "scheme": "http",
+          "host": "old-a.corp",
+          "port": 9200,
+          "path": "/ping",
+          "target": "old-a.corp:9200",
+          "proxy": "http://env-proxy.corp:8080",
+          "proxy_peer": "env-proxy.corp:8080",
+          "tcp_peer": "env-proxy.corp:8080",
+          "wire": "GET http://old-a.corp:9200/ping via proxy env-proxy.corp:8080 (absolute-form)"
+        }
+      ],
+      "verdict": "If only the new domain is in NO_PROXY, old and new take different paths during migration."
+    },
+    {
+      "id": "P3",
+      "title": "proxy option is reapplied to sniff-rebuilt connections",
+      "checks": [
+        {
+          "name": "all rebuilt connections (new and retained old) point at the same proxy peer",
+          "pass": true,
+          "detail": "[[\"old-c.corp\", \"proxy.corp:3128\"], [\"new-1.es.private\", \"proxy.corp:3128\"]]"
+        },
+        {
+          "name": "recorded request used the proxy",
+          "pass": true,
+          "detail": null
+        }
+      ]
+    },
+    {
+      "id": "P4",
+      "title": "https via proxy: TCP peer is proxy, CONNECT authority is the selected host",
+      "checks": [
+        {
+          "name": "TCP/TLS connection is opened to the proxy peer",
+          "pass": true,
+          "detail": null
+        },
+        {
+          "name": "proxy CONNECT authority carries the NEW private name",
+          "pass": true,
+          "detail": null
+        }
+      ],
+      "verdict": "TLS runs to the CONNECT authority; under normal PKI validation the new name must be in the cert SAN."
+    }
+  ]
+}
