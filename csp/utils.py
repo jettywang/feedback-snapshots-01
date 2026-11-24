@@ -64,14 +64,19 @@ def default_config(csp: DIRECTIVES_T | None) -> DIRECTIVES_T | None:
     return config
 
 
-def build_policy(
+def build_directives(
     config: DIRECTIVES_T | None = None,
     update: DIRECTIVES_T | None = None,
     replace: DIRECTIVES_T | None = None,
     nonce: str | None = None,
     report_only: bool = False,
-) -> str:
-    """Builds the policy as a string from the settings."""
+) -> dict[str, str]:
+    """Resolve a policy to rendered directive values.
+
+    This is the rendering step shared by :func:`build_policy` and the policy
+    review helpers.  The returned mapping preserves insertion order and the
+    exact values that would have been written to the CSP header.
+    """
 
     if config is None:
         if report_only:
@@ -83,7 +88,7 @@ def build_policy(
 
     # If config is still `None`, return empty policy.
     if config is None:
-        return ""
+        return {}
 
     update = update if update is not None else {}
     replace = replace if replace is not None else {}
@@ -139,6 +144,25 @@ def build_policy(
         report_uri = map(force_str, report_uri)
         policy_parts["report-uri"] = " ".join(report_uri)
 
+    return policy_parts
+
+
+def build_policy(
+    config: DIRECTIVES_T | None = None,
+    update: DIRECTIVES_T | None = None,
+    replace: DIRECTIVES_T | None = None,
+    nonce: str | None = None,
+    report_only: bool = False,
+) -> str:
+    """Builds the policy as a string from the settings."""
+
+    policy_parts = build_directives(
+        config=config,
+        update=update,
+        replace=replace,
+        nonce=nonce,
+        report_only=report_only,
+    )
     return "; ".join([f"{k} {val}".strip() for k, val in policy_parts.items()])
 
 

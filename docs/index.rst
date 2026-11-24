@@ -24,6 +24,7 @@ Contents:
    nonce
    trusted_types
    reports
+   approvals
    contributing
 
 

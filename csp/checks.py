@@ -127,3 +127,56 @@ def check_exclude_url_prefixes_is_not_string(app_configs: Sequence[AppConfig] | 
             )
 
     return errors
+
+
+@register(checks.Tags.security)
+def check_policy_approvals(app_configs: Sequence[AppConfig] | None, **kwargs: Any) -> list[Error]:
+    """
+    Validate the declarative CSP approval table.
+
+    Approvals are review metadata, so an invalid row should block a deploy the
+    same way an invalid policy setting does.  This check never changes the CSP
+    header; it only ensures each row can be bound to a site, directive, mode and
+    source set.
+    """
+    raw_approvals = getattr(settings, "CSP_POLICY_APPROVALS", None)
+    if raw_approvals is None:
+        return []
+    if not isinstance(raw_approvals, (list, tuple)):
+        return [
+            Error(
+                "CSP_POLICY_APPROVALS must be a list or tuple of approval dictionaries.",
+                id="csp.E003",
+            )
+        ]
+
+    from csp.approvals import Approval
+
+    errors = []
+    seen: set[str] = set()
+    for index, row in enumerate(raw_approvals):
+        try:
+            if isinstance(row, Approval):
+                approval = row
+            elif isinstance(row, dict):
+                approval = Approval.from_dict(row)
+            else:
+                raise TypeError("approval rows must be dictionaries or Approval instances")
+        except (KeyError, TypeError, ValueError) as exc:
+            errors.append(
+                Error(
+                    f"CSP_POLICY_APPROVALS[{index}] is invalid: {exc}",
+                    id="csp.E004",
+                )
+            )
+            continue
+        if approval.approval_id in seen:
+            errors.append(
+                Error(
+                    f"CSP_POLICY_APPROVALS contains duplicate approval_id {approval.approval_id!r}.",
+                    id="csp.E004",
+                )
+            )
+        seen.add(approval.approval_id)
+
+    return errors

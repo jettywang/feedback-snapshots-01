@@ -72,3 +72,50 @@ def test_check_exclude_url_prefixes_ro_is_not_string() -> None:
     error = errors[0]
     assert error.id == "csp.E002"
     assert error.msg == "EXCLUDE_URL_PREFIXES in CONTENT_SECURITY_POLICY_REPORT_ONLY settings must be a list or tuple."
+
+
+@override_settings(
+    CSP_POLICY_APPROVALS=[
+        {
+            "id": "AP-1",
+            "site": "shop.example",
+            "directive": "img-src",
+            "source": "cdn.partner.example",
+            "scope": ["/checkout/"],
+        }
+    ]
+)
+def test_check_policy_approvals_valid() -> None:
+    from csp.checks import check_policy_approvals
+
+    assert check_policy_approvals(None) == []
+
+
+@override_settings(
+    CSP_POLICY_APPROVALS=[
+        {"id": "AP-1", "site": "shop.example", "directive": "img-src", "source": "cdn.partner.example"},
+        {"id": "AP-1", "site": "shop.example", "directive": "img-src", "source": "cdn2.partner.example"},
+    ]
+)
+def test_check_policy_approvals_duplicate_id() -> None:
+    from csp.checks import check_policy_approvals
+
+    errors = check_policy_approvals(None)
+    assert [error.id for error in errors] == ["csp.E004"]
+    assert "duplicate approval_id" in errors[0].msg
+
+
+@override_settings(CSP_POLICY_APPROVALS=[{"site": "shop.example", "directive": "img-src", "source": "cdn.partner.example"}])
+def test_check_policy_approvals_missing_id() -> None:
+    from csp.checks import check_policy_approvals
+
+    errors = check_policy_approvals(None)
+    assert [error.id for error in errors] == ["csp.E004"]
+
+
+@override_settings(CSP_POLICY_APPROVALS="not-a-table")
+def test_check_policy_approvals_not_a_table() -> None:
+    from csp.checks import check_policy_approvals
+
+    errors = check_policy_approvals(None)
+    assert [error.id for error in errors] == ["csp.E003"]

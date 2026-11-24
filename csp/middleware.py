@@ -4,7 +4,7 @@ import base64
 import http.client as http_client
 import os
 import warnings
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from functools import partial
 from typing import TYPE_CHECKING
 
@@ -12,6 +12,7 @@ from django.conf import settings
 from django.utils.deprecation import MiddlewareMixin
 from django.utils.functional import SimpleLazyObject, empty
 
+from csp.approvals import PolicySnapshot, capture_snapshot
 from csp.constants import HEADER, HEADER_REPORT_ONLY
 from csp.exceptions import CSPNonceError
 from csp.utils import DIRECTIVES_T, build_policy
@@ -139,3 +140,102 @@ class CSPMiddleware(MiddlewareMixin):
         nonce = getattr(request, "_csp_nonce", None)
 
         return PolicyParts(config, update, replace, nonce)
+
+    def get_policy_site(self, request: HttpRequest) -> str:
+        """Return the review site identifier for *request*.
+
+        An explicit ``request.csp_site`` (set by routing or a view) wins over
+        the ``CSP_POLICY_SITE`` setting, which wins over the request host.
+        """
+
+        site = getattr(request, "csp_site", None)
+        if site:
+            return str(site)
+        configured = getattr(settings, "CSP_POLICY_SITE", None)
+        if configured:
+            return str(configured)
+        try:
+            return str(request.get_host())
+        except Exception:  # pragma: no cover - defensive for bare RequestFactory requests
+            return ""
+
+    def get_policy_snapshot(
+        self,
+        request: HttpRequest,
+        response: HttpResponseBase,
+        report_only: bool = False,
+    ) -> PolicySnapshot:
+        """Capture the effective policy that applies to this page.
+
+        This is read-only: it inspects the same response attributes used by
+        :meth:`process_response`, so a local view override is recorded as its
+        own review basis without changing the header.
+        """
+
+        policy_parts = self.get_policy_parts(request=request, response=response, report_only=report_only)
+        policy = (
+            getattr(
+                settings,
+                "CONTENT_SECURITY_POLICY_REPORT_ONLY" if report_only else "CONTENT_SECURITY_POLICY",
+                None,
+            )
+            or {}
+        )
+        prefixes = policy.get("EXCLUDE_URL_PREFIXES", None) or ()
+        excluded = request.path_info.startswith(tuple(prefixes))
+        exempt = getattr(response, "_csp_exempt_ro" if report_only else "_csp_exempt", False) is True
+
+        snapshot = capture_snapshot(
+            site=self.get_policy_site(request),
+            page=request.path_info or "/",
+            mode="report-only" if report_only else "enforce",
+            config=policy_parts.config,
+            update=policy_parts.update,
+            replace=policy_parts.replace,
+        )
+
+        # A header may already exist because another middleware wrote it, or
+        # because this snapshot is taken from inside the view before
+        # ``process_response`` runs.  Only treat an existing header as the
+        # middleware's own evidence when it matches the policy we just
+        # resolved; otherwise the snapshot must not claim that policy is
+        # delivered.
+        header = HEADER_REPORT_ONLY if report_only else HEADER
+        existing = response.get(header, "")
+        if existing:
+            delivered = not excluded and not exempt and self._snapshot_matches_header(snapshot, existing)
+        else:
+            delivered = not excluded and not exempt
+
+        return replace(snapshot, delivered=delivered)
+
+    @staticmethod
+    def _snapshot_matches_header(snapshot: PolicySnapshot, header: str) -> bool:
+        """Compare a snapshot to an existing header as directive sets.
+
+        Directive order is not significant, so an exact string comparison would
+        produce false negatives for a policy assembled in a different order.
+        """
+
+        parsed: dict[str, tuple[str, ...]] = {}
+        for part in header.split(";"):
+            part = part.strip()
+            if not part:
+                continue
+            name, _, value = part.partition(" ")
+            parsed[name] = tuple(value.split())
+        return parsed == dict(snapshot.directives)
+
+    def capture_policy_snapshots(
+        self,
+        request: HttpRequest,
+        response: HttpResponseBase,
+    ) -> tuple[PolicySnapshot, ...]:
+        """Return snapshots for every mode that produced a header."""
+
+        snapshots = []
+        for report_only in (False, True):
+            snapshot = self.get_policy_snapshot(request, response, report_only=report_only)
+            if snapshot.directives:
+                snapshots.append(snapshot)
+        return tuple(snapshots)

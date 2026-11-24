@@ -1,6 +1,16 @@
 CHANGES
 =======
 
+Unreleased
+==========
+
+- Add policy approval review (`csp.approvals`).  Approvals bind a source to a site,
+  directive, mode and optional page scope; a review report distinguishes still-valid
+  approvals from ones that need re-review, and flags controlled sources used without a
+  page-scoped approval.  Capture page evidence with
+  `CSPMiddleware.get_policy_snapshot()`; validate `CSP_POLICY_APPROVALS` with
+  `manage.py check`.
+
 4.0
 ===
 
