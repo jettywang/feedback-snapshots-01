@@ -1,0 +1,40 @@
+{
+  "header": {
+    "env_filter": "None",
+    "key_filter": "security.require_mfa",
+    "new_first": "True",
+    "history_limit": "None",
+    "include_internal": "False"
+  },
+  "current": true,
+  "history": [
+    {
+      "loader": "set_method",
+      "identifier": "undefined",
+      "env": "global",
+      "merged": false,
+      "value": true
+    },
+    {
+      "loader": "set_method",
+      "identifier": "undefined",
+      "env": "global",
+      "merged": true,
+      "value": true
+    },
+    {
+      "loader": "env_global",
+      "identifier": "DYNACONF",
+      "env": "global",
+      "merged": false,
+      "value": true
+    },
+    {
+      "loader": "json",
+      "identifier": "/Users/apple/Documents/用户反馈项目/batches/feedback-20261120-backend-security-280-jettywang/prepared/FB-20261120-SEC-JW-076/workspace/inspect_evidence_lab/labwork/security.json",
+      "env": "default",
+      "merged": false,
+      "value": true
+    }
+  ]
+}

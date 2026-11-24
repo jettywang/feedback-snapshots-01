@@ -1,0 +1,77 @@
+{
+  "first_input_divergence": {
+    "step": "S0",
+    "title": "进程环境快照（Dynaconf 尚未初始化）",
+    "A": {
+      "dynaconf_env": {}
+    },
+    "B": {
+      "dynaconf_env": {
+        "DYNACONF_SECURITY__REQUIRE_MFA": "true"
+      }
+    }
+  },
+  "first_effective_divergence": null,
+  "first_history_slot_divergence": {
+    "A_pos_old_first": null,
+    "B_pos_old_first": 1,
+    "metadata": {
+      "loader": "env_global",
+      "identifier": "DYNACONF",
+      "env": "global",
+      "merged": false
+    },
+    "A_value": "—",
+    "B_value": true
+  },
+  "aligned_leaf_history": [
+    {
+      "A_pos_old_first": 0,
+      "B_pos_old_first": 0,
+      "metadata": {
+        "loader": "json",
+        "identifier": "labwork/security.json",
+        "env": "default",
+        "merged": false
+      },
+      "A_value": true,
+      "B_value": true
+    },
+    {
+      "A_pos_old_first": null,
+      "B_pos_old_first": 1,
+      "metadata": {
+        "loader": "env_global",
+        "identifier": "DYNACONF",
+        "env": "global",
+        "merged": false
+      },
+      "A_value": "—",
+      "B_value": true
+    },
+    {
+      "A_pos_old_first": 1,
+      "B_pos_old_first": 2,
+      "metadata": {
+        "loader": "set_method",
+        "identifier": "undefined",
+        "env": "global",
+        "merged": true
+      },
+      "A_value": true,
+      "B_value": true
+    },
+    {
+      "A_pos_old_first": 2,
+      "B_pos_old_first": 3,
+      "metadata": {
+        "loader": "set_method",
+        "identifier": "undefined",
+        "env": "global",
+        "merged": false
+      },
+      "A_value": true,
+      "B_value": true
+    }
+  ]
+}

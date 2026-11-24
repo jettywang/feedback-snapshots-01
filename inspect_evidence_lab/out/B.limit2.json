@@ -1,0 +1,26 @@
+{
+  "header": {
+    "env_filter": "None",
+    "key_filter": "security.require_mfa",
+    "new_first": "True",
+    "history_limit": "2",
+    "include_internal": "False"
+  },
+  "current": true,
+  "history": [
+    {
+      "loader": "set_method",
+      "identifier": "undefined",
+      "env": "global",
+      "merged": false,
+      "value": true
+    },
+    {
+      "loader": "set_method",
+      "identifier": "undefined",
+      "env": "global",
+      "merged": true,
+      "value": true
+    }
+  ]
+}

@@ -1,0 +1,10 @@
+{
+  "security": {
+    "require_mfa": true,
+    "session_timeout": 30,
+    "policy": {
+      "min_password_length": 12,
+      "issuer": "corp-local"
+    }
+  }
+}

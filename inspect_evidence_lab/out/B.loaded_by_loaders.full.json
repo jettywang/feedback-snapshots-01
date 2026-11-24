@@ -1,0 +1,214 @@
+[
+  {
+    "metadata": {
+      "loader": "set_method",
+      "identifier": "init_kwargs",
+      "env": "global",
+      "merged": false
+    },
+    "data": {
+      "ENVVAR_PREFIX_FOR_DYNACONF": "DYNACONF",
+      "MERGE_ENABLED_FOR_DYNACONF": true,
+      "SETTINGS_FILE_FOR_DYNACONF": [
+        "/Users/apple/Documents/用户反馈项目/batches/feedback-20261120-backend-security-280-jettywang/prepared/FB-20261120-SEC-JW-076/workspace/inspect_evidence_lab/labwork/security.json"
+      ]
+    }
+  },
+  {
+    "metadata": {
+      "loader": "set_method",
+      "identifier": "default_settings",
+      "env": "global",
+      "merged": false
+    },
+    "data": {
+      "RENAMED_VARS": {
+        "DYNACONF_NAMESPACE": "ENV_FOR_DYNACONF",
+        "NAMESPACE_FOR_DYNACONF": "ENV_FOR_DYNACONF",
+        "DYNACONF_SETTINGS_MODULE": "SETTINGS_FILE_FOR_DYNACONF",
+        "DYNACONF_SETTINGS": "SETTINGS_FILE_FOR_DYNACONF",
+        "SETTINGS_MODULE": "SETTINGS_FILE_FOR_DYNACONF",
+        "SETTINGS_MODULE_FOR_DYNACONF": "SETTINGS_FILE_FOR_DYNACONF",
+        "PROJECT_ROOT": "ROOT_PATH_FOR_DYNACONF",
+        "PROJECT_ROOT_FOR_DYNACONF": "ROOT_PATH_FOR_DYNACONF",
+        "DYNACONF_SILENT_ERRORS": "SILENT_ERRORS_FOR_DYNACONF",
+        "DYNACONF_ALWAYS_FRESH_VARS": "FRESH_VARS_FOR_DYNACONF",
+        "BASE_NAMESPACE_FOR_DYNACONF": "DEFAULT_ENV_FOR_DYNACONF",
+        "GLOBAL_ENV_FOR_DYNACONF": "ENVVAR_PREFIX_FOR_DYNACONF"
+      },
+      "ROOT_PATH_FOR_DYNACONF": null,
+      "ENVIRONMENTS_FOR_DYNACONF": false,
+      "MAIN_ENV_FOR_DYNACONF": "MAIN",
+      "LOWERCASE_READ_FOR_DYNACONF": true,
+      "ENV_SWITCHER_FOR_DYNACONF": "ENV_FOR_DYNACONF",
+      "ENV_FOR_DYNACONF": "DEVELOPMENT",
+      "FORCE_ENV_FOR_DYNACONF": null,
+      "DEFAULT_ENV_FOR_DYNACONF": "DEFAULT",
+      "IGNORE_UNKNOWN_ENVVARS_FOR_DYNACONF": false,
+      "AUTO_CAST_FOR_DYNACONF": true,
+      "ENCODING_FOR_DYNACONF": "utf-8",
+      "DOTTED_LOOKUP_FOR_DYNACONF": true,
+      "NESTED_SEPARATOR_FOR_DYNACONF": "__",
+      "INDEX_SEPARATOR_FOR_DYNACONF": null,
+      "ENVVAR_FOR_DYNACONF": "SETTINGS_FILE_FOR_DYNACONF",
+      "REDIS_FOR_DYNACONF": {
+        "host": "localhost",
+        "port": 6379,
+        "db": 0,
+        "decode_responses": true,
+        "username": null,
+        "password": null
+      },
+      "REDIS_URL_FOR_DYNACONF": null,
+      "REDIS_ENABLED_FOR_DYNACONF": false,
+      "VAULT_FOR_DYNACONF": {
+        "url": "http://localhost:8200",
+        "token": null,
+        "cert": null,
+        "verify": null,
+        "timeout": null,
+        "proxies": null,
+        "allow_redirects": null,
+        "namespace": null
+      },
+      "VAULT_ENABLED_FOR_DYNACONF": false,
+      "VAULT_PATH_FOR_DYNACONF": "dynaconf",
+      "VAULT_MOUNT_POINT_FOR_DYNACONF": "secret",
+      "VAULT_ROOT_TOKEN_FOR_DYNACONF": null,
+      "VAULT_KV_VERSION_FOR_DYNACONF": 1,
+      "VAULT_AUTH_WITH_IAM_FOR_DYNACONF": false,
+      "VAULT_AUTH_ROLE_FOR_DYNACONF": null,
+      "VAULT_ROLE_ID_FOR_DYNACONF": null,
+      "VAULT_SECRET_ID_FOR_DYNACONF": null,
+      "VAULT_USERNAME_FOR_DYNACONF": null,
+      "VAULT_PASSWORD_FOR_DYNACONF": null,
+      "VAULT_TOKEN_RENEW_FOR_DYNACONF": false,
+      "CORE_LOADERS_FOR_DYNACONF": [
+        "YAML",
+        "TOML",
+        "INI",
+        "JSON",
+        "PY"
+      ],
+      "LOADERS_FOR_DYNACONF": [
+        "dynaconf.loaders.env_loader"
+      ],
+      "SILENT_ERRORS_FOR_DYNACONF": true,
+      "FRESH_VARS_FOR_DYNACONF": [],
+      "DOTENV_PATH_FOR_DYNACONF": null,
+      "DOTENV_VERBOSE_FOR_DYNACONF": false,
+      "DOTENV_OVERRIDE_FOR_DYNACONF": false,
+      "INSTANCE_FOR_DYNACONF": null,
+      "YAML_LOADER_FOR_DYNACONF": "safe_load",
+      "COMMENTJSON_ENABLED_FOR_DYNACONF": false,
+      "SECRETS_FOR_DYNACONF": null,
+      "INCLUDES_FOR_DYNACONF": [],
+      "PRELOAD_FOR_DYNACONF": [],
+      "SKIP_FILES_FOR_DYNACONF": [],
+      "APPLY_DEFAULT_ON_NONE_FOR_DYNACONF": null,
+      "VALIDATE_ON_UPDATE_FOR_DYNACONF": false,
+      "SYSENV_FALLBACK_FOR_DYNACONF": false,
+      "DYNACONF_NAMESPACE": "DEVELOPMENT",
+      "NAMESPACE_FOR_DYNACONF": "DEVELOPMENT",
+      "DYNACONF_SETTINGS_MODULE": [],
+      "DYNACONF_SETTINGS": [],
+      "SETTINGS_MODULE": [],
+      "SETTINGS_MODULE_FOR_DYNACONF": [],
+      "PROJECT_ROOT": null,
+      "PROJECT_ROOT_FOR_DYNACONF": null,
+      "DYNACONF_SILENT_ERRORS": true,
+      "DYNACONF_ALWAYS_FRESH_VARS": [],
+      "BASE_NAMESPACE_FOR_DYNACONF": "DEFAULT",
+      "GLOBAL_ENV_FOR_DYNACONF": "DYNACONF"
+    }
+  },
+  {
+    "metadata": {
+      "loader": "set_method",
+      "identifier": "settings_module_method",
+      "env": "global",
+      "merged": true
+    },
+    "data": {
+      "SETTINGS_MODULE": [
+        "/Users/apple/Documents/用户反馈项目/batches/feedback-20261120-backend-security-280-jettywang/prepared/FB-20261120-SEC-JW-076/workspace/inspect_evidence_lab/labwork/security.json"
+      ]
+    }
+  },
+  {
+    "metadata": {
+      "loader": "json",
+      "identifier": "/Users/apple/Documents/用户反馈项目/batches/feedback-20261120-backend-security-280-jettywang/prepared/FB-20261120-SEC-JW-076/workspace/inspect_evidence_lab/labwork/security.json",
+      "env": "default",
+      "merged": false
+    },
+    "data": {
+      "SECURITY": {
+        "require_mfa": true,
+        "session_timeout": 30,
+        "policy": {
+          "min_password_length": 12,
+          "issuer": "corp-local"
+        }
+      }
+    }
+  },
+  {
+    "metadata": {
+      "loader": "env_global",
+      "identifier": "DYNACONF",
+      "env": "global",
+      "merged": false
+    },
+    "data": {
+      "SECURITY": {
+        "require_mfa": true,
+        "session_timeout": 30,
+        "policy": {
+          "min_password_length": 12,
+          "issuer": "corp-local",
+          "mfa_provider": "totp"
+        }
+      },
+      "LAB_PROBE": "pass-2"
+    }
+  },
+  {
+    "metadata": {
+      "loader": "set_method",
+      "identifier": "undefined",
+      "env": "global",
+      "merged": true
+    },
+    "data": {
+      "SECURITY": {
+        "require_mfa": true,
+        "session_timeout": 30,
+        "policy": {
+          "min_password_length": 12,
+          "issuer": "corp-local",
+          "mfa_provider": "totp"
+        }
+      }
+    }
+  },
+  {
+    "metadata": {
+      "loader": "set_method",
+      "identifier": "undefined",
+      "env": "global",
+      "merged": false
+    },
+    "data": {
+      "SECURITY": {
+        "require_mfa": true,
+        "session_timeout": 30,
+        "policy": {
+          "min_password_length": 12,
+          "issuer": "corp-local",
+          "mfa_provider": "totp"
+        }
+      }
+    }
+  }
+]

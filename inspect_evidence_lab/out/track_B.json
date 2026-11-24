@@ -1,0 +1,644 @@
+{
+  "track": "B",
+  "dynaconf_version": "3.3.6.dev0",
+  "dynaconf_file": "/Users/apple/Documents/用户反馈项目/batches/feedback-20261120-backend-security-280-jettywang/prepared/FB-20261120-SEC-JW-076/workspace/dynaconf/__init__.py",
+  "python": "3.12.11",
+  "steps": [
+    {
+      "id": "S0",
+      "title": "进程环境快照（Dynaconf 尚未初始化）",
+      "input_summary": "实际收到的 DYNACONF_* 环境变量：{\"DYNACONF_SECURITY__REQUIRE_MFA\": \"true\"}",
+      "input_full": {
+        "dynaconf_env": {
+          "DYNACONF_SECURITY__REQUIRE_MFA": "true"
+        }
+      },
+      "effective": null,
+      "trace_events": []
+    },
+    {
+      "id": "S1",
+      "title": "加载本地 JSON 文件 + 初始化期 env loader",
+      "input_summary": "Dynaconf(settings_files=['labwork/security.json'], merge_enabled=True)",
+      "input_full": {
+        "constructor": {
+          "settings_files": [
+            "/Users/apple/Documents/用户反馈项目/batches/feedback-20261120-backend-security-280-jettywang/prepared/FB-20261120-SEC-JW-076/workspace/inspect_evidence_lab/labwork/security.json"
+          ],
+          "merge_enabled": true,
+          "ENVVAR_PREFIX_FOR_DYNACONF": "DYNACONF"
+        },
+        "file_raw_content": {
+          "security": {
+            "require_mfa": true,
+            "session_timeout": 30,
+            "policy": {
+              "min_password_length": 12,
+              "issuer": "corp-local"
+            }
+          }
+        },
+        "process_env": {
+          "DYNACONF_SECURITY__REQUIRE_MFA": "true"
+        }
+      },
+      "effective": {
+        "leaf": true,
+        "lab_probe": null,
+        "security": {
+          "require_mfa": true,
+          "session_timeout": 30,
+          "policy": {
+            "min_password_length": 12,
+            "issuer": "corp-local"
+          }
+        }
+      },
+      "trace_events": [
+        {
+          "step": "S1",
+          "depth": 0,
+          "key": "SECURITY",
+          "value_at_entry": {
+            "require_mfa": true,
+            "session_timeout": 30,
+            "policy": {
+              "min_password_length": 12,
+              "issuer": "corp-local"
+            }
+          },
+          "merge_arg": "empty-sentinel(按配置默认)",
+          "identifier_at_entry": {
+            "loader": "json",
+            "identifier": "/Users/apple/Documents/用户反馈项目/batches/feedback-20261120-backend-security-280-jettywang/prepared/FB-20261120-SEC-JW-076/workspace/inspect_evidence_lab/labwork/security.json",
+            "env": "default",
+            "merged": false
+          }
+        },
+        {
+          "step": "S1",
+          "depth": 0,
+          "key": "SECURITY__REQUIRE_MFA",
+          "value_at_entry": true,
+          "merge_arg": "empty-sentinel(按配置默认)",
+          "identifier_at_entry": {
+            "loader": "env_global",
+            "identifier": "DYNACONF",
+            "env": "global",
+            "merged": false
+          }
+        },
+        {
+          "step": "S1",
+          "depth": 1,
+          "key": "SECURITY",
+          "value_at_entry": {
+            "require_mfa": true,
+            "session_timeout": 30,
+            "policy": {
+              "min_password_length": 12,
+              "issuer": "corp-local"
+            }
+          },
+          "merge_arg": "empty-sentinel(按配置默认)",
+          "identifier_at_entry": {
+            "loader": "env_global",
+            "identifier": "DYNACONF",
+            "env": "global",
+            "merged": false
+          }
+        }
+      ]
+    },
+    {
+      "id": "S2",
+      "title": "运行时嵌套合并（merge=True，新增 policy.mfa_provider，兄弟键保留）",
+      "input_summary": "s.set('SECURITY', {\"policy\": {\"mfa_provider\": \"totp\"}}, merge=True)",
+      "input_full": {
+        "call": "settings.set",
+        "key": "SECURITY",
+        "value": {
+          "policy": {
+            "mfa_provider": "totp"
+          }
+        },
+        "merge": true
+      },
+      "effective": {
+        "leaf": true,
+        "lab_probe": null,
+        "security": {
+          "require_mfa": true,
+          "session_timeout": 30,
+          "policy": {
+            "min_password_length": 12,
+            "issuer": "corp-local",
+            "mfa_provider": "totp"
+          }
+        }
+      },
+      "trace_events": [
+        {
+          "step": "S2",
+          "depth": 0,
+          "key": "SECURITY",
+          "value_at_entry": {
+            "policy": {
+              "mfa_provider": "totp"
+            }
+          },
+          "merge_arg": "True",
+          "identifier_at_entry": {
+            "loader": "set_method",
+            "identifier": "undefined",
+            "env": "global",
+            "merged": true,
+            "_note": "入参为 None，此处为按源码规则推导"
+          }
+        }
+      ]
+    },
+    {
+      "id": "S3",
+      "title": "运行时 set 写入与终值相同的值 true",
+      "input_summary": "s.set('security.require_mfa', True)",
+      "input_full": {
+        "call": "settings.set",
+        "key": "security.require_mfa",
+        "value": true
+      },
+      "effective": {
+        "leaf": true,
+        "lab_probe": null,
+        "security": {
+          "require_mfa": true,
+          "session_timeout": 30,
+          "policy": {
+            "min_password_length": 12,
+            "issuer": "corp-local",
+            "mfa_provider": "totp"
+          }
+        }
+      },
+      "trace_events": [
+        {
+          "step": "S3",
+          "depth": 0,
+          "key": "security.require_mfa",
+          "value_at_entry": true,
+          "merge_arg": "<not-passed>",
+          "identifier_at_entry": {
+            "loader": "set_method",
+            "identifier": "undefined",
+            "env": "global",
+            "merged": false,
+            "_note": "入参为 None，此处为按源码规则推导"
+          }
+        },
+        {
+          "step": "S3",
+          "depth": 1,
+          "key": "security",
+          "value_at_entry": {
+            "require_mfa": true,
+            "session_timeout": 30,
+            "policy": {
+              "min_password_length": 12,
+              "issuer": "corp-local",
+              "mfa_provider": "totp"
+            }
+          },
+          "merge_arg": "empty-sentinel(按配置默认)",
+          "identifier_at_entry": {
+            "loader": "set_method",
+            "identifier": "undefined",
+            "env": "global",
+            "merged": false
+          }
+        }
+      ]
+    },
+    {
+      "id": "S4a",
+      "title": "同一个 env loader 再次加载（折叠探针第 1 次）",
+      "input_summary": "os.environ['DYNACONF_LAB_PROBE']='pass-1'; env_loader.load(s)",
+      "input_full": {
+        "os.environ_update": {
+          "DYNACONF_LAB_PROBE": "pass-1"
+        },
+        "dynaconf_env_at_pass": {
+          "DYNACONF_LAB_PROBE": "pass-1",
+          "DYNACONF_SECURITY__REQUIRE_MFA": "true"
+        },
+        "call": "dynaconf.loaders.env_loader.load(settings)"
+      },
+      "effective": {
+        "leaf": true,
+        "lab_probe": "pass-1",
+        "security": {
+          "require_mfa": true,
+          "session_timeout": 30,
+          "policy": {
+            "min_password_length": 12,
+            "issuer": "corp-local",
+            "mfa_provider": "totp"
+          }
+        }
+      },
+      "trace_events": [
+        {
+          "step": "S4a",
+          "depth": 0,
+          "key": "SECURITY__REQUIRE_MFA",
+          "value_at_entry": true,
+          "merge_arg": "empty-sentinel(按配置默认)",
+          "identifier_at_entry": {
+            "loader": "env_global",
+            "identifier": "DYNACONF",
+            "env": "global",
+            "merged": false
+          }
+        },
+        {
+          "step": "S4a",
+          "depth": 1,
+          "key": "SECURITY",
+          "value_at_entry": {
+            "require_mfa": true,
+            "session_timeout": 30,
+            "policy": {
+              "min_password_length": 12,
+              "issuer": "corp-local",
+              "mfa_provider": "totp"
+            }
+          },
+          "merge_arg": "empty-sentinel(按配置默认)",
+          "identifier_at_entry": {
+            "loader": "env_global",
+            "identifier": "DYNACONF",
+            "env": "global",
+            "merged": false
+          }
+        },
+        {
+          "step": "S4a",
+          "depth": 0,
+          "key": "LAB_PROBE",
+          "value_at_entry": "pass-1",
+          "merge_arg": "empty-sentinel(按配置默认)",
+          "identifier_at_entry": {
+            "loader": "env_global",
+            "identifier": "DYNACONF",
+            "env": "global",
+            "merged": false
+          }
+        }
+      ]
+    },
+    {
+      "id": "S4b",
+      "title": "同一个 env loader 再次加载（折叠探针第 2 次，同 SourceMetadata 槽位）",
+      "input_summary": "os.environ['DYNACONF_LAB_PROBE']='pass-2'; env_loader.load(s)",
+      "input_full": {
+        "os.environ_update": {
+          "DYNACONF_LAB_PROBE": "pass-2"
+        },
+        "dynaconf_env_at_pass": {
+          "DYNACONF_LAB_PROBE": "pass-2",
+          "DYNACONF_SECURITY__REQUIRE_MFA": "true"
+        },
+        "call": "dynaconf.loaders.env_loader.load(settings)"
+      },
+      "effective": {
+        "leaf": true,
+        "lab_probe": "pass-2",
+        "security": {
+          "require_mfa": true,
+          "session_timeout": 30,
+          "policy": {
+            "min_password_length": 12,
+            "issuer": "corp-local",
+            "mfa_provider": "totp"
+          }
+        }
+      },
+      "trace_events": [
+        {
+          "step": "S4b",
+          "depth": 0,
+          "key": "SECURITY__REQUIRE_MFA",
+          "value_at_entry": true,
+          "merge_arg": "empty-sentinel(按配置默认)",
+          "identifier_at_entry": {
+            "loader": "env_global",
+            "identifier": "DYNACONF",
+            "env": "global",
+            "merged": false
+          }
+        },
+        {
+          "step": "S4b",
+          "depth": 1,
+          "key": "SECURITY",
+          "value_at_entry": {
+            "require_mfa": true,
+            "session_timeout": 30,
+            "policy": {
+              "min_password_length": 12,
+              "issuer": "corp-local",
+              "mfa_provider": "totp"
+            }
+          },
+          "merge_arg": "empty-sentinel(按配置默认)",
+          "identifier_at_entry": {
+            "loader": "env_global",
+            "identifier": "DYNACONF",
+            "env": "global",
+            "merged": false
+          }
+        },
+        {
+          "step": "S4b",
+          "depth": 0,
+          "key": "LAB_PROBE",
+          "value_at_entry": "pass-2",
+          "merge_arg": "empty-sentinel(按配置默认)",
+          "identifier_at_entry": {
+            "loader": "env_global",
+            "identifier": "DYNACONF",
+            "env": "global",
+            "merged": false
+          }
+        }
+      ]
+    },
+    {
+      "id": "S5a",
+      "title": "绕过 Settings.set 的嵌套属性直改（历史不记录）：先改成 false",
+      "input_summary": "s.security.require_mfa = False",
+      "input_full": {
+        "direct_mutation": "settings.security.require_mfa = False"
+      },
+      "effective": {
+        "leaf": false,
+        "lab_probe": "pass-2",
+        "security": {
+          "require_mfa": false,
+          "session_timeout": 30,
+          "policy": {
+            "min_password_length": 12,
+            "issuer": "corp-local",
+            "mfa_provider": "totp"
+          }
+        }
+      },
+      "trace_events": []
+    },
+    {
+      "id": "S5b",
+      "title": "绕过 Settings.set 的嵌套属性直改：还原为 true（终值与两轨一致）",
+      "input_summary": "s.security.require_mfa = True",
+      "input_full": {
+        "direct_mutation": "settings.security.require_mfa = True"
+      },
+      "effective": {
+        "leaf": true,
+        "lab_probe": "pass-2",
+        "security": {
+          "require_mfa": true,
+          "session_timeout": 30,
+          "policy": {
+            "min_password_length": 12,
+            "issuer": "corp-local",
+            "mfa_provider": "totp"
+          }
+        }
+      },
+      "trace_events": []
+    }
+  ],
+  "final_effective": {
+    "leaf": true,
+    "lab_probe": "pass-2",
+    "security": {
+      "require_mfa": true,
+      "session_timeout": 30,
+      "policy": {
+        "min_password_length": 12,
+        "issuer": "corp-local",
+        "mfa_provider": "totp"
+      }
+    }
+  },
+  "leaf_history_old_first": [
+    {
+      "loader": "json",
+      "identifier": "/Users/apple/Documents/用户反馈项目/batches/feedback-20261120-backend-security-280-jettywang/prepared/FB-20261120-SEC-JW-076/workspace/inspect_evidence_lab/labwork/security.json",
+      "env": "default",
+      "merged": false,
+      "value": true
+    },
+    {
+      "loader": "env_global",
+      "identifier": "DYNACONF",
+      "env": "global",
+      "merged": false,
+      "value": true
+    },
+    {
+      "loader": "set_method",
+      "identifier": "undefined",
+      "env": "global",
+      "merged": true,
+      "value": true
+    },
+    {
+      "loader": "set_method",
+      "identifier": "undefined",
+      "env": "global",
+      "merged": false,
+      "value": true
+    }
+  ],
+  "probe_history_old_first": [
+    {
+      "loader": "env_global",
+      "identifier": "DYNACONF",
+      "env": "global",
+      "merged": false,
+      "value": "pass-2"
+    }
+  ],
+  "mfa_provider_history": [
+    {
+      "loader": "env_global",
+      "identifier": "DYNACONF",
+      "env": "global",
+      "merged": false,
+      "value": "totp"
+    },
+    {
+      "loader": "set_method",
+      "identifier": "undefined",
+      "env": "global",
+      "merged": true,
+      "value": "totp"
+    },
+    {
+      "loader": "set_method",
+      "identifier": "undefined",
+      "env": "global",
+      "merged": false,
+      "value": "totp"
+    }
+  ],
+  "relevant_slots": [
+    {
+      "metadata": {
+        "loader": "json",
+        "identifier": "/Users/apple/Documents/用户反馈项目/batches/feedback-20261120-backend-security-280-jettywang/prepared/FB-20261120-SEC-JW-076/workspace/inspect_evidence_lab/labwork/security.json",
+        "env": "default",
+        "merged": false
+      },
+      "data": {
+        "SECURITY": {
+          "require_mfa": true,
+          "session_timeout": 30,
+          "policy": {
+            "min_password_length": 12,
+            "issuer": "corp-local"
+          }
+        }
+      }
+    },
+    {
+      "metadata": {
+        "loader": "env_global",
+        "identifier": "DYNACONF",
+        "env": "global",
+        "merged": false
+      },
+      "data": {
+        "SECURITY": {
+          "require_mfa": true,
+          "session_timeout": 30,
+          "policy": {
+            "min_password_length": 12,
+            "issuer": "corp-local",
+            "mfa_provider": "totp"
+          }
+        },
+        "LAB_PROBE": "pass-2"
+      }
+    },
+    {
+      "metadata": {
+        "loader": "set_method",
+        "identifier": "undefined",
+        "env": "global",
+        "merged": true
+      },
+      "data": {
+        "SECURITY": {
+          "require_mfa": true,
+          "session_timeout": 30,
+          "policy": {
+            "min_password_length": 12,
+            "issuer": "corp-local",
+            "mfa_provider": "totp"
+          }
+        }
+      }
+    },
+    {
+      "metadata": {
+        "loader": "set_method",
+        "identifier": "undefined",
+        "env": "global",
+        "merged": false
+      },
+      "data": {
+        "SECURITY": {
+          "require_mfa": true,
+          "session_timeout": 30,
+          "policy": {
+            "min_password_length": 12,
+            "issuer": "corp-local",
+            "mfa_provider": "totp"
+          }
+        }
+      }
+    }
+  ],
+  "inspect_key_new_first": {
+    "header": {
+      "env_filter": "None",
+      "key_filter": "security.require_mfa",
+      "new_first": "True",
+      "history_limit": "None",
+      "include_internal": "False"
+    },
+    "current": true,
+    "history": [
+      {
+        "loader": "set_method",
+        "identifier": "undefined",
+        "env": "global",
+        "merged": false,
+        "value": true
+      },
+      {
+        "loader": "set_method",
+        "identifier": "undefined",
+        "env": "global",
+        "merged": true,
+        "value": true
+      },
+      {
+        "loader": "env_global",
+        "identifier": "DYNACONF",
+        "env": "global",
+        "merged": false,
+        "value": true
+      },
+      {
+        "loader": "json",
+        "identifier": "/Users/apple/Documents/用户反馈项目/batches/feedback-20261120-backend-security-280-jettywang/prepared/FB-20261120-SEC-JW-076/workspace/inspect_evidence_lab/labwork/security.json",
+        "env": "default",
+        "merged": false,
+        "value": true
+      }
+    ]
+  },
+  "inspect_limit2_new_first": {
+    "header": {
+      "env_filter": "None",
+      "key_filter": "security.require_mfa",
+      "new_first": "True",
+      "history_limit": "2",
+      "include_internal": "False"
+    },
+    "current": true,
+    "history": [
+      {
+        "loader": "set_method",
+        "identifier": "undefined",
+        "env": "global",
+        "merged": false,
+        "value": true
+      },
+      {
+        "loader": "set_method",
+        "identifier": "undefined",
+        "env": "global",
+        "merged": true,
+        "value": true
+      }
+    ]
+  },
+  "current_only": {
+    "artifact": "模拟只拿到 inspect 的 current（或截图/转述只剩终值）",
+    "key": "security.require_mfa",
+    "current": true
+  }
+}

@@ -1,0 +1,5 @@
+{
+  "artifact": "模拟只拿到 inspect 的 current（或截图/转述只剩终值）",
+  "key": "security.require_mfa",
+  "current": true
+}

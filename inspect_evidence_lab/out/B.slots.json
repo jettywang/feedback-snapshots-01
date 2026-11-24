@@ -1,0 +1,78 @@
+[
+  {
+    "metadata": {
+      "loader": "json",
+      "identifier": "/Users/apple/Documents/用户反馈项目/batches/feedback-20261120-backend-security-280-jettywang/prepared/FB-20261120-SEC-JW-076/workspace/inspect_evidence_lab/labwork/security.json",
+      "env": "default",
+      "merged": false
+    },
+    "data": {
+      "SECURITY": {
+        "require_mfa": true,
+        "session_timeout": 30,
+        "policy": {
+          "min_password_length": 12,
+          "issuer": "corp-local"
+        }
+      }
+    }
+  },
+  {
+    "metadata": {
+      "loader": "env_global",
+      "identifier": "DYNACONF",
+      "env": "global",
+      "merged": false
+    },
+    "data": {
+      "SECURITY": {
+        "require_mfa": true,
+        "session_timeout": 30,
+        "policy": {
+          "min_password_length": 12,
+          "issuer": "corp-local",
+          "mfa_provider": "totp"
+        }
+      },
+      "LAB_PROBE": "pass-2"
+    }
+  },
+  {
+    "metadata": {
+      "loader": "set_method",
+      "identifier": "undefined",
+      "env": "global",
+      "merged": true
+    },
+    "data": {
+      "SECURITY": {
+        "require_mfa": true,
+        "session_timeout": 30,
+        "policy": {
+          "min_password_length": 12,
+          "issuer": "corp-local",
+          "mfa_provider": "totp"
+        }
+      }
+    }
+  },
+  {
+    "metadata": {
+      "loader": "set_method",
+      "identifier": "undefined",
+      "env": "global",
+      "merged": false
+    },
+    "data": {
+      "SECURITY": {
+        "require_mfa": true,
+        "session_timeout": 30,
+        "policy": {
+          "min_password_length": 12,
+          "issuer": "corp-local",
+          "mfa_provider": "totp"
+        }
+      }
+    }
+  }
+]
