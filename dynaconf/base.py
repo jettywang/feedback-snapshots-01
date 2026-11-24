@@ -56,6 +56,10 @@ from dynaconf.utils.parse_conf import parse_conf_data
 from dynaconf.utils.parse_conf import true_values
 from dynaconf.validator import ValidationError
 from dynaconf.validator import ValidatorList
+from dynaconf.validation_policy import enforce as _enforce_validation
+from dynaconf.validation_policy import preflight as _preflight_validation
+from dynaconf.validation_policy import record_approval as _record_approval
+from dynaconf.validation_policy import ValidationPolicy
 
 
 class LazySettings(LazyObject):
@@ -155,6 +159,8 @@ class DynaconfConfig:
     validate_only: Optional[list[str]] = None
     validate_exclude: Optional[list[str]] = None
     validate_only_current_env: bool = False
+    validation_policy: Optional[ValidationPolicy] = None
+    last_validation_evidence: Optional[dict] = None
 
     # hooks
     post_hooks: list[Callable] = field(default_factory=list)
@@ -185,6 +191,10 @@ class DynaconfConfig:
         """Process values."""
         if not isinstance(self.post_hooks, list):
             self.post_hooks = ensure_a_list(self.post_hooks)
+        if self.validation_policy is not None:
+            from dynaconf.validation_policy import as_policy
+
+            self.validation_policy = as_policy(self.validation_policy)
 
     def override_with(self, data: dict):
         """Override keys and ignore unknows items."""
@@ -306,6 +316,7 @@ class Settings:
                 loader_identifier="init_settings_module",
             )
         kwargs.pop("validators", None)
+        kwargs.pop("validation_policy", None)
         for key, value in kwargs.items():
             self.set(
                 key,
@@ -323,11 +334,75 @@ class Settings:
             self.execute_loaders()
 
         if not skip_validators:
-            core.validators.validate(
-                only=config.validate_only,
-                exclude=config.validate_exclude,
-                only_current_env=config.validate_only_current_env,
-            )
+            policy = config.validation_policy
+            if policy is not None:
+                _enforce_validation(
+                    self,
+                    policy,
+                    only=config.validate_only,
+                    exclude=config.validate_exclude,
+                    only_current_env=config.validate_only_current_env,
+                )
+            else:
+                core.validators.validate(
+                    only=config.validate_only,
+                    exclude=config.validate_exclude,
+                    only_current_env=config.validate_only_current_env,
+                )
+
+    @property
+    def validation_policy(self):
+        return self.__core__.config.validation_policy
+
+    @property
+    def last_validation_evidence(self):
+        return self.__core__.config.last_validation_evidence
+
+    def preflight(
+        self, envs=None, validators=None, only=None, exclude=None, policy=None
+    ):
+        """Dry-run validation for one or more envs without mutating settings.
+
+        Returns evidence with the ruleset version/digest, per-environment
+        decisions, pending runtime candidates and the approved fallback
+        values. See ``dynaconf.validation_policy.format_evidence`` to render.
+        """
+        policy = policy or self.__core__.config.validation_policy
+        policy = policy or ValidationPolicy()
+        return _preflight_validation(
+            self,
+            policy=policy,
+            envs=envs,
+            validators=validators,
+            only=only,
+            exclude=exclude,
+        )
+
+    def validate_settings(
+        self, only=None, exclude=None, only_current_env=False
+    ):
+        """Validate using the active policy (warn/enforce per environment)."""
+        policy = self.__core__.config.validation_policy
+        if policy is None:
+            policy = ValidationPolicy(default_mode="enforce")
+        return _enforce_validation(
+            self,
+            policy,
+            only=only,
+            exclude=exclude,
+            only_current_env=only_current_env,
+        )
+
+    def approve(self, envs=None, validators=None, policy=None):
+        """Record the currently passing values as the approved snapshot."""
+        policy = policy or self.__core__.config.validation_policy
+        if policy is None:
+            policy = ValidationPolicy()
+        evidence = _record_approval(
+            self, policy, envs=envs, validators=validators
+        )
+        self.__core__.config.validation_policy = policy
+        return evidence
 
     @property
     def environ(self):
@@ -807,6 +882,11 @@ class Settings:
 
         if getattr(self, "validators", None):
             new_data.setdefault("validators", self.validators)
+
+        if config.validation_policy is not None:
+            new_data.setdefault(
+                "validation_policy", config.validation_policy
+            )
 
         new_data.update(kwargs)
         new_data["FORCE_ENV_FOR_DYNACONF"] = env

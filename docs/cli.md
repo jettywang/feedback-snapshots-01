@@ -385,6 +385,60 @@ $ dynaconf -i config.settings validate
 
 If validates it returns status 0 (success) and this command can be called in your CI/CD/Deploy jobs.
 
+### dynaconf preflight
+
+> **NEW in 3.3.6**
+
+Dry-run the validators of a settings instance without mutating it. Preflight
+uses the same rule objects (and therefore the same rules) as runtime
+enforcement, and reports an explicit decision per environment.
+
+```bash
+$ dynaconf -i config.settings preflight -e development -e production
+```
+
+The exit code is `0` when nothing would block enforcement and `1` when an
+environment that is already in `enforce` mode would block.
+
+Use `--json` to get the raw evidence, `-E/--evidence-file` to persist it, and
+`-a/--approved-file` to use approved values as the reported fallback:
+
+```bash
+$ dynaconf -i config.settings preflight -e production \
+    -m enforce -V 2026.11 \
+    --approved-file approved.json \
+    --evidence-file evidence.json --json
+```
+
+### dynaconf approve
+
+> **NEW in 3.3.6**
+
+Record the values that currently pass all validators as the *approved
+snapshot*. The snapshot stores the ruleset version/digest and is what
+enforcement falls back to when a later run fails.
+
+```bash
+$ dynaconf -i config.settings approve -e development -e production \
+    --approved-file approved.json
+```
+
+`approve` refuses to record an environment whose validators currently fail.
+
+### dynaconf evidence
+
+> **NEW in 3.3.6**
+
+Show the enforcement evidence produced by the last runtime validation, or
+read an evidence JSON file written by `preflight`:
+
+```bash
+$ dynaconf -i config.settings evidence --evidence-file evidence.json
+```
+
+The output shows the ruleset version, the runtime decision and the approved
+fallback configuration that remains readable when enforcement fails.
+
 ### dynaconf --version
 
 returns dynaconf version

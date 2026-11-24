@@ -32,6 +32,8 @@ from dynaconf.utils.inspect import OutputFormatError
 from dynaconf.utils.inspect import print_debug_info
 from dynaconf.utils.parse_conf import parse_conf_data
 from dynaconf.utils.parse_conf import unparse_conf_data
+from dynaconf.validation_policy import format_evidence
+from dynaconf.validation_policy import ValidationPolicy
 from dynaconf.validator import ValidationError
 from dynaconf.validator import Validator
 from dynaconf.vendor import click
@@ -859,6 +861,178 @@ def validate(path):  # pragma: no cover
     else:
         click.echo(click.style("Validation error!", fg="white", bg="red"))
         sys.exit(1)
+
+
+def _policy_for_cli(
+    settings_instance,
+    mode: str | None,
+    version: str | None,
+    approved_file: str | None,
+    evidence_file: str | None,
+    envs: tuple[str, ...],
+) -> ValidationPolicy:
+    """Build the rollout policy from CLI flags / settings instance."""
+    active = getattr(settings_instance, "validation_policy", None)
+    policy = active.copy() if active is not None else ValidationPolicy()
+    if mode:
+        for env in envs:
+            policy.modes[env.upper()] = mode
+        if not envs:
+            policy.default_mode = mode
+    if version:
+        policy.version = version
+    if approved_file:
+        policy.approved_file = approved_file
+        policy.approval_meta = {}
+        policy._load_approved_file()
+    if evidence_file:
+        policy.evidence_file = evidence_file
+    return policy
+
+
+@main.command()
+@click.option(
+    "--env",
+    "-e",
+    "envs",
+    multiple=True,
+    help="Environment to preflight (repeatable). Defaults to policy envs.",
+)
+@click.option(
+    "--mode",
+    "-m",
+    type=click.Choice(["off", "warn", "enforce"]),
+    help="Override rollout mode for the selected envs.",
+)
+@click.option(
+    "--version", "-V", default=None, help="Override ruleset version label."
+)
+@click.option(
+    "--approved-file",
+    "-a",
+    default=None,
+    help="JSON file holding approved values and approval metadata.",
+)
+@click.option(
+    "--evidence-file",
+    "-E",
+    default=None,
+    help="Write the preflight evidence JSON to this path.",
+)
+@click.option(
+    "--json", "as_json", is_flag=True, default=False, help="Output raw JSON."
+)
+def preflight(envs, mode, version, approved_file, evidence_file, as_json):
+    """Dry-run validators for envs without mutating settings.
+
+    Same rules and same validator objects used by runtime enforcement.
+    Exit code is 0 when nothing would block, 1 otherwise.
+    """
+    policy = _policy_for_cli(
+        settings, mode, version, approved_file, evidence_file, envs
+    )
+    evidence = settings.preflight(envs=list(envs) or None, policy=policy)
+    evidence["policy"] = {
+        "modes": policy.modes,
+        "default_mode": policy.default_mode,
+    }
+    if as_json:
+        click.echo(json.dumps(evidence, indent=2, default=str))
+    else:
+        click.echo(format_evidence(evidence))
+
+    blocked = any(
+        report.get("decision") == "would-block"
+        for report in evidence["environments"].values()
+    )
+    if blocked:
+        sys.exit(1)
+
+
+@main.command()
+@click.option(
+    "--env",
+    "-e",
+    "envs",
+    multiple=True,
+    help="Environment to approve (repeatable). Defaults to policy envs.",
+)
+@click.option(
+    "--mode",
+    "-m",
+    type=click.Choice(["off", "warn", "enforce"]),
+    help="Set rollout mode for the selected envs while approving.",
+)
+@click.option(
+    "--version", "-V", default=None, help="Override ruleset version label."
+)
+@click.option(
+    "--approved-file",
+    "-a",
+    required=True,
+    help="JSON file where the approved snapshot is written.",
+)
+@click.option(
+    "--evidence-file",
+    "-E",
+    default=None,
+    help="Also write the preflight evidence JSON to this path.",
+)
+def approve(envs, mode, version, approved_file, evidence_file):
+    """Record the currently passing values as the approved snapshot."""
+    policy = _policy_for_cli(
+        settings, mode, version, approved_file, evidence_file, envs
+    )
+    try:
+        evidence = settings.approve(envs=list(envs) or None, policy=policy)
+    except ValidationError as e:
+        click.echo(click.style(f"Error: {e}", fg="white", bg="red"))
+        sys.exit(1)
+    click.echo(format_evidence(evidence))
+    click.echo(
+        click.style(
+            f"Approved snapshot written to {approved_file}",
+            fg="white",
+            bg="green",
+        )
+    )
+
+
+@main.command()
+@click.option(
+    "--evidence-file",
+    "-E",
+    default=None,
+    help="Evidence JSON to read. Defaults to the last runtime evidence.",
+)
+@click.option(
+    "--json", "as_json", is_flag=True, default=False, help="Output raw JSON."
+)
+def evidence(evidence_file, as_json):
+    """Show the enforcement evidence (ruleset version, decision, fallback)."""
+    if evidence_file:
+        try:
+            data = json.loads(
+                Path(evidence_file).read_text(encoding="utf-8")
+            )
+        except (OSError, ValueError) as e:
+            click.echo(click.style(f"Error: {e}", fg="white", bg="red"))
+            sys.exit(1)
+    else:
+        data = getattr(settings, "last_validation_evidence", None)
+        if data is None:
+            click.echo(
+                click.style(
+                    "No runtime evidence available; pass --evidence-file",
+                    fg="white",
+                    bg="red",
+                )
+            )
+            sys.exit(1)
+    if as_json:
+        click.echo(json.dumps(data, indent=2, default=str))
+    else:
+        click.echo(format_evidence(data))
 
 
 INSPECT_FORMATS = list(builtin_dumpers.keys())

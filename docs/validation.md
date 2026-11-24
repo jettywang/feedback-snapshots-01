@@ -559,6 +559,157 @@ Running `settings.validators.validate()` will fail even if `settings.current_env
 
 If you instantiate your settings with the parameter `validate_only_current_env=True`, no errors will be raised if `settings.current_env == 'development'`, but a `ValidationError` will raise if `settings.current_env == 'production'`. This forces you to have the `.secrets.toml` file in `production` but not during `development`.
 
+## Preflight and staged enforcement
+
+> **NEW in 3.3.6**
+
+Existing `Validator` rules can be rolled out gradually: `warn` an environment
+for a while, run a *pre-release preflight* to see what enforcing would do,
+approve the values that are known to be good, and only then switch the
+environment to `enforce`.
+
+Preflight and enforcement share the same evaluation engine and the very same
+validator objects, so the preflight decision is based on exactly the rules
+that will later run.
+
+### Policy object
+
+```python
+from dynaconf import Dynaconf
+from dynaconf import ValidationPolicy
+from dynaconf import Validator
+
+policy = ValidationPolicy(
+    modes={"development": "warn", "production": "warn"},
+    version="2026.11",              # ruleset version shown in evidence
+    on_failure="fallback",          # or "raise" / "warn"
+)
+
+settings = Dynaconf(
+    settings_files=["settings.toml"],
+    environments=True,
+    validators=[
+        Validator("PAYMENT_KEY", must_exist=True, len_min=12),
+        Validator(
+            "PAYMENT_KEY",
+            condition=lambda value: "weak" not in value,
+            env="production",
+        ),
+        Validator("DB_POOL", is_type_of=int, gte=10, env="production"),
+    ],
+    validation_policy=policy,
+)
+```
+
+Modes are `off` (skip), `warn` (report, never block) and `enforce`
+(failures follow `on_failure`). A policy can also be passed as a plain dict.
+
+### Example: same key, different values per environment
+
+`settings.toml`:
+
+```toml
+[development]
+PAYMENT_KEY = "dev-test-key-001"
+DB_POOL = 5
+
+[production]
+PAYMENT_KEY = "prod-live-key-with-weak"
+DB_POOL = 20
+```
+
+Both environments declare rules for the `PAYMENT_KEY` key but expect
+different values. While both are in `warn` mode the application starts and
+keeps the loaded values; a `RuntimeWarning` reports the production failure.
+
+### Pre-release preflight
+
+```python
+report = settings.preflight(envs=["development", "production"])
+print(format_evidence(report))
+```
+
+```text
+Dynaconf validation evidence
+  kind: preflight
+  ruleset version: 2026.11+3f1a...
+  current env: DEVELOPMENT
+  modes: DEVELOPMENT=warn, PRODUCTION=warn
+  [DEVELOPMENT] mode=warn decision=would-pass outcome=passed
+    rules:
+      - PAYMENT_KEY: passed
+  fallback config for DEVELOPMENT (approved):
+    PAYMENT_KEY = 'dev-test-key-001'
+  [PRODUCTION] mode=warn decision=would-warn outcome=failed
+    rules:
+      - PAYMENT_KEY: failed - ...
+```
+
+`preflight` never mutates the settings: it evaluates isolated copies of each
+environment. The candidate values are returned under
+`candidate_approvals`, and `fallback` shows the configuration that would
+remain readable if enforcement failed.
+
+### Explicitly pending candidates
+
+Some values only exist once the application runs, for example `@format`,
+`@get` or `@jinja` lazy values. Preflight does not silently pass or fail
+them; it reports them as `pending` with the decision
+`needs-runtime-check`:
+
+```python
+report = settings.preflight(envs=["development"])
+report["environments"]["DEVELOPMENT"]["pending"]  # ["SECRET_KEY"]
+```
+
+Use `runtime_dependent=[...]` on the policy to mark additional keys as
+runtime-dependent explicitly.
+
+### Approve and enforce
+
+```python
+settings.approve(envs=["development", "production"])
+```
+
+`approve` stores the currently passing values together with the ruleset
+version/digest (`approved_file=` persists them as JSON). It refuses to
+approve an environment whose rules currently fail.
+
+Then flip one environment at a time:
+
+```python
+settings.validation_policy.modes["production"] = "enforce"
+```
+
+When enforcement fails and an approval exists with
+`on_failure="fallback"`, the approved values are re-applied, the failure is
+warned about and the application keeps running with values it can read:
+
+```python
+evidence = settings.validate_settings()
+evidence["decision"]  # "enforcement-failed-fallback"
+settings.PAYMENT_KEY  # "prod-live-key-001" (the approved value)
+```
+
+With `on_failure="raise"` a `ValidationError` is raised instead. The
+decision only depends on the current environment; failures of other
+declared environments in `enforce` mode are listed under `blocked`.
+
+### Evidence
+
+Every `preflight`/`validate_settings` call returns (and can persist via
+`evidence_file=`) a structured report with:
+
+- `ruleset`: ruleset `version`, `digest` and the canonical rule signatures;
+- `approval`: whether an approval exists and whether it matches the current
+  ruleset digest;
+- per environment (preflight) or `environment` (runtime): `mode`,
+  `decision`, `outcome`, failing and pending keys;
+- `fallback`: approved values still usable on failure.
+
+Use `format_evidence(evidence)` for a human readable rendering, or the
+`dynaconf preflight`/`approve`/`evidence` CLI commands.
+
 ## Reference
 
 Validators can be created by passing the following arguments:

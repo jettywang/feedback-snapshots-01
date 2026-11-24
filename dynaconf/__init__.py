@@ -13,6 +13,9 @@ from dynaconf.utils.parse_conf import DynaconfFormatError
 from dynaconf.utils.parse_conf import DynaconfParseError
 from dynaconf.validator import ValidationError
 from dynaconf.validator import Validator
+from dynaconf.validation_policy import format_evidence
+from dynaconf.validation_policy import preflight
+from dynaconf.validation_policy import ValidationPolicy
 
 settings = LazySettings(
     # This global `settings` is deprecated from v3.0.0+
@@ -34,8 +37,11 @@ __all__ = [
     "Dynaconf",
     "LazySettings",
     "Validator",
-    "FlaskDynaconf",
+    "ValidationPolicy",
     "ValidationError",
+    "preflight",
+    "format_evidence",
+    "FlaskDynaconf",
     "DjangoDynaconf",
     "add_converter",
     "inspect_settings",

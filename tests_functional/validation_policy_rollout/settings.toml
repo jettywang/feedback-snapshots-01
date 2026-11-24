@@ -1,0 +1,7 @@
+[development]
+PAYMENT_KEY = "dev-test-key-001"
+DB_POOL = 5
+
+[production]
+PAYMENT_KEY = "prod-live-key-001"
+DB_POOL = 20

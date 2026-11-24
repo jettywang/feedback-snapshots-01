@@ -947,3 +947,137 @@ def test_inspect_invalid_format(tmp_path):
     )
 
     assert expected in result
+
+
+class TestValidationPolicyCLI:
+    CONFIG = """
+from dynaconf import Dynaconf
+from dynaconf import ValidationPolicy
+from dynaconf import Validator
+
+settings = Dynaconf(
+    settings_files=["settings.toml"],
+    environments=True,
+    validators=[
+        Validator("SECRET", must_exist=True, len_min=10, env="development"),
+        Validator(
+            "SECRET",
+            condition=lambda value: "weak" not in value,
+            env="production",
+        ),
+    ],
+    validation_policy=ValidationPolicy(
+        modes={"{development_mode}": "warn", "production": "enforce"},
+        version="2026.11",
+        approved={"production": {"SECRET": "prod-1234567890"}},
+    ),
+)
+"""
+
+    def _project(
+        self, tmp_path, production_secret="prod-1234567890", module="config"
+    ):
+        (tmp_path / "settings.toml").write_text(
+            f"""
+[development]
+SECRET = "dev-1234567890"
+[production]
+SECRET = "{production_secret}"
+""",
+            encoding="utf-8",
+        )
+        config = self.CONFIG.replace("{development_mode}", "warn")
+        (tmp_path / f"{module}.py").write_text(config, encoding="utf-8")
+
+    def _run(self, tmp_path, *args, module="config"):
+        return run(
+            ["-i", f"{module}.settings", *args],
+            env={
+                "PATH": os.environ.get("PATH", ""),
+                "HOME": os.environ.get("HOME", ""),
+                "PYTHONPATH": str(Path(__file__).parent.parent),
+            },
+        )
+
+    def test_preflight_reports_would_block(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        self._project(
+            tmp_path, production_secret="prod-weak", module="blocking"
+        )
+        output = self._run(
+            tmp_path, "preflight", "-e", "production", module="blocking"
+        )
+        assert "ruleset version: 2026.11+" in output
+        assert "[PRODUCTION] mode=enforce decision=would-block outcome=failed" in (
+            output
+        )
+        assert "fallback config for PRODUCTION (approved):" in output
+        assert "SECRET = 'prod-1234567890'" in output
+
+    def test_preflight_passes_for_clean_env(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        self._project(tmp_path, module="clean")
+        output = self._run(
+            tmp_path, "preflight", "-e", "production", module="clean"
+        )
+        assert "decision=would-pass outcome=passed" in output
+
+    def test_approve_writes_snapshot(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        self._project(tmp_path, module="approving")
+        output = self._run(
+            tmp_path,
+            "approve",
+            "-a",
+            "approved.json",
+            "-e",
+            "production",
+            module="approving",
+        )
+        assert "Approved snapshot written to approved.json" in output
+        import json
+
+        data = json.loads((tmp_path / "approved.json").read_text())
+        assert data["ruleset"]["version"] == "2026.11"
+        assert data["environments"]["PRODUCTION"]["SECRET"] == (
+            "prod-1234567890"
+        )
+
+    def test_approve_refuses_failing_env(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        self._project(
+            tmp_path, production_secret="prod-weak", module="refusing"
+        )
+        output = self._run(
+            tmp_path,
+            "approve",
+            "-a",
+            "approved.json",
+            "-e",
+            "production",
+            module="refusing",
+        )
+        assert "cannot approve environments with failing validators" in output
+        assert not (tmp_path / "approved.json").exists()
+
+    def test_evidence_reads_json_file(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        self._project(tmp_path, module="evidencing")
+        self._run(
+            tmp_path,
+            "preflight",
+            "-e",
+            "production",
+            "-E",
+            "evidence.json",
+            module="evidencing",
+        )
+        output = self._run(
+            tmp_path,
+            "evidence",
+            "-E",
+            "evidence.json",
+            module="evidencing",
+        )
+        assert "ruleset version: 2026.11+" in output
+        assert "[PRODUCTION]" in output
