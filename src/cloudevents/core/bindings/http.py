@@ -26,6 +26,11 @@ from cloudevents.core.bindings.common import (
     TIME_ATTR,
     get_event_factory_for_version,
 )
+from cloudevents.core.decision import (
+    ContentMode,
+    ReceiveDecision,
+    attach_decision,
+)
 from cloudevents.core.formats.base import Format
 from cloudevents.core.formats.json import JSONFormat
 from cloudevents.core.spec import SPECVERSION_V1_0
@@ -260,10 +265,30 @@ def from_structured(
     return event_format.read(event_factory, message.body)
 
 
+def select_content_mode(message: HTTPMessage) -> str:
+    """Select HTTP binary or structured mode exactly once."""
+
+    if any(key.lower().startswith(CE_PREFIX) for key in message.headers.keys()):
+        return "binary"
+    return "structured"
+
+
+def _content_type(message: HTTPMessage) -> str | None:
+    for header_name, header_value in message.headers.items():
+        if header_name.lower() == CONTENT_TYPE_HEADER:
+            return header_value
+    return None
+
+
 def from_http(
     message: HTTPMessage,
     event_format: Format,
     event_factory: EventFactory | None = None,
+    *,
+    decision: ReceiveDecision | None = None,
+    receipt: ReceiveDecision | None = None,
+    observer: ReceiveDecision | None = None,
+    recorder: ReceiveDecision | None = None,
 ) -> BaseCloudEvent:
     """
     Parse an HTTP message to a CloudEvent with automatic mode detection.
@@ -274,8 +299,9 @@ def from_http(
     - If any ce- prefixed headers are present → binary mode
     - Otherwise → structured mode
 
-    This function provides a convenient way to handle both content modes without
-    requiring the caller to determine the mode beforehand.
+    When ``decision`` (or its ``receipt`` alias) is supplied, the selected mode,
+    format callback, and event validation are recorded on that same object. The
+    parser never retries the other content mode after a format callback fails.
 
     Example:
         >>> from cloudevents.core.v1.event import CloudEvent
@@ -298,12 +324,27 @@ def from_http(
     :param message: HTTPMessage to parse
     :param event_format: Format implementation for deserialization
     :param event_factory: Factory function to create CloudEvent instances (auto-detected if None)
+    :param decision: Optional receive decision/receipt to populate
+    :param receipt: Alias for ``decision``
     :return: CloudEvent instance
     """
-    if any(key.lower().startswith(CE_PREFIX) for key in message.headers.keys()):
-        return from_binary(message, event_format, event_factory)
+    collector = decision or receipt or observer or recorder
+    mode = select_content_mode(message)
+    if collector is not None:
+        collector.binding = "http"
+        collector.record_mode(mode, _content_type(message))
+        event_format = collector.observe_format(event_format)
+        event_factory = collector.observe_factory(event_factory)
 
-    return from_structured(message, event_format, event_factory)
+    try:
+        if mode == ContentMode.BINARY:
+            return from_binary(message, event_format, event_factory)
+        return from_structured(message, event_format, event_factory)
+    except Exception as exc:
+        if collector is not None:
+            collector.fail(exc)
+            attach_decision(exc, collector)
+        raise
 
 
 def to_binary_event(
@@ -405,6 +446,11 @@ def from_structured_event(
 def from_http_event(
     message: HTTPMessage,
     event_format: Format | None = None,
+    *,
+    decision: ReceiveDecision | None = None,
+    receipt: ReceiveDecision | None = None,
+    observer: ReceiveDecision | None = None,
+    recorder: ReceiveDecision | None = None,
 ) -> BaseCloudEvent:
     """
     Convenience wrapper for from_http with JSON format and auto-detection.
@@ -416,8 +462,18 @@ def from_http_event(
 
     :param message: HTTPMessage to parse
     :param event_format: Format implementation (defaults to JSONFormat)
+    :param decision: Optional receive decision/receipt to populate
+    :param receipt: Alias for ``decision``
     :return: CloudEvent instance (v0.3 or v1.0 based on specversion)
     """
     if event_format is None:
         event_format = JSONFormat()
-    return from_http(message, event_format, None)
+    return from_http(
+        message,
+        event_format,
+        None,
+        decision=decision,
+        receipt=receipt,
+        observer=observer,
+        recorder=recorder,
+    )

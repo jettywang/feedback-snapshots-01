@@ -25,6 +25,11 @@ from cloudevents.core.bindings.common import (
     TIME_ATTR,
     get_event_factory_for_version,
 )
+from cloudevents.core.decision import (
+    ContentMode,
+    ReceiveDecision,
+    attach_decision,
+)
 from cloudevents.core.formats.base import Format
 from cloudevents.core.formats.json import JSONFormat
 from cloudevents.core.spec import SPECVERSION_V1_0
@@ -276,30 +281,67 @@ def from_structured(
                          If None, the format will auto-detect the version.
     :return: CloudEvent instance
     """
-    # Delegate version detection to format layer
-    event = event_format.read(event_factory, message.value)
+    if message.key is None:
+        # Delegate version detection to the format layer.
+        return event_format.read(event_factory, message.value)
 
-    # If message has a key, we need to add it as partitionkey extension attribute
-    # Since the event is already created, we need to reconstruct it with the additional attribute
-    if message.key is not None:
-        key_value = (
-            message.key.decode("utf-8")
-            if isinstance(message.key, bytes)
-            else message.key
-        )
-        attributes = event.get_attributes()
+    key_value = (
+        message.key.decode("utf-8") if isinstance(message.key, bytes) else message.key
+    )
+
+    def with_partition_key(
+        attributes: dict[str, Any],
+        data: dict[str, Any] | str | bytes | None,
+    ) -> BaseCloudEvent:
         attributes[PARTITIONKEY_ATTR] = key_value
-        data = event.get_data()
+        factory = event_factory
+        if factory is None:
+            specversion = attributes.get("specversion", SPECVERSION_V1_0)
+            factory = get_event_factory_for_version(specversion)
+        return factory(attributes, data)
 
-        event = type(event)(attributes, data)
+    return event_format.read(with_partition_key, message.value)
 
-    return event
+
+def select_content_mode(message: KafkaMessage) -> str:
+    """Select Kafka binary or structured mode exactly once."""
+
+    for header_name in message.headers.keys():
+        normalized_name = (
+            header_name.decode("utf-8").lower()
+            if isinstance(header_name, bytes)
+            else header_name.lower()
+        )
+        if normalized_name.startswith(CE_PREFIX):
+            return "binary"
+    return "structured"
+
+
+def _content_type(message: KafkaMessage) -> str | None:
+    for header_name, header_value in message.headers.items():
+        normalized_name = (
+            header_name.decode("utf-8").lower()
+            if isinstance(header_name, bytes)
+            else header_name.lower()
+        )
+        if normalized_name == CONTENT_TYPE_HEADER:
+            return (
+                header_value.decode("utf-8")
+                if isinstance(header_value, bytes)
+                else header_value
+            )
+    return None
 
 
 def from_kafka(
     message: KafkaMessage,
     event_format: Format,
     event_factory: EventFactory | None = None,
+    *,
+    decision: ReceiveDecision | None = None,
+    receipt: ReceiveDecision | None = None,
+    observer: ReceiveDecision | None = None,
+    recorder: ReceiveDecision | None = None,
 ) -> BaseCloudEvent:
     """
     Parse a Kafka message to a CloudEvent with automatic mode detection.
@@ -310,8 +352,9 @@ def from_kafka(
     - If any ce_ prefixed headers are present → binary mode
     - Otherwise → structured mode
 
-    This function provides a convenient way to handle both content modes without
-    requiring the caller to determine the mode beforehand.
+    When ``decision`` (or its ``receipt`` alias) is supplied, the selected mode,
+    format callback, and event validation are recorded on that same object. The
+    parser never retries the other content mode after a format callback fails.
 
     Example:
         >>> from cloudevents.core.v1.event import CloudEvent
@@ -336,13 +379,27 @@ def from_kafka(
     :param message: KafkaMessage to parse
     :param event_format: Format implementation for deserialization
     :param event_factory: Factory function to create CloudEvent instances (auto-detected if None)
+    :param decision: Optional receive decision/receipt to populate
+    :param receipt: Alias for ``decision``
     :return: CloudEvent instance
     """
-    for header_name in message.headers.keys():
-        if header_name.lower().startswith(CE_PREFIX):
-            return from_binary(message, event_format, event_factory)
+    collector = decision or receipt or observer or recorder
+    mode = select_content_mode(message)
+    if collector is not None:
+        collector.binding = "kafka"
+        collector.record_mode(mode, _content_type(message))
+        event_format = collector.observe_format(event_format)
+        event_factory = collector.observe_factory(event_factory)
 
-    return from_structured(message, event_format, event_factory)
+    try:
+        if mode == ContentMode.BINARY:
+            return from_binary(message, event_format, event_factory)
+        return from_structured(message, event_format, event_factory)
+    except Exception as exc:
+        if collector is not None:
+            collector.fail(exc)
+            attach_decision(exc, collector)
+        raise
 
 
 def to_binary_event(
@@ -448,6 +505,11 @@ def from_structured_event(
 def from_kafka_event(
     message: KafkaMessage,
     event_format: Format | None = None,
+    *,
+    decision: ReceiveDecision | None = None,
+    receipt: ReceiveDecision | None = None,
+    observer: ReceiveDecision | None = None,
+    recorder: ReceiveDecision | None = None,
 ) -> BaseCloudEvent:
     """
     Convenience wrapper for from_kafka with JSON format and auto-detection.
@@ -459,8 +521,18 @@ def from_kafka_event(
 
     :param message: KafkaMessage to parse
     :param event_format: Format implementation (defaults to JSONFormat)
+    :param decision: Optional receive decision/receipt to populate
+    :param receipt: Alias for ``decision``
     :return: CloudEvent instance (v0.3 or v1.0 based on specversion)
     """
     if event_format is None:
         event_format = JSONFormat()
-    return from_kafka(message, event_format, None)
+    return from_kafka(
+        message,
+        event_format,
+        None,
+        decision=decision,
+        receipt=receipt,
+        observer=observer,
+        recorder=recorder,
+    )
