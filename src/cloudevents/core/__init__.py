@@ -13,3 +13,10 @@
 #    under the License.
 
 """This package contains the core functionality of the CloudEvents spec."""
+
+# Optional offline evidence-receipt / cross-binding correlation API.
+# Imported for its public re-export surface; see cloudevents.core.receipt.
+from cloudevents.core.receipt import *  # noqa: F401,F403
+from cloudevents.core.receipt import __all__ as _receipt_all
+
+__all__ = list(_receipt_all)

@@ -13,3 +13,26 @@
 #    under the License.
 
 __version__ = "2.2.0"
+
+
+def __getattr__(name):  # PEP 562 - optional evidence/receipt API is lazy
+    if name.startswith("_"):
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    from cloudevents.core import receipt as _receipt
+
+    try:
+        return getattr(_receipt, name)
+    except AttributeError:
+        raise AttributeError(
+            f"module {__name__!r} has no attribute {name!r}"
+        ) from None
+
+
+def __dir__():
+    try:
+        from cloudevents.core import receipt as _receipt
+
+        extra = list(_receipt.__all__)
+    except Exception:  # pragma: no cover - defensive
+        extra = []
+    return sorted(list(globals().keys()) + extra)
