@@ -9,8 +9,8 @@ from django.test.utils import override_settings
 
 import pytest
 
-from csp.constants import HEADER, HEADER_REPORT_ONLY, SELF
-from csp.exceptions import CSPNonceError
+from csp.constants import HEADER, HEADER_REPORT_ONLY, NONE, SELF
+from csp.exceptions import CSPNonceError, CSPPolicyTooLongError
 from csp.middleware import CheckableLazyObject, CSPMiddleware
 from csp.tests.utils import response
 
@@ -287,3 +287,188 @@ def test_set_nonce_access_after_middleware_is_ok() -> None:
     mw.process_response(request, HttpResponse())
     assert bool(getattr(request, "csp_nonce", False)) is True
     assert str(getattr(request, "csp_nonce")) == nonce
+
+
+# --- Policy size budget ---------------------------------------------------
+
+
+def test_policy_size_limit_exact_fit() -> None:
+    # The default test policy ("default-src 'self'") is exactly 18 bytes.
+    settings_dict = {
+        "CONTENT_SECURITY_POLICY": {
+            "POLICY_SIZE_LIMIT": 18,
+            "DIRECTIVES": {"default-src": [SELF]},
+        }
+    }
+    with override_settings(**settings_dict):
+        request = rf.get("/")
+        resp = HttpResponse()
+        mw.process_response(request, resp)
+    assert resp[HEADER] == "default-src 'self'"
+    assert len(resp[HEADER].encode()) == 18
+
+
+def test_policy_size_limit_too_long_raises() -> None:
+    settings_dict = {
+        "CONTENT_SECURITY_POLICY": {
+            "POLICY_SIZE_LIMIT": 17,
+            "DIRECTIVES": {"default-src": [SELF]},
+        }
+    }
+    with override_settings(**settings_dict):
+        request = rf.get("/")
+        resp = HttpResponse()
+        with pytest.raises(CSPPolicyTooLongError) as exc_info:
+            mw.process_response(request, resp)
+    # A too-long policy must never be partially written.
+    assert HEADER not in resp
+    error = exc_info.value
+    assert error.header == HEADER
+    assert error.limit == 17
+    assert error.policy_size == 18
+    assert error.policy == "default-src 'self'"
+    assert error.offending_directive == "default-src"
+    assert "default-src" in str(error)
+
+
+def test_policy_size_limit_offending_directive_diagnostic() -> None:
+    settings_dict = {
+        "CONTENT_SECURITY_POLICY": {
+            "POLICY_SIZE_LIMIT": 18,
+            "DIRECTIVES": {"default-src": [SELF], "img-src": ["example.com"]},
+        }
+    }
+    with override_settings(**settings_dict):
+        request = rf.get("/")
+        resp = HttpResponse()
+        with pytest.raises(CSPPolicyTooLongError) as exc_info:
+            mw.process_response(request, resp)
+    assert exc_info.value.offending_directive == "img-src"
+    assert HEADER not in resp
+
+
+@override_settings(
+    CONTENT_SECURITY_POLICY={
+        "POLICY_SIZE_LIMIT": 18,
+        "ON_POLICY_TOO_LONG": "fallback",
+        "DIRECTIVES": {"default-src": [SELF], "img-src": ["example.com"]},
+        "FALLBACK_DIRECTIVES": {"default-src": [NONE]},
+    }
+)
+def test_policy_size_limit_fallback_delivers_complete_policy() -> None:
+    request = rf.get("/")
+    resp = HttpResponse()
+    mw.process_response(request, resp)
+    assert HEADER in resp
+    assert resp[HEADER] == "default-src 'none'"
+    assert len(resp[HEADER].encode()) <= 18
+
+
+@override_settings(
+    CONTENT_SECURITY_POLICY={
+        "POLICY_SIZE_LIMIT": 10,
+        "ON_POLICY_TOO_LONG": "fallback",
+        "FALLBACK_DIRECTIVES": {"default-src": ["a-very-long-fallback.example.com"]},
+    }
+)
+def test_policy_size_limit_fallback_that_does_not_fit_raises() -> None:
+    request = rf.get("/")
+    resp = HttpResponse()
+    with pytest.raises(CSPPolicyTooLongError):
+        mw.process_response(request, resp)
+    assert HEADER not in resp
+
+
+@override_settings(
+    CONTENT_SECURITY_POLICY={
+        "POLICY_SIZE_LIMIT": 17,
+        "ON_POLICY_TOO_LONG": "fallback",
+    }
+)
+def test_policy_size_limit_misconfigured_fallback_raises() -> None:
+    request = rf.get("/")
+    resp = HttpResponse()
+    with pytest.raises(CSPPolicyTooLongError):
+        mw.process_response(request, resp)
+    assert HEADER not in resp
+
+
+def test_pre_existing_header_is_kept_when_policy_too_long() -> None:
+    approved = "default-src 'none'"
+    settings_dict = {
+        "CONTENT_SECURITY_POLICY": {
+            "POLICY_SIZE_LIMIT": 5,
+            "DIRECTIVES": {"default-src": [SELF]},
+        }
+    }
+    with override_settings(**settings_dict):
+        request = rf.get("/")
+        resp = HttpResponse()
+        resp[HEADER] = approved
+        # Must not raise: the already-present header is treated as approved.
+        mw.process_response(request, resp)
+    assert resp[HEADER] == approved
+
+
+def test_separate_limits_for_enforced_and_report_only() -> None:
+    settings_dict = {
+        "CONTENT_SECURITY_POLICY": {
+            "POLICY_SIZE_LIMIT": 18,
+            "DIRECTIVES": {"default-src": [SELF]},
+        },
+        "CONTENT_SECURITY_POLICY_REPORT_ONLY": {
+            "POLICY_SIZE_LIMIT": 17,
+            "DIRECTIVES": {"default-src": [SELF]},
+        },
+    }
+    with override_settings(**settings_dict):
+        request = rf.get("/")
+        resp = HttpResponse()
+        with pytest.raises(CSPPolicyTooLongError) as exc_info:
+            mw.process_response(request, resp)
+    # The enforced header was written before the report-only one overflowed.
+    assert exc_info.value.header == HEADER_REPORT_ONLY
+    assert resp[HEADER] == "default-src 'self'"
+    assert HEADER_REPORT_ONLY not in resp
+
+
+def test_view_update_overflow_diagnostic() -> None:
+    settings_dict = {
+        "CONTENT_SECURITY_POLICY": {
+            "POLICY_SIZE_LIMIT": 18,
+            "DIRECTIVES": {"default-src": [SELF]},
+        }
+    }
+    with override_settings(**settings_dict):
+        request = rf.get("/")
+        resp = HttpResponse()
+        setattr(resp, "_csp_update", {"img-src": ["example.com"]})
+        with pytest.raises(CSPPolicyTooLongError) as exc_info:
+            mw.process_response(request, resp)
+    assert exc_info.value.offending_directive == "img-src"
+    assert "img-src example.com" in exc_info.value.policy
+    assert HEADER not in resp
+
+
+@override_settings(
+    CONTENT_SECURITY_POLICY={
+        "POLICY_SIZE_LIMIT": 100,
+        "DIRECTIVES": {"default-src": [SELF], "img-src": ["example.com"]},
+    },
+    CONTENT_SECURITY_POLICY_REPORT_ONLY={
+        "POLICY_SIZE_LIMIT": 100,
+        "DIRECTIVES": {"default-src": [SELF]},
+    },
+)
+def test_full_response_with_default_view_update_and_report_header() -> None:
+    request = rf.get("/")
+    resp = HttpResponse()
+    setattr(resp, "_csp_update", {"script-src": ["cdn.example.com"]})
+    mw.process_response(request, resp)
+    enforced_parts = dict(part.split(" ", 1) for part in resp[HEADER].split("; "))
+    assert enforced_parts["default-src"] == "'self'"
+    assert enforced_parts["img-src"] == "example.com"
+    assert enforced_parts["script-src"] == "cdn.example.com"
+    assert resp[HEADER_REPORT_ONLY] == "default-src 'self'"
+    assert len(resp[HEADER].encode()) <= 100
+    assert len(resp[HEADER_REPORT_ONLY].encode()) <= 100

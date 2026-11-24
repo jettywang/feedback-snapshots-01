@@ -2,22 +2,32 @@ from __future__ import annotations
 
 import base64
 import http.client as http_client
+import logging
 import os
 import warnings
 from dataclasses import asdict, dataclass
 from functools import partial
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from django.conf import settings
 from django.utils.deprecation import MiddlewareMixin
 from django.utils.functional import SimpleLazyObject, empty
 
 from csp.constants import HEADER, HEADER_REPORT_ONLY
-from csp.exceptions import CSPNonceError
-from csp.utils import DIRECTIVES_T, build_policy
+from csp.exceptions import CSPNonceError, CSPPolicyTooLongError
+from csp.utils import DIRECTIVES_T, PolicyBuildStatus, build_policy_with_status, default_config
 
 if TYPE_CHECKING:
     from django.http import HttpRequest, HttpResponseBase
+
+    from csp.utils import PolicyBuildResult
+
+logger = logging.getLogger(__name__)
+
+# Values accepted for the ``ON_POLICY_TOO_LONG`` policy setting.
+POLICY_TOO_LONG_RAISE = "raise"
+POLICY_TOO_LONG_FALLBACK = "fallback"
+POLICY_TOO_LONG_ACTIONS = frozenset({POLICY_TOO_LONG_RAISE, POLICY_TOO_LONG_FALLBACK})
 
 
 @dataclass
@@ -79,29 +89,8 @@ class CSPMiddleware(MiddlewareMixin):
         if response.status_code in exempted_debug_codes and settings.DEBUG:
             return response
 
-        policy_parts = self.get_policy_parts(request=request, response=response)
-        csp = build_policy(**asdict(policy_parts))
-        if csp:
-            # Only set header if not already set and not an excluded prefix and not exempted.
-            is_not_exempt = getattr(response, "_csp_exempt", False) is False
-            no_header = HEADER not in response
-            policy = getattr(settings, "CONTENT_SECURITY_POLICY", None) or {}
-            prefixes = policy.get("EXCLUDE_URL_PREFIXES", None) or ()
-            is_not_excluded = not request.path_info.startswith(tuple(prefixes))
-            if no_header and is_not_exempt and is_not_excluded:
-                response[HEADER] = csp
-
-        policy_parts_ro = self.get_policy_parts(request=request, response=response, report_only=True)
-        csp_ro = build_policy(**asdict(policy_parts_ro), report_only=True)
-        if csp_ro:
-            # Only set header if not already set and not an excluded prefix and not exempted.
-            is_not_exempt = getattr(response, "_csp_exempt_ro", False) is False
-            no_header = HEADER_REPORT_ONLY not in response
-            policy = getattr(settings, "CONTENT_SECURITY_POLICY_REPORT_ONLY", None) or {}
-            prefixes = policy.get("EXCLUDE_URL_PREFIXES", None) or ()
-            is_not_excluded = not request.path_info.startswith(tuple(prefixes))
-            if no_header and is_not_exempt and is_not_excluded:
-                response[HEADER_REPORT_ONLY] = csp_ro
+        self._write_csp_header(request=request, response=response, report_only=False)
+        self._write_csp_header(request=request, response=response, report_only=True)
 
         # Once we've written the header, accessing the `request.csp_nonce` will no longer trigger
         # the nonce to be added to the header. Instead we throw an error here to catch this since
@@ -111,15 +100,71 @@ class CSPMiddleware(MiddlewareMixin):
 
         return response
 
+    def _write_csp_header(self, request: HttpRequest, response: HttpResponseBase, report_only: bool) -> None:
+        """Assemble one CSP header and write it only when it can be delivered completely."""
+        header = HEADER_REPORT_ONLY if report_only else HEADER
+        setting_name = "CONTENT_SECURITY_POLICY_REPORT_ONLY" if report_only else "CONTENT_SECURITY_POLICY"
+        exempt_attr = "_csp_exempt_ro" if report_only else "_csp_exempt"
+
+        policy_setting = getattr(settings, setting_name, None) or {}
+        prefixes = policy_setting.get("EXCLUDE_URL_PREFIXES", ()) or ()
+        is_not_excluded = not request.path_info.startswith(tuple(prefixes))
+        is_not_exempt = getattr(response, exempt_attr, False) is False
+        # A header already placed on the response (e.g. by an earlier middleware) is an
+        # approved, complete policy. Leave it untouched rather than replacing or truncating it.
+        no_header = header not in response
+
+        if not (no_header and is_not_exempt and is_not_excluded):
+            return
+
+        policy_parts = self.get_policy_parts(request=request, response=response, report_only=report_only)
+        size_limit = policy_setting.get("POLICY_SIZE_LIMIT")
+        result = build_policy_with_status(**asdict(policy_parts), report_only=report_only, size_limit=size_limit)
+        if result.status is PolicyBuildStatus.EMPTY:
+            return
+
+        if result.status is PolicyBuildStatus.WITHIN_LIMIT:
+            response[header] = result.policy
+            return
+
+        # The assembled policy is too long. Never write a truncated policy.
+        action = policy_setting.get("ON_POLICY_TOO_LONG", POLICY_TOO_LONG_RAISE)
+        if action == POLICY_TOO_LONG_FALLBACK:
+            fallback = self._build_fallback_policy(policy_setting=policy_setting, nonce=policy_parts.nonce)
+            if fallback.status is PolicyBuildStatus.WITHIN_LIMIT and fallback.policy:
+                logger.error(
+                    "%s exceeded POLICY_SIZE_LIMIT (%s > %s bytes); directive %r caused the overflow. "
+                    "Delivering the configured fallback policy instead. Full policy: %r",
+                    header,
+                    result.policy_size,
+                    result.size_limit,
+                    result.offending_directive,
+                    result.policy,
+                )
+                response[header] = fallback.policy
+                return
+
+        raise CSPPolicyTooLongError(result=result, header=header)
+
+    @staticmethod
+    def _build_fallback_policy(policy_setting: dict[str, Any], nonce: str | None) -> PolicyBuildResult:
+        directives = policy_setting.get("FALLBACK_DIRECTIVES")
+        config = default_config(directives) if directives is not None else None
+        return build_policy_with_status(
+            config=config,
+            nonce=nonce,
+            size_limit=policy_setting.get("POLICY_SIZE_LIMIT"),
+        )
+
     def build_policy(self, request: HttpRequest, response: HttpResponseBase) -> str:
         warnings.warn("deprecated in favor of get_policy_parts", DeprecationWarning)
         policy_parts = self.get_policy_parts(request=request, response=response, report_only=False)
-        return build_policy(**asdict(policy_parts))
+        return build_policy_with_status(**asdict(policy_parts)).policy
 
     def build_policy_ro(self, request: HttpRequest, response: HttpResponseBase) -> str:
         warnings.warn("deprecated in favor of get_policy_parts", DeprecationWarning)
         policy_parts_ro = self.get_policy_parts(request=request, response=response, report_only=True)
-        return build_policy(**asdict(policy_parts_ro), report_only=True)
+        return build_policy_with_status(**asdict(policy_parts_ro), report_only=True).policy
 
     def get_policy_parts(
         self,

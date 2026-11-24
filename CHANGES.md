@@ -1,6 +1,21 @@
 CHANGES
 =======
 
+Unreleased
+==========
+
+- Add a configurable size budget for assembled policy headers so a proxy or server header-size
+  limit can never turn a Content-Security-Policy into a truncated, incomplete policy.
+  - `POLICY_SIZE_LIMIT` sets a byte budget independently on `CONTENT_SECURITY_POLICY` and
+    `CONTENT_SECURITY_POLICY_REPORT_ONLY`.
+  - `ON_POLICY_TOO_LONG` selects `"raise"` (default, raise `CSPPolicyTooLongError` and terminate)
+    or `"fallback"` (deliver the complete, pre-approved `FALLBACK_DIRECTIVES` policy).
+  - Policies are always assembled in full; on overflow the error and log record name the directive
+    that crossed the budget. Headers already placed on the response by other middleware are
+    preserved untouched.
+  - `build_policy_with_status()` returns a `PolicyBuildResult` with the assembled policy, its size
+    and the build status; `build_policy()` keeps its existing string-returning behavior.
+
 4.0
 ===
 

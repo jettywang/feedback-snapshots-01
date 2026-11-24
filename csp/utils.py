@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import copy
+import enum
 import re
+from dataclasses import dataclass
 from itertools import chain
 from typing import Any, Callable
 
@@ -64,27 +66,52 @@ def default_config(csp: DIRECTIVES_T | None) -> DIRECTIVES_T | None:
     return config
 
 
-def build_policy(
-    config: DIRECTIVES_T | None = None,
-    update: DIRECTIVES_T | None = None,
-    replace: DIRECTIVES_T | None = None,
-    nonce: str | None = None,
-    report_only: bool = False,
-) -> str:
-    """Builds the policy as a string from the settings."""
+class PolicyBuildStatus(enum.Enum):
+    """Outcome of assembling a policy against an optional size budget."""
 
-    if config is None:
-        if report_only:
-            config = getattr(settings, "CONTENT_SECURITY_POLICY_REPORT_ONLY", {})
-            config = default_config(config.get("DIRECTIVES", {})) if config else None
-        else:
-            config = getattr(settings, "CONTENT_SECURITY_POLICY", {})
-            config = default_config(config.get("DIRECTIVES", {})) if config else None
+    # No policy was assembled (no configuration supplied).
+    EMPTY = "empty"
+    # The assembled policy fits within the configured size budget, or no budget exists.
+    WITHIN_LIMIT = "within-limit"
+    # The assembled policy exceeds the configured size budget.
+    TOO_LONG = "too-long"
 
-    # If config is still `None`, return empty policy.
-    if config is None:
-        return ""
 
+@dataclass(frozen=True)
+class PolicyBuildResult:
+    """The fully assembled policy together with size-budget diagnostics.
+
+    ``policy`` always holds the complete, untruncated policy string. When the
+    status is ``TOO_LONG`` it must never be written as-is: callers should
+    instead deliver an approved fallback policy or terminate the response.
+    """
+
+    status: PolicyBuildStatus
+    policy: str
+    size_limit: int | None = None
+    policy_size: int = 0
+    offending_directive: str | None = None
+    offending_directive_size: int | None = None
+
+    def __str__(self) -> str:
+        return self.policy
+
+
+def _resolve_config(report_only: bool) -> DIRECTIVES_T | None:
+    if report_only:
+        config = getattr(settings, "CONTENT_SECURITY_POLICY_REPORT_ONLY", {})
+    else:
+        config = getattr(settings, "CONTENT_SECURITY_POLICY", {})
+    config = default_config(config.get("DIRECTIVES", {})) if config else None
+    return config
+
+
+def _assemble_policy_parts(
+    config: DIRECTIVES_T | None,
+    update: DIRECTIVES_T | None,
+    replace: DIRECTIVES_T | None,
+    nonce: str | None,
+) -> dict[str, str]:
     update = update if update is not None else {}
     replace = replace if replace is not None else {}
 
@@ -139,7 +166,87 @@ def build_policy(
         report_uri = map(force_str, report_uri)
         policy_parts["report-uri"] = " ".join(report_uri)
 
-    return "; ".join([f"{k} {val}".strip() for k, val in policy_parts.items()])
+    return policy_parts
+
+
+def build_policy_with_status(
+    config: DIRECTIVES_T | None = None,
+    update: DIRECTIVES_T | None = None,
+    replace: DIRECTIVES_T | None = None,
+    nonce: str | None = None,
+    report_only: bool = False,
+    size_limit: int | None = None,
+) -> PolicyBuildResult:
+    """Assemble a policy and evaluate it against an optional byte size budget.
+
+    The policy is always assembled in full; nothing is truncated. When
+    ``size_limit`` is given and the complete policy exceeds it, the result
+    records the ``TOO_LONG`` status together with the first directive whose
+    addition crossed the budget, so callers can deliver a complete approved
+    fallback or terminate with a precise diagnostic.
+    """
+
+    if config is None:
+        config = _resolve_config(report_only)
+
+    # If config is still `None`, return empty policy.
+    if config is None:
+        return PolicyBuildResult(status=PolicyBuildStatus.EMPTY, policy="")
+
+    policy_parts = _assemble_policy_parts(config, update, replace, nonce)
+
+    if not policy_parts:
+        return PolicyBuildResult(status=PolicyBuildStatus.EMPTY, policy="", size_limit=size_limit)
+
+    fragments: list[str] = []
+    total_size = 0
+    offending_directive: str | None = None
+    offending_directive_size: int | None = None
+
+    for directive, value in policy_parts.items():
+        fragment = f"{directive} {value}".strip()
+        fragments.append(fragment)
+        fragment_size = len(fragment.encode("utf-8"))
+        if total_size:
+            total_size += len(b"; ")
+        total_size += fragment_size
+        if size_limit is not None and offending_directive is None and total_size > size_limit:
+            offending_directive = directive
+            offending_directive_size = fragment_size
+
+    policy = "; ".join(fragments)
+    if size_limit is None or total_size <= size_limit:
+        status = PolicyBuildStatus.WITHIN_LIMIT
+    else:
+        status = PolicyBuildStatus.TOO_LONG
+
+    return PolicyBuildResult(
+        status=status,
+        policy=policy,
+        size_limit=size_limit,
+        policy_size=total_size,
+        offending_directive=offending_directive,
+        offending_directive_size=offending_directive_size,
+    )
+
+
+def build_policy(
+    config: DIRECTIVES_T | None = None,
+    update: DIRECTIVES_T | None = None,
+    replace: DIRECTIVES_T | None = None,
+    nonce: str | None = None,
+    report_only: bool = False,
+) -> str:
+    """Builds the policy as a string from the settings."""
+
+    result = build_policy_with_status(
+        config=config,
+        update=update,
+        replace=replace,
+        nonce=nonce,
+        report_only=report_only,
+    )
+    return result.policy
 
 
 def _default_attr_mapper(attr_name: str, val: str) -> str:

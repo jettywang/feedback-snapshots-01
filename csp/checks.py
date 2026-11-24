@@ -12,6 +12,8 @@ from django.core.checks import Error, register
 from packaging.version import Version
 
 from csp.constants import NONCE
+from csp.middleware import POLICY_TOO_LONG_ACTIONS
+from csp.utils import DEFAULT_DIRECTIVES
 
 if TYPE_CHECKING:
     from django.apps.config import AppConfig
@@ -125,5 +127,65 @@ def check_exclude_url_prefixes_is_not_string(app_configs: Sequence[AppConfig] | 
                     id="csp.E002",
                 )
             )
+
+    return errors
+
+
+@register(checks.Tags.security)
+def check_policy_size_settings(app_configs: Sequence[AppConfig] | None, **kwargs: Any) -> list[Error]:
+    """Validate the policy size budget and its failure handling configuration."""
+    errors = []
+    keys = (
+        "CONTENT_SECURITY_POLICY",
+        "CONTENT_SECURITY_POLICY_REPORT_ONLY",
+    )
+    for key in keys:
+        config = getattr(settings, key, None)
+        if not isinstance(config, dict):
+            continue
+
+        size_limit = config.get("POLICY_SIZE_LIMIT")
+        if size_limit is not None and not isinstance(size_limit, int):
+            errors.append(
+                Error(
+                    f"POLICY_SIZE_LIMIT in {key} settings must be an integer (number of bytes).",
+                    id="csp.E003",
+                )
+            )
+        elif isinstance(size_limit, int) and size_limit <= 0:
+            errors.append(
+                Error(
+                    f"POLICY_SIZE_LIMIT in {key} settings must be a positive integer.",
+                    id="csp.E003",
+                )
+            )
+
+        action = config.get("ON_POLICY_TOO_LONG", "raise")
+        if action not in POLICY_TOO_LONG_ACTIONS:
+            errors.append(
+                Error(
+                    f"ON_POLICY_TOO_LONG in {key} settings must be one of: {sorted(POLICY_TOO_LONG_ACTIONS)}.",
+                    id="csp.E004",
+                )
+            )
+
+        fallback = config.get("FALLBACK_DIRECTIVES")
+        if action == "fallback" and not isinstance(fallback, dict):
+            errors.append(
+                Error(
+                    f"FALLBACK_DIRECTIVES in {key} settings must be a dict of directives when "
+                    "ON_POLICY_TOO_LONG is 'fallback'.",
+                    id="csp.E005",
+                )
+            )
+        elif isinstance(fallback, dict):
+            unknown = sorted(set(fallback) - set(DEFAULT_DIRECTIVES))
+            if unknown:
+                errors.append(
+                    Error(
+                        f"FALLBACK_DIRECTIVES in {key} settings contains unknown directives: {unknown}.",
+                        id="csp.E005",
+                    )
+                )
 
     return errors

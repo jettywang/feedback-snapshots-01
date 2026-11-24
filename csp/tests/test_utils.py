@@ -2,7 +2,13 @@ from django.test.utils import override_settings
 from django.utils.functional import lazy
 
 from csp.constants import NONCE, NONE, SELF
-from csp.utils import DEFAULT_DIRECTIVES, build_policy, default_config
+from csp.utils import (
+    DEFAULT_DIRECTIVES,
+    PolicyBuildStatus,
+    build_policy,
+    build_policy_with_status,
+    default_config,
+)
 
 
 def policy_eq(a: str, b: str) -> None:
@@ -375,3 +381,80 @@ def test_boolean_directives() -> None:
         with override_settings(CONTENT_SECURITY_POLICY={"DIRECTIVES": {directive: False}}):
             policy = build_policy()
             policy_eq("default-src 'self'", policy)
+
+
+def test_build_with_status_no_limit() -> None:
+    result = build_policy_with_status(config={"default-src": [SELF]})
+    assert result.status is PolicyBuildStatus.WITHIN_LIMIT
+    assert result.policy == "default-src 'self'"
+    assert result.size_limit is None
+    assert result.policy_size == len(result.policy.encode("utf-8"))
+    assert result.offending_directive is None
+    assert result.offending_directive_size is None
+
+
+def test_build_with_status_empty() -> None:
+    result = build_policy_with_status(config={}, size_limit=100)
+    assert result.status is PolicyBuildStatus.EMPTY
+    assert result.policy == ""
+    assert result.policy_size == 0
+
+
+@override_settings(CONTENT_SECURITY_POLICY=None)
+def test_build_with_status_empty_from_missing_setting() -> None:
+    result = build_policy_with_status(size_limit=100)
+    assert result.status is PolicyBuildStatus.EMPTY
+    assert result.policy == ""
+
+
+@override_settings(CONTENT_SECURITY_POLICY={"DIRECTIVES": {"default-src": [SELF]}})
+def test_build_with_status_uses_settings() -> None:
+    result = build_policy_with_status(size_limit=18)
+    assert result.status is PolicyBuildStatus.WITHIN_LIMIT
+    assert result.policy_size == 18
+
+
+def test_build_with_status_exact_fit() -> None:
+    config = {"default-src": [SELF]}
+    exact_size = len("default-src 'self'".encode("utf-8"))
+    result = build_policy_with_status(config=config, size_limit=exact_size)
+    assert result.status is PolicyBuildStatus.WITHIN_LIMIT
+    assert result.policy == "default-src 'self'"
+
+
+def test_build_with_status_one_byte_over() -> None:
+    config = {"default-src": [SELF]}
+    result = build_policy_with_status(config=config, size_limit=17)
+    assert result.status is PolicyBuildStatus.TOO_LONG
+    assert result.policy == "default-src 'self'"
+    assert result.policy_size == 18
+    assert result.offending_directive == "default-src"
+    assert result.offending_directive_size == 18
+
+
+def test_build_with_status_identifies_offending_directive() -> None:
+    config = {"default-src": [SELF], "img-src": ["example.com"]}
+    # "default-src 'self'" is 18 bytes; the second fragment adds 2 for "; " plus 19.
+    result = build_policy_with_status(config=config, size_limit=18)
+    assert result.status is PolicyBuildStatus.TOO_LONG
+    assert result.offending_directive == "img-src"
+    # The offending size reports the directive fragment itself, excluding the separator.
+    assert result.offending_directive_size == len("img-src example.com".encode("utf-8"))
+    assert result.policy_size == 39
+
+
+def test_build_with_status_never_truncates() -> None:
+    config = {"default-src": [SELF], "img-src": ["example.com"]}
+    result = build_policy_with_status(config=config, size_limit=10)
+    assert result.status is PolicyBuildStatus.TOO_LONG
+    assert result.policy == "img-src example.com; default-src 'self'" or result.policy == "default-src 'self'; img-src example.com"
+
+
+def test_build_with_status_counts_bytes_not_characters() -> None:
+    # A non-ASCII source occupies more bytes than characters.
+    config = {"default-src": ["exämple.com"]}
+    result = build_policy_with_status(config=config, size_limit=23)
+    assert result.status is PolicyBuildStatus.TOO_LONG
+    assert len(result.policy) == 23
+    assert result.policy_size == 24
+    assert result.policy_size == len(result.policy.encode("utf-8"))

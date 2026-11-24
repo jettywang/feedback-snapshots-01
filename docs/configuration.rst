@@ -119,6 +119,34 @@ policy.
        instead of ``csp.middleware.CSPMiddleware``.
        See :ref:`violation reporting <reports-chapter>` for more details.
 
+``POLICY_SIZE_LIMIT``
+    An optional **integer** byte budget for the assembled policy header value. Some proxies and
+    application servers reject (or silently truncate) response headers above a fixed size. A
+    truncated Content-Security-Policy is an incomplete policy and may leave the page under-protected,
+    so django-csp never truncates. When the fully assembled policy exceeds this budget, the behavior
+    is controlled by ``ON_POLICY_TOO_LONG``. The limit is measured in UTF-8 bytes and can be
+    configured independently on ``CONTENT_SECURITY_POLICY`` and
+    ``CONTENT_SECURITY_POLICY_REPORT_ONLY``. When unset, no limit is enforced.
+
+``ON_POLICY_TOO_LONG``
+    What to do when an assembled policy exceeds ``POLICY_SIZE_LIMIT``. One of:
+
+    * ``"raise"`` (default): raise ``csp.exceptions.CSPPolicyTooLongError`` so the request
+      terminates with a server error instead of shipping a partial policy. The exception identifies
+      the header, the configured limit, the actual size and the directive that caused the overflow.
+    * ``"fallback"``: write the complete, pre-approved policy from ``FALLBACK_DIRECTIVES`` instead,
+      provided it fits within the same budget. If no fitting fallback is configured,
+      ``CSPPolicyTooLongError`` is raised. The overflow is logged with the same diagnostics.
+
+    A header already present on the response (for example one set by an earlier middleware) is always
+    left untouched; the size budget only applies to policies assembled by django-csp.
+
+``FALLBACK_DIRECTIVES``
+    A dictionary of directives, using the same format as ``DIRECTIVES``, that forms the complete
+    fallback policy delivered when ``ON_POLICY_TOO_LONG`` is ``"fallback"``. Keep this policy short
+    enough to fit within ``POLICY_SIZE_LIMIT``. A typical choice is a strict lockdown such as
+    ``{"default-src": ["'none'"]}``.
+
 ``DIRECTIVES``
     A dictionary of policy directives. Each key in the dictionary is a directive and the value is a
     list of sources for that directive. The following is a list of all the directives that can be
