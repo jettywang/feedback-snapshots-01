@@ -23,6 +23,7 @@ module Elastic
       module Base
         include Loggable
         include CaFingerprint
+        include EndpointAdmission
 
         DEFAULT_PORT             = 9200
         DEFAULT_PROTOCOL         = 'http'.freeze
@@ -58,6 +59,7 @@ module Elastic
           @options[:delay_on_retry]  ||= 0
 
           validate_ca_fingerprint_options! if @options[:ca_fingerprint]
+          normalized_allowed_endpoints if @options[:allowed_endpoints]
           @block       = block
           @compression = !!@options[:compression]
           @connections = __build_connections
@@ -171,6 +173,9 @@ module Elastic
 
             # Hosts added after the pin (reload, sniffing) would otherwise get no protection
             raise Error, 'CA fingerprinting can\'t be configured over http' if @ca_file && host[:protocol] != 'https'
+
+            # Reject entries outside the allowlist before they enter the pool, including hosts from sniffing
+            ensure_connection_endpoint_allowed!(host)
 
             __build_connection(host, (options[:transport_options] || {}), @block)
           end
@@ -300,6 +305,9 @@ module Elastic
             end
 
             url = connection.full_url(path, params)
+            # The same admission judgment as connection building. It runs on every attempt, so a connection
+            # re-selected after a failure or rebuilt by the sniffer is re-checked before the adapter sends.
+            ensure_endpoint_allowed!(url)
             response = block.call(connection, url)
             connection.healthy! if connection.failures.positive?
 

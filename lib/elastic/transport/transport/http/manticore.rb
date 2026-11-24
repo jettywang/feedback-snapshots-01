@@ -126,6 +126,8 @@ module Elastic
                 host.delete(:user)     # auth is not supported here.
                 host.delete(:password) # use the headers
 
+                ensure_connection_endpoint_allowed!(host)
+
                 Connections::Connection.new(host: host, connection: @manticore)
               end,
               selector_class: options[:selector_class],

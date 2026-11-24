@@ -123,6 +123,14 @@ module Elastic
       #   Faraday 1 and Manticore). Requires https
       #   hosts and the client-built transport (can't be combined with `:transport`).
       #
+      # @option arguments [String,URI,Hash,Array] :allowed_endpoints Restricts every request to the listed service
+      #   entries, given as full URLs (or URI/Hash equivalents). Entries are matched on scheme, host, port and path
+      #   prefix, so two services can share a domain and port while being separated by a proxy path. The same host
+      #   and port may be approved under more than one path, allowing the application to migrate to a second entry.
+      #   A request or connection whose final URL is not approved raises
+      #   {Elastic::Transport::Transport::EndpointAdmission::EndpointNotAllowed} before it is sent. Requires the
+      #   client-built transport (can't be combined with `:transport`).
+      #
       # @yield [faraday] Access and configure the `Faraday::Connection` instance directly with a block
       #
       def initialize(arguments = {}, &block)
@@ -147,6 +155,7 @@ module Elastic
 
         if @arguments[:transport]
           raise ArgumentError, 'ca_fingerprint can\'t be used with a custom :transport instance' if @arguments[:ca_fingerprint]
+          raise ArgumentError, 'allowed_endpoints can\'t be used with a custom :transport instance' if @arguments[:allowed_endpoints]
 
           @transport = @arguments[:transport]
         else
