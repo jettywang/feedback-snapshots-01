@@ -19,9 +19,23 @@ module Elastic
   module Transport
     module Transport
       # Wraps the response from Elasticsearch.
-      # It provides `body`, `status` and `headers` methods
+      # It provides `body`, `status` and `headers` methods.
+      #
+      # When node receipts are enabled (see {NodeReceipt}), the response also
+      # carries the factual receipt of the connection that produced it in
+      # `node_receipt`, plus every receipt collected across retries in
+      # `node_receipts`. Both stay `nil` when the feature is disabled, so the
+      # default behaviour of the class is unchanged.
       class Response
         attr_reader :status, :body, :headers
+
+        # @return [NodeReceipt, nil] Receipt of the attempt that produced this
+        #   response.
+        attr_accessor :node_receipt
+
+        # @return [Array<NodeReceipt>] Receipts of every attempt, oldest first.
+        #   Empty when node receipts are disabled.
+        attr_accessor :node_receipts
 
         # @param status  [Integer] Response status code
         # @param body    [String]  Response body
@@ -29,6 +43,7 @@ module Elastic
         def initialize(status, body, headers = {})
           @status, @body, @headers = status, body, headers
           @body = body.force_encoding('UTF-8') if body.respond_to?(:force_encoding) && !body.frozen?
+          @node_receipts = []
         end
       end
     end

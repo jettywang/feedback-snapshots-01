@@ -17,12 +17,16 @@
 
 require 'timeout'
 
+require 'elastic/transport/transport/node_receipt'
+
 module Elastic
   module Transport
     module Transport
       # Generic client error
       #
-      class Error < StandardError; end
+      class Error < StandardError
+        include NodeReceiptError
+      end
 
       # Reloading connections timeout (1 sec by default)
       #

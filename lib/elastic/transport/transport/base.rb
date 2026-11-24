@@ -225,15 +225,23 @@ module Elastic
           tracer.debug json ? serializer.dump(json, pretty: true).gsub(/^/, '# ').sub(/\}$/, "\n# }")+"\n" : "# #{response.body}\n"
         end
 
+        # Builds an error specific for the HTTP response status or a generic server error
+        #
+        # @api private
+        #
+        def __build_transport_error(response)
+          error = ERRORS[response.status] || ServerError
+          message = "[#{response.status}] #{response.body}"
+          capture_otel_error_attributes(message)
+          error.new message
+        end
+
         # Raise error specific for the HTTP response status or a generic server error
         #
         # @api private
         #
         def __raise_transport_error(response)
-          error = ERRORS[response.status] || ServerError
-          message = "[#{response.status}] #{response.body}"
-          capture_otel_error_attributes(message)
-          raise error.new message
+          raise __build_transport_error(response)
         end
 
         # Converts any non-String object to JSON
@@ -285,6 +293,12 @@ module Elastic
           reload_on_failure = opts.fetch(:reload_on_failure, @options[:reload_on_failure])
           delay_on_retry = opts.fetch(:delay_on_retry, @options[:delay_on_retry])
           max_retries = max_retries(opts) || max_retries(options)
+          node_receipts_enabled = node_receipts_enabled?(opts)
+          # One fresh receipt is created per attempt and pushed here, so a
+          # retry never reuses or mutates the fields recorded for an earlier
+          # response.
+          node_receipts = []
+          node_receipt = nil
           params = params.clone
           # Transforms ignore status codes to Integer
           ignore = Array(params.delete(:ignore)).compact.map(&:to_i)
@@ -293,6 +307,7 @@ module Elastic
             sleep(delay_on_retry / 1000.0) if tries > 0
             tries += 1
             connection = get_connection or raise Error.new('Cannot get new connection from pool.')
+            node_receipt = NodeReceipt.new(connection, tries) if node_receipts_enabled
 
             if connection.connection.respond_to?(:params) &&
                connection.connection.params.respond_to?(:to_hash)
@@ -307,24 +322,35 @@ module Elastic
             __raise_transport_error(response) if response.status.to_i >= 300 &&
                                                  @retry_on_status.include?(response.status.to_i)
           rescue Elastic::Transport::Transport::ServerError => e
+            node_receipt&.mark_failure!(response&.status, e)
             raise e unless response && @retry_on_status.include?(response.status)
 
             log_warn "[#{e.class}] Attempt #{tries} to get response from #{url}"
             if tries <= (max_retries || DEFAULT_MAX_RETRIES)
+              node_receipts << node_receipt if node_receipts_enabled
+              # Drop references to the failed attempt so they can't bleed into
+              # the retry; a new receipt is created on the next loop.
+              node_receipt = nil
+              response = nil
               retry
             else
               message = "[#{e.class}] Cannot get response from #{url} after #{tries} tries"
               log_fatal(message)
               capture_otel_error_attributes(message)
+              attach_node_receipt(e, node_receipt, node_receipts) if node_receipts_enabled
               raise e
             end
           rescue *host_unreachable_exceptions => e
+            node_receipt&.mark_unreachable!(e)
             log_error "[#{e.class}] #{e.message} #{connection.host.inspect}"
 
             connection.dead!
 
             if reload_on_failure && tries < connections.all.size
               log_warn "[#{e.class}] Reloading connections (attempt #{tries} of #{connections.all.size})"
+              node_receipts << node_receipt if node_receipts_enabled
+              node_receipt = nil
+              response = nil
               reload_connections! and retry
             end
 
@@ -332,41 +358,60 @@ module Elastic
 
             unless max_retries
               capture_otel_error_attributes(exception.message)
+              attach_node_receipt(exception, node_receipt, node_receipts) if node_receipts_enabled
               raise exception
             end
 
             log_warn "[#{e.class}] Attempt #{tries} connecting to #{connection.host.inspect}"
             if tries <= max_retries
+              node_receipts << node_receipt if node_receipts_enabled
+              node_receipt = nil
+              response = nil
               retry
             else
               message = "[#{e.class}] Cannot connect to #{connection.host.inspect} after #{tries} tries"
               log_fatal(message)
               capture_otel_error_attributes(message)
+              attach_node_receipt(exception, node_receipt, node_receipts) if node_receipts_enabled
               raise exception
             end
           rescue Exception => e
             message = "[#{e.class}] #{e.message} (#{connection.host.inspect if connection})"
             log_fatal message
             capture_otel_error_attributes(message)
+            attach_node_receipt(e, node_receipt, node_receipts) if node_receipts_enabled
             raise e
           end #/begin
 
           duration = Time.now - start
 
           if response.status.to_i >= 300
+            node_receipt&.mark_failure!(response.status.to_i)
             __log_response(method, path, params, body, url, response, nil, 'N/A', duration)
             __trace(method, path, params, connection_headers(connection), body, url, response, nil, 'N/A', duration) if tracer
 
             # Log the failure only when `ignore` doesn't match the response status
             log_fatal("[#{response.status}] #{response.body}") unless ignore.include?(response.status.to_i)
-            __raise_transport_error response unless ignore.include?(response.status.to_i)
+            unless ignore.include?(response.status.to_i)
+              error = __build_transport_error(response)
+              attach_node_receipt(error, node_receipt, node_receipts) if node_receipts_enabled
+              raise error
+            end
           end
 
           if response.body &&
              !response.body.empty? &&
              response.headers &&
              response.headers['content-type'] =~ /json/
-            json = serializer.load(response.body)
+            begin
+              json = serializer.load(response.body)
+            rescue Exception => e
+              # Keep the original parser error for the caller, but record the
+              # parse failure against the connection that actually answered.
+              node_receipt&.mark_parse_error!(e, response.status.to_i)
+              attach_node_receipt(e, node_receipt, node_receipts) if node_receipts_enabled
+              raise e
+            end
           end
           took = (json['took'] ? sprintf('%.3fs', json['took'] / 1000.0) : 'n/a') rescue 'n/a'
           __log_response(method, path, params, body, url, response, json, took, duration) unless ignore.include?(response.status.to_i)
@@ -377,7 +422,15 @@ module Elastic
             ::OpenTelemetry::Trace.current_span&.set_attribute('db.response.status_code', response.status)
           end
 
-          Response.new response.status, json || response.body, response.headers
+          # An ignored >= 300 response was already marked as a failure above,
+          # so only mark success here for responses below that threshold.
+          node_receipt&.mark_success!(response.status.to_i) if response.status.to_i < 300
+          Response.new(response.status, json || response.body, response.headers).tap do |final_response|
+            next unless node_receipts_enabled
+
+            node_receipts << node_receipt
+            attach_receipt_to_response(final_response, node_receipt, node_receipts)
+          end
         ensure
           @last_request_at = Time.now
         end
@@ -407,6 +460,46 @@ module Elastic
 
         def max_retries(opts)
           opts[:retry_on_failure] == true ? DEFAULT_MAX_RETRIES : opts[:retry_on_failure]
+        end
+
+        # Whether node receipts should be collected for this request. A
+        # per-request option overrides the transport level setting.
+        #
+        # @api private
+        #
+        def node_receipts_enabled?(opts)
+          if opts.key?(:node_receipt)
+            opts[:node_receipt]
+          else
+            @options[:node_receipt]
+          end
+        end
+
+        # Attaches the receipt of the final attempt and the full ordered list
+        # of attempt receipts to a response.
+        #
+        # @api private
+        #
+        def attach_receipt_to_response(response, node_receipt, node_receipts)
+          response.node_receipt = node_receipt
+          response.node_receipts = node_receipts.dup
+        end
+
+        # Attaches the receipt of the final attempt and the full ordered list
+        # of attempt receipts to an exception. Exceptions that don't already
+        # support receipts gain the accessors through {NodeReceiptError}
+        # without changing their class or message, so the original structured
+        # error raised to the caller is preserved.
+        #
+        # @api private
+        #
+        def attach_node_receipt(error, node_receipt, node_receipts)
+          error.extend(NodeReceiptError) unless error.respond_to?(:node_receipt=)
+
+          all_receipts = node_receipts.dup
+          all_receipts << node_receipt if node_receipt && !all_receipts.include?(node_receipt)
+          error.node_receipt = node_receipt || all_receipts.last
+          error.node_receipts.replace(all_receipts)
         end
 
         def compress_request(body, headers)

@@ -1,3 +1,10 @@
+## Unreleased
+
+- Adds optional node result receipts (`node_receipt: true`). When enabled, every connection attempt produces an `Elastic::Transport::Transport::NodeReceipt` that records the connection the request was actually sent to and a factual status for the attempt: `unreachable` (no complete response, e.g. connection refused or timeout), `parse_error` (the node answered but the body could not be parsed), `failure` (a complete response with an HTTP status >= 300) or `success`. The receipt is derived from the real connection, never from a service name claimed in the response body, so errors can be correlated with the endpoint that actually answered.
+  - Each retry creates a brand-new receipt; fields from an earlier response can never leak into a later attempt. The final receipt is available on `response.node_receipt`, and all attempt receipts on `response.node_receipts`.
+  - Raised errors carry the same accessors (`error.node_receipt` / `error.node_receipts`). The original structured error class and message are unchanged; non-transport exceptions such as the parser error gain the accessors without being re-wrapped.
+  - Disabled by default, so existing `Response` and error behaviour is unchanged. It can also be toggled for a single call through the per-request `node_receipt:` option.
+
 ## 8.6.0
 
 - **Breaking:** fixes `ca_fingerprint` so it secures the connections used for requests. The certificate matching the fingerprint is fetched from the server's chain and used as the only trusted certificate on every connection, with chain and expiry verification left on. Host names aren't checked (a pinned intermediate can't be used on JRuby, and the certificate is fetched without a proxy), so a cluster reached by a name or IP that isn't in its certificate works (Faraday 1 and Manticore still check them). Previously the fingerprint was checked on a separate socket and matched any certificate the server sent, without checking that the server's certificate was signed by it.

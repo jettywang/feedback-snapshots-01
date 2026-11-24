@@ -123,6 +123,13 @@ module Elastic
       #   Faraday 1 and Manticore). Requires https
       #   hosts and the client-built transport (can't be combined with `:transport`).
       #
+      # @option arguments [Boolean] :node_receipt Collect a {Elastic::Transport::Transport::NodeReceipt} for every
+      #   connection attempt. The receipt records the connection the request was actually sent to and whether the
+      #   attempt was unreachable, failed to parse, failed with an HTTP error or succeeded, independently of any
+      #   service name the response body claims. Receipts are exposed on `response.node_receipt` /
+      #   `response.node_receipts`, and on raised errors through `error.node_receipt` / `error.node_receipts`.
+      #   Disabled by default. Can also be toggled per request through the `node_receipt:` option.
+      #
       # @yield [faraday] Access and configure the `Faraday::Connection` instance directly with a block
       #
       def initialize(arguments = {}, &block)
