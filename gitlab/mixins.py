@@ -65,7 +65,7 @@ class HeadMixin(base.RESTManager[base.TObjCls]):
         if id is not None:
             path = f"{path}/{utils.EncodedId(id)}"
 
-        return self.gitlab.http_head(path, **kwargs)
+        return self.gitlab.http_head(path, **self._request_kwargs(path, **kwargs))
 
 
 class GetMixin(HeadMixin[base.TObjCls]):
@@ -96,7 +96,7 @@ class GetMixin(HeadMixin[base.TObjCls]):
             if TYPE_CHECKING:
                 assert self._obj_cls._id_attr is not None
             return self._obj_cls(self, {self._obj_cls._id_attr: id}, lazy=lazy)
-        server_data = self.gitlab.http_get(path, **kwargs)
+        server_data = self.gitlab.http_get(path, **self._request_kwargs(path, **kwargs))
         if TYPE_CHECKING:
             assert not isinstance(server_data, requests.Response)
         return self._obj_cls(self, server_data, lazy=lazy)
@@ -119,7 +119,9 @@ class GetWithoutIdMixin(HeadMixin[base.TObjCls]):
             GitlabAuthenticationError: If authentication is not correct
             GitlabGetError: If the server cannot perform the request
         """
-        server_data = self.gitlab.http_get(self.path, **kwargs)
+        server_data = self.gitlab.http_get(
+            self.path, **self._request_kwargs(self.path, **kwargs)
+        )
         if TYPE_CHECKING:
             assert not isinstance(server_data, requests.Response)
         return self._obj_cls(self, server_data)
@@ -152,7 +154,9 @@ class RefreshMixin(_RestObjectBase):
             if TYPE_CHECKING:
                 assert self.manager.path is not None
             path = self.manager.path
-        server_data = self.manager.gitlab.http_get(path, **kwargs)
+        server_data = self.manager.gitlab.http_get(
+            path, **self.manager._request_kwargs(path, **kwargs)
+        )
         if TYPE_CHECKING:
             assert not isinstance(server_data, requests.Response)
         self._update_attrs(server_data)
@@ -218,7 +222,9 @@ class ListMixin(HeadMixin[base.TObjCls]):
         # Allow to overwrite the path, handy for custom listings
         path = data.pop("path", self.path)
 
-        obj = self.gitlab.http_list(path, iterator=iterator, **data)
+        obj = self.gitlab.http_list(
+            path, iterator=iterator, **self._request_kwargs(path, **data)
+        )
         if isinstance(obj, list):
             return [self._obj_cls(self, item, created_from_list=True) for item in obj]
         return base.RESTObjectList(self, self._obj_cls, obj)
@@ -255,7 +261,9 @@ class CreateMixin(base.RESTManager[base.TObjCls]):
 
         # Handle specific URL for creation
         path = kwargs.pop("path", self.path)
-        server_data = self.gitlab.http_post(path, post_data=data, files=files, **kwargs)
+        server_data = self.gitlab.http_post(
+            path, post_data=data, files=files, **self._request_kwargs(path, **kwargs)
+        )
         if TYPE_CHECKING:
             assert not isinstance(server_data, requests.Response)
         return self._obj_cls(self, server_data)
@@ -324,7 +332,12 @@ class UpdateMixin(base.RESTManager[base.TObjCls]):
         )
 
         http_method = self._get_update_method()
-        result = http_method(path, post_data=new_data, files=files, **kwargs)
+        result = http_method(
+            path,
+            post_data=new_data,
+            files=files,
+            **self._request_kwargs(path, **kwargs),
+        )
         if TYPE_CHECKING:
             assert not isinstance(result, requests.Response)
         return result
@@ -349,7 +362,9 @@ class SetMixin(base.RESTManager[base.TObjCls]):
         """
         path = f"{self.path}/{utils.EncodedId(key)}"
         data = {"value": value}
-        server_data = self.gitlab.http_put(path, post_data=data, **kwargs)
+        server_data = self.gitlab.http_put(
+            path, post_data=data, **self._request_kwargs(path, **kwargs)
+        )
         if TYPE_CHECKING:
             assert not isinstance(server_data, requests.Response)
         return self._obj_cls(self, server_data)
@@ -373,7 +388,7 @@ class DeleteMixin(base.RESTManager[base.TObjCls]):
         else:
             path = f"{self.path}/{utils.EncodedId(id)}"
 
-        self.gitlab.http_delete(path, **kwargs)
+        self.gitlab.http_delete(path, **self._request_kwargs(path, **kwargs))
 
 
 class CRUDMixin(
@@ -489,7 +504,9 @@ class UserAgentDetailMixin(_RestObjectBase):
             GitlabGetError: If the server cannot perform the request
         """
         path = f"{self.manager.path}/{self.encoded_id}/user_agent_detail"
-        result = self.manager.gitlab.http_get(path, **kwargs)
+        result = self.manager.gitlab.http_get(
+            path, **self.manager._request_kwargs(path, **kwargs)
+        )
         if TYPE_CHECKING:
             assert not isinstance(result, requests.Response)
         return result
@@ -524,7 +541,9 @@ class AccessRequestMixin(_RestObjectBase):
 
         path = f"{self.manager.path}/{self.encoded_id}/approve"
         data = {"access_level": access_level}
-        server_data = self.manager.gitlab.http_put(path, post_data=data, **kwargs)
+        server_data = self.manager.gitlab.http_put(
+            path, post_data=data, **self.manager._request_kwargs(path, **kwargs)
+        )
         if TYPE_CHECKING:
             assert not isinstance(server_data, requests.Response)
         self._update_attrs(server_data)
@@ -604,7 +623,10 @@ class DownloadMixin(_RestObjectBase):
         """
         path = f"{self.manager.path}/download"
         result = self.manager.gitlab.http_get(
-            path, streamed=streamed, raw=True, **kwargs
+            path,
+            streamed=streamed,
+            raw=True,
+            **self.manager._request_kwargs(path, **kwargs),
         )
         if TYPE_CHECKING:
             assert isinstance(result, requests.Response)
@@ -643,7 +665,9 @@ class RotateMixin(base.RESTManager[base.TObjCls]):
         if expires_at is not None:
             data = {"expires_at": expires_at}
 
-        server_data = self.gitlab.http_post(path, post_data=data, **kwargs)
+        server_data = self.gitlab.http_post(
+            path, post_data=data, **self._request_kwargs(path, **kwargs)
+        )
         if TYPE_CHECKING:
             assert not isinstance(server_data, requests.Response)
         return server_data
@@ -711,7 +735,9 @@ class SubscribableMixin(_RestObjectBase):
             GitlabSubscribeError: If the subscription cannot be done
         """
         path = f"{self.manager.path}/{self.encoded_id}/subscribe"
-        server_data = self.manager.gitlab.http_post(path, **kwargs)
+        server_data = self.manager.gitlab.http_post(
+            path, **self.manager._request_kwargs(path, **kwargs)
+        )
         if TYPE_CHECKING:
             assert not isinstance(server_data, requests.Response)
         self._update_attrs(server_data)
@@ -731,7 +757,9 @@ class SubscribableMixin(_RestObjectBase):
             GitlabUnsubscribeError: If the unsubscription cannot be done
         """
         path = f"{self.manager.path}/{self.encoded_id}/unsubscribe"
-        server_data = self.manager.gitlab.http_post(path, **kwargs)
+        server_data = self.manager.gitlab.http_post(
+            path, **self.manager._request_kwargs(path, **kwargs)
+        )
         if TYPE_CHECKING:
             assert not isinstance(server_data, requests.Response)
         self._update_attrs(server_data)
@@ -758,7 +786,9 @@ class TodoMixin(_RestObjectBase):
             GitlabTodoError: If the todo cannot be set
         """
         path = f"{self.manager.path}/{self.encoded_id}/todo"
-        self.manager.gitlab.http_post(path, **kwargs)
+        self.manager.gitlab.http_post(
+            path, **self.manager._request_kwargs(path, **kwargs)
+        )
 
 
 class TimeTrackingMixin(_RestObjectBase):
@@ -790,7 +820,9 @@ class TimeTrackingMixin(_RestObjectBase):
             return time_stats
 
         path = f"{self.manager.path}/{self.encoded_id}/time_stats"
-        result = self.manager.gitlab.http_get(path, **kwargs)
+        result = self.manager.gitlab.http_get(
+            path, **self.manager._request_kwargs(path, **kwargs)
+        )
         if TYPE_CHECKING:
             assert not isinstance(result, requests.Response)
         return result
@@ -812,7 +844,9 @@ class TimeTrackingMixin(_RestObjectBase):
         """
         path = f"{self.manager.path}/{self.encoded_id}/time_estimate"
         data = {"duration": duration}
-        result = self.manager.gitlab.http_post(path, post_data=data, **kwargs)
+        result = self.manager.gitlab.http_post(
+            path, post_data=data, **self.manager._request_kwargs(path, **kwargs)
+        )
         if TYPE_CHECKING:
             assert not isinstance(result, requests.Response)
         return result
@@ -830,7 +864,9 @@ class TimeTrackingMixin(_RestObjectBase):
             GitlabTimeTrackingError: If the time tracking update cannot be done
         """
         path = f"{self.manager.path}/{self.encoded_id}/reset_time_estimate"
-        result = self.manager.gitlab.http_post(path, **kwargs)
+        result = self.manager.gitlab.http_post(
+            path, **self.manager._request_kwargs(path, **kwargs)
+        )
         if TYPE_CHECKING:
             assert not isinstance(result, requests.Response)
         return result
@@ -852,7 +888,9 @@ class TimeTrackingMixin(_RestObjectBase):
         """
         path = f"{self.manager.path}/{self.encoded_id}/add_spent_time"
         data = {"duration": duration}
-        result = self.manager.gitlab.http_post(path, post_data=data, **kwargs)
+        result = self.manager.gitlab.http_post(
+            path, post_data=data, **self.manager._request_kwargs(path, **kwargs)
+        )
         if TYPE_CHECKING:
             assert not isinstance(result, requests.Response)
         return result
@@ -870,7 +908,9 @@ class TimeTrackingMixin(_RestObjectBase):
             GitlabTimeTrackingError: If the time tracking update cannot be done
         """
         path = f"{self.manager.path}/{self.encoded_id}/reset_spent_time"
-        result = self.manager.gitlab.http_post(path, **kwargs)
+        result = self.manager.gitlab.http_post(
+            path, **self.manager._request_kwargs(path, **kwargs)
+        )
         if TYPE_CHECKING:
             assert not isinstance(result, requests.Response)
         return result
@@ -906,7 +946,9 @@ class ParticipantsMixin(_RestObjectBase):
         """
 
         path = f"{self.manager.path}/{self.encoded_id}/participants"
-        result = self.manager.gitlab.http_list(path, **kwargs)
+        result = self.manager.gitlab.http_list(
+            path, **self.manager._request_kwargs(path, **kwargs)
+        )
         if TYPE_CHECKING:
             assert not isinstance(result, requests.Response)
         return result
@@ -935,7 +977,9 @@ class BadgeRenderMixin(base.RESTManager[base.TObjCls]):
         """
         path = f"{self.path}/render"
         data = {"link_url": link_url, "image_url": image_url}
-        result = self.gitlab.http_get(path, data, **kwargs)
+        result = self.gitlab.http_get(
+            path, data, **self._request_kwargs(path, **kwargs)
+        )
         if TYPE_CHECKING:
             assert not isinstance(result, requests.Response)
         return result
@@ -980,7 +1024,7 @@ class PromoteMixin(_RestObjectBase):
 
         path = f"{self.manager.path}/{self.encoded_id}/promote"
         http_method = self._get_update_method()
-        result = http_method(path, **kwargs)
+        result = http_method(path, **self.manager._request_kwargs(path, **kwargs))
         if TYPE_CHECKING:
             assert not isinstance(result, requests.Response)
         return result
@@ -1051,7 +1095,9 @@ class UploadMixin(_RestObjectBase):
 
         file_info = {"file": (filename, filedata)}
         path = self._get_upload_path()
-        server_data = self.manager.gitlab.http_post(path, files=file_info, **kwargs)
+        server_data = self.manager.gitlab.http_post(
+            path, files=file_info, **self.manager._request_kwargs(path, **kwargs)
+        )
 
         if TYPE_CHECKING:
             assert isinstance(server_data, dict)

@@ -392,3 +392,33 @@ class RESTManager(Generic[TObjCls]):
     @property
     def path(self) -> str:
         return self._computed_path
+
+    @property
+    def permission_scope(self) -> gitlab.permissions.RequestScope:
+        """The project scope implied by this manager's path.
+
+        The project comes from the manager's own path (which already includes
+        the parent IDs for nested managers), so a manager attached to a lazy
+        object always describes the project that object belongs to. No action
+        is pinned here; the HTTP verb decides unless the caller pins one.
+        """
+        return gitlab.permissions.RequestScope.from_path(self._computed_path)
+
+    def _request_kwargs(self, path: str | None = None, **kwargs: Any) -> dict[str, Any]:
+        """Add the permission scope implied by the concrete request path.
+
+        ``path`` is preferred when supplied because a top-level manager such
+        as ``gl.projects`` has a collection path (``/projects``) that does not
+        name a project, while the request it builds does
+        (``/projects/1/...``). When no path is supplied, the parent object's
+        own identity is used for a collection manager so that a ``/projects``
+        listing derived from one project cannot drift to another.
+        """
+        if self.gitlab.permission_policy is None:
+            return kwargs
+        scope_path = path if path is not None else self._computed_path
+        scope = gitlab.permissions.RequestScope.from_path(scope_path)
+        if scope.project is None and self._parent is not None:
+            scope = gitlab.permissions.RequestScope.from_path(self._parent.manager.path)
+        kwargs["permission_scope"] = scope
+        return kwargs

@@ -41,6 +41,80 @@ properly closed when you exit a ``with`` block:
    The context manager will also close the custom ``Session`` object you might
    have used to build the ``Gitlab`` instance.
 
+Client-side project and action permissions
+-----------------------------------------
+
+Some deployments hand a restricted ``Gitlab`` client to a tool that must only
+operate on specific projects. Pass a fixed allowlist at construction time and
+python-gitlab checks every request before it is sent. Requests that are not
+covered by the allowlist raise
+:class:`~gitlab.exceptions.GitlabPermissionError` without reaching the server,
+so no credentials or payload leave the process.
+
+The policy classifies each request by the project embedded in the URL and the
+action implied by the HTTP verb: ``GET``/``HEAD`` are ``read``, ``POST``
+``PUT``/``PATCH`` are ``write``, and ``DELETE`` is ``delete``. Resource names
+never participate in the decision.
+
+.. code-block:: python
+
+   import gitlab
+
+   gl = gitlab.Gitlab(
+       "https://gitlab.example.com",
+       private_token=token,
+       permissions={
+           "release-tools/service-a": "read,write",
+           42: "read",
+       },
+   )
+
+   project = gl.projects.get("release-tools/service-a", lazy=True)
+   project.branches.get("main")           # allowed (read)
+   project.branches.create(...)           # allowed (write)
+   project.branches.get("main").delete()  # denied (delete not granted)
+
+The same rule is enforced for objects and managers created lazily. Two
+projects may both have a branch called ``main``; each object keeps the manager
+of the project it came from, so the branch from the approved project is not
+interchangeable with the identically named branch from another project. This
+holds for objects returned by ``list()`` as well, because the list keeps the
+manager that produced each item.
+
+``permissions`` accepts several equivalent shapes:
+
+.. code-block:: python
+
+   permissions = {1: "read", 2: ["read", "write"]}            # mapping
+   permissions = [gitlab.ProjectPermission(1, "read"), "2:write"]  # iterable
+   permissions = [gitlab.ProjectPermission(1, gitlab.Action.READ)]
+
+   gl = gitlab.Gitlab(url, private_token=token, permissions=permissions)
+
+For a single uniform grant, ``allowed_projects`` and ``allowed_actions`` are a
+shortcut:
+
+.. code-block:: python
+
+   gl = gitlab.Gitlab(
+       url,
+       private_token=token,
+       allowed_projects=[1, 2],
+       allowed_actions="read",
+   )
+
+By default requests that are not bound to a single project (for example
+``GET /projects`` or ``GET /user``) are refused, as are requests to origins
+other than the configured instance. ``unscoped_actions`` and
+``allow_external_origins`` opt into those cases explicitly.
+
+Requests derived inside a single call stay inside the project of the
+originating call. Pagination keeps the originating action pinned to ``read``,
+and redirects keep the originating project pinned; a link or redirect to
+another project is refused even when that project is otherwise approved.
+Every decision is available on the client after the call in
+``gl.last_permission_decision`` for diagnostics.
+
 netrc authentication
 --------------------
 

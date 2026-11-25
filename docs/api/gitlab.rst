@@ -79,6 +79,14 @@ gitlab.mixins module
     :undoc-members:
     :show-inheritance:
 
+gitlab.permissions module
+-------------------------
+
+.. automodule:: gitlab.permissions
+    :members:
+    :undoc-members:
+    :show-inheritance:
+
 gitlab.utils module
 -------------------
 

@@ -28,6 +28,13 @@ from gitlab._version import (  # noqa: F401
 )
 from gitlab.client import AsyncGraphQL, Gitlab, GitlabList, GraphQL  # noqa: F401
 from gitlab.exceptions import *  # noqa: F401,F403
+from gitlab.permissions import (  # noqa: F401
+    Action,
+    PermissionDecision,
+    ProjectPermission,
+    ProjectPolicy,
+    RequestScope,
+)
 
 warnings.filterwarnings("default", category=DeprecationWarning, module="^gitlab")
 
@@ -39,9 +46,14 @@ __all__ = [
     "__license__",
     "__title__",
     "__version__",
+    "Action",
     "Gitlab",
     "GitlabList",
     "AsyncGraphQL",
     "GraphQL",
+    "PermissionDecision",
+    "ProjectPermission",
+    "ProjectPolicy",
+    "RequestScope",
 ]
 __all__.extend(gitlab.exceptions.__all__)

@@ -42,6 +42,21 @@ class RedirectError(GitlabError):
     pass
 
 
+class GitlabPermissionError(GitlabError):
+    """A project-scoped request was refused by the client-side policy.
+
+    Raised before any HTTP request is sent, so no credentials or payload
+    leave the process. The full :class:`~gitlab.permissions.PermissionDecision`
+    is available as ``decision``.
+    """
+
+    decision: Any = None
+
+
+# Compatibility-friendly alias for the permission terminology.
+GitlabAuthorizationError = GitlabPermissionError
+
+
 class GitlabParsingError(GitlabError):
     pass
 
@@ -357,6 +372,7 @@ __all__ = [
     "GitlabActivateError",
     "GitlabAttachFileError",
     "GitlabAuthenticationError",
+    "GitlabAuthorizationError",
     "GitlabBanError",
     "GitlabBlockError",
     "GitlabBuildCancelError",
@@ -397,6 +413,7 @@ __all__ = [
     "GitlabOperationError",
     "GitlabOwnershipError",
     "GitlabParsingError",
+    "GitlabPermissionError",
     "GitlabPipelineCancelError",
     "GitlabPipelinePlayError",
     "GitlabPipelineRetryError",

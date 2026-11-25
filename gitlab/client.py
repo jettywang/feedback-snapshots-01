@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import re
+from collections.abc import Iterable, Mapping
 from typing import Any, BinaryIO, cast, TYPE_CHECKING
 from urllib import parse
 
@@ -13,7 +14,9 @@ import gitlab
 import gitlab.config
 import gitlab.const
 import gitlab.exceptions
+import gitlab.permissions
 from gitlab import _backends, utils
+from gitlab.permissions import Action, ProjectPolicy, RequestScope, resolve_policy
 
 try:
     import gql
@@ -63,6 +66,24 @@ class Gitlab:
             or 52x responses, or after a request timeout. Defaults to False.
         keep_base_url: keep user-provided base URL for pagination if it
             differs from response headers
+        permissions: A fixed project/action allowlist. Accepts a mapping of
+            ``project -> actions``, an iterable of
+            :class:`~gitlab.permissions.ProjectPermission` objects, or
+            ``(project, actions)`` pairs. Requests that are not bound to an
+            allowed project (including unapproved projects and project
+            collections) are refused before they are sent.
+        permission_policy: A pre-built
+            :class:`~gitlab.permissions.ProjectPolicy`. Mutually exclusive
+            with ``permissions``.
+        allowed_projects: Convenience alternative to ``permissions`` where
+            every listed project receives the same ``allowed_actions``.
+        allowed_actions: Actions granted by ``allowed_projects`` (default:
+            ``read``).
+        unscoped_actions: Actions allowed for requests not bound to a
+            project (for example ``GET /user`` or ``GET /projects``). Empty
+            by default.
+        allow_external_origins: Whether requests to origins other than the
+            configured instance may be attempted. Defaults to ``False``.
 
     Keyword Args:
         requests.Session session: HTTP Requests Session
@@ -86,6 +107,18 @@ class Gitlab:
         user_agent: str = gitlab.const.USER_AGENT,
         retry_transient_errors: bool = False,
         keep_base_url: bool = False,
+        permissions: (
+            Mapping[str | int, Any]
+            | Iterable[
+                gitlab.permissions.ProjectPermission | tuple[str | int, Any] | str
+            ]
+            | None
+        ) = None,
+        permission_policy: ProjectPolicy | None = None,
+        allowed_projects: Iterable[str | int] | None = None,
+        allowed_actions: Any = Action.READ,
+        unscoped_actions: Any = (),
+        allow_external_origins: bool = False,
         **kwargs: Any,
     ) -> None:
         self._api_version = str(api_version)
@@ -93,6 +126,20 @@ class Gitlab:
         self._server_revision: str | None = None
         self._base_url = utils.get_base_url(url)
         self._url = f"{self._base_url}/api/v{api_version}"
+        #: Fixed project/action allowlist, enforced in ``http_request``.
+        self.permission_policy: ProjectPolicy | None = resolve_policy(
+            permissions=permissions,
+            permission_policy=permission_policy,
+            allowed_projects=allowed_projects,
+            allowed_actions=allowed_actions,
+            unscoped_actions=unscoped_actions,
+            allow_external_origins=allow_external_origins,
+        )
+        #: Alias for ``permission_policy``.
+        self.project_policy = self.permission_policy
+        self.last_permission_decision: gitlab.permissions.PermissionDecision | None = (
+            None
+        )
         #: Timeout to use for requests to gitlab server
         self.timeout = timeout
         self.retry_transient_errors = retry_transient_errors
@@ -633,6 +680,88 @@ class Gitlab:
                 )
             )
 
+    def _permission_redirect_hook(self, scope: RequestScope | None) -> Any:
+        """Build a ``requests`` response hook that guards redirect hops.
+
+        The hook runs as soon as a response is received, before ``requests``
+        resolves and sends the next hop. Raising here therefore stops the
+        derived request from leaving the permitted project.
+        """
+
+        def hook(
+            response: requests.Response, *args: Any, **kwargs: Any
+        ) -> requests.Response:
+            if self.permission_policy is None:
+                return response
+            if response.is_redirect:
+                location = response.headers.get("Location")
+                if location:
+                    target = requests.compat.urljoin(response.url, location)
+                    decision = self.permission_policy.check(
+                        response.request.method or "get",
+                        target,
+                        scope=scope,
+                        base_url=self._base_url,
+                    )
+                    if not decision.allowed:
+                        self.last_permission_decision = decision
+                        decision.raise_if_denied()
+            elif scope is not None:
+                decision = self.permission_policy.check(
+                    response.request.method or "get",
+                    response.request.url,
+                    scope=scope,
+                    base_url=self._base_url,
+                )
+                if not decision.allowed:
+                    self.last_permission_decision = decision
+                    decision.raise_if_denied()
+            return response
+
+        return hook
+
+    def _check_permission_redirects(
+        self, response: requests.Response, scope: RequestScope | None
+    ) -> None:
+        """Re-check the final hop after redirects have been resolved."""
+        if self.permission_policy is None or response.request is None:
+            return
+        decision = self.permission_policy.check(
+            response.request.method or "get",
+            response.request.url,
+            scope=scope,
+            base_url=self._base_url,
+        )
+        self.last_permission_decision = decision
+        decision.raise_if_denied()
+
+    def check_permission(
+        self, verb: str, path: str, *, scope: RequestScope | None = None
+    ) -> gitlab.permissions.PermissionDecision:
+        """Decide whether a request would be admitted, without sending it.
+
+        This is useful to pre-flight a call from a restricted tool. The same
+        decision is also recorded on ``last_permission_decision`` when a real
+        request is made.
+        """
+        url = self._build_url(path)
+        if self.permission_policy is None:
+            decision = gitlab.permissions.PermissionDecision(
+                allowed=True,
+                reason="no_policy",
+                verb=verb.lower(),
+                path=parse.urlparse(url).path,
+                project=gitlab.permissions.project_from_path(url),
+                action=gitlab.permissions.action_for_verb(verb),
+                scope=scope,
+            )
+        else:
+            decision = self.permission_policy.check(
+                verb, url, scope=scope, base_url=self._base_url
+            )
+        self.last_permission_decision = decision
+        return decision
+
     def http_request(
         self,
         verb: str,
@@ -647,6 +776,7 @@ class Gitlab:
         retry_transient_errors: bool | None = None,
         max_retries: int = 10,
         extra_headers: dict[str, Any] | None = None,
+        permission_scope: RequestScope | None = None,
         **kwargs: Any,
     ) -> requests.Response:
         """Make an HTTP request to the Gitlab server.
@@ -669,12 +799,17 @@ class Gitlab:
             max_retries: Max retries after 429 or transient errors,
                                set to -1 to retry forever. Defaults to 10.
             extra_headers: Add and override HTTP headers for the request.
+            permission_scope: The project/action pinned by the caller. When
+                set, the target URL must remain inside that project and the
+                pinned action (not the verb's default action) is checked.
             **kwargs: Extra options to send to the server (e.g. sudo)
 
         Returns:
             A requests result object.
 
         Raises:
+            GitlabPermissionError: When the client-side policy refuses the
+                request. Raised before anything is sent.
             GitlabHttpError: When the return code is not 2xx
         """
         query_data = query_data or {}
@@ -686,6 +821,18 @@ class Gitlab:
         utils.copy_dict(src=query_data, dest=params)
 
         url = parse.urlunparse(parsed._replace(query=""))
+
+        if self.permission_policy is not None:
+            decision = self.permission_policy.check(
+                verb, url, scope=permission_scope, base_url=self._base_url
+            )
+            self.last_permission_decision = decision
+            decision.raise_if_denied()
+            if permission_scope is None:
+                # Pin the project named by this request so redirects cannot
+                # move the request to a different project silently; the verb
+                # remains the authority for any derived hop.
+                permission_scope = RequestScope(project=decision.project)
 
         # Deal with kwargs: by default a user uses kwargs to send data to the
         # gitlab server, but this generates problems (python keyword conflicts
@@ -718,6 +865,11 @@ class Gitlab:
         if extra_headers is not None:
             opts["headers"].update(extra_headers)
 
+        if self.permission_policy is not None:
+            hooks = list(opts.get("hooks", {}).get("response", []))
+            hooks.append(self._permission_redirect_hook(permission_scope))
+            opts["hooks"] = {"response": hooks}
+
         retry = utils.Retry(
             max_retries=max_retries,
             obey_rate_limit=obey_rate_limit,
@@ -747,6 +899,11 @@ class Gitlab:
                 raise
 
             self._check_redirects(result.response)
+
+            if self.permission_policy is not None and (
+                result.response.history or result.response.url
+            ):
+                self._check_permission_redirects(result.response, permission_scope)
 
             if 200 <= result.status_code < 300:
                 return result.response
@@ -1158,9 +1315,18 @@ class GitlabList:
         url: str,
         query_data: dict[str, Any],
         get_next: bool = True,
+        permission_scope: RequestScope | None = None,
         **kwargs: Any,
     ) -> None:
         self._gl = gl
+
+        # Pin the project and action of the originating call. Every page
+        # derived from the response is checked against this scope rather than
+        # trusting the path in the server-provided link.
+        if permission_scope is not None:
+            self._permission_scope = permission_scope
+        else:
+            self._permission_scope = RequestScope.from_path(url, Action.READ)
 
         # Preserve kwargs for subsequent queries
         self._kwargs = kwargs.copy()
@@ -1175,7 +1341,13 @@ class GitlabList:
         self, url: str, query_data: dict[str, Any] | None = None, **kwargs: Any
     ) -> None:
         query_data = query_data or {}
-        result = self._gl.http_request("get", url, query_data=query_data, **kwargs)
+        result = self._gl.http_request(
+            "get",
+            url,
+            query_data=query_data,
+            permission_scope=self._permission_scope,
+            **kwargs,
+        )
         try:
             next_url = result.links["next"]["url"]
         except KeyError:
