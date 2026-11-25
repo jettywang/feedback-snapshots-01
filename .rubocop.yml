@@ -4,6 +4,7 @@ AllCops:
   Exclude:
     - vendor/**/*
     - example/**/*
+    - examples/**/*
   NewCops: enable
   TargetRubyVersion: 3.0
   SuggestExtensions: false
