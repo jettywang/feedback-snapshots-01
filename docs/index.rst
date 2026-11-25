@@ -6,6 +6,7 @@ google-auth
    :maxdepth: 2
 
    user-guide
+   mtls-channel-diagnostics
    Reference <reference/modules>
 
 google-auth is the Google authentication library for Python. This library
