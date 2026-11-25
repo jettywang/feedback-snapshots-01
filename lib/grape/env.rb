@@ -4,6 +4,10 @@ module Grape
   module Env
     API_VERSION = 'api.version'
     API_ENDPOINT = 'api.endpoint'
+
+    # Where the authentication phase publishes the source-attested
+    # Grape::Authorization::Identity for the serving endpoint's role checks.
+    AUTHORIZATION_IDENTITY = 'grape.authorization.identity'
     API_REQUEST_INPUT = 'api.request.input'
     API_REQUEST_BODY = 'api.request.body'
     API_TYPE = 'api.type'

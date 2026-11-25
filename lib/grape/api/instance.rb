@@ -18,6 +18,7 @@ module Grape
       extend Grape::DSL::Mounting
       extend Grape::DSL::Versioning
       extend Grape::DSL::Helpers
+      extend Grape::DSL::Roles
       extend Grape::Middleware::Auth::DSL
 
       Boolean = Grape::API::Boolean

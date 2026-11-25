@@ -10,6 +10,7 @@ module Grape
     include Grape::DSL::Settings
     include Grape::DSL::Headers
     include Grape::DSL::InsideRoute
+    include Grape::Authorization::RouteHelpers
 
     # The innermost app of every endpoint's Rack stack. The endpoint to run
     # comes out of the env, so the lambda holds no state and one of them serves
@@ -198,7 +199,12 @@ module Grape
           run_filters callbacks, :before if callbacks
           @before_filter_passed = true
 
-          response_object = env.key?(Grape::Env::GRAPE_ALLOWED_METHODS) ? answer_allowed_methods : validate_and_execute(callbacks)
+          if env.key?(Grape::Env::GRAPE_ALLOWED_METHODS)
+            response_object = answer_allowed_methods
+          else
+            run_role_conditions
+            response_object = validate_and_execute(callbacks)
+          end
           run_filters callbacks, :after if callbacks
           build_response_cookies
           rack_triplet(response_object)
@@ -300,6 +306,40 @@ module Grape
       run_validators(request:)
       run_filters callbacks, :after_validation if callbacks
       execute
+    end
+
+    # Evaluates every role condition guarding the serving endpoint: the
+    # scope-stacked +require_role+ declarations and an inline +roles:+ /
+    # +role:+ route option. Runs after authentication and :before filters,
+    # before parameter validation and the business block, so a forbidden
+    # caller learns nothing about the parameters. Missing authentication is
+    # answered 401; an authenticated caller lacking the role gets 403.
+    def run_role_conditions
+      context = authorization_context
+      role_conditions.each do |condition|
+        next if role_condition_satisfied?(condition, context)
+
+        error!('Authentication is required to access this resource.', 401) unless context.authenticated?
+        error!('You are not authorized to perform this action.', 403)
+      end
+    end
+
+    def role_conditions
+      inline = config.route_options.slice(:roles, :role, 'roles', 'role').values
+      inline_conditions = inline.flat_map do |value|
+        value.is_a?(Proc) ? [{ roles: [], block: value }] : [{ roles: Array(value).flatten.map(&:to_sym), block: nil }]
+      end
+      inheritable_setting.role_conditions + inline_conditions
+    end
+
+    def role_condition_satisfied?(condition, context)
+      required = Array(condition[:roles])
+      return false if required.any? && !context.role?(*required)
+
+      block = condition[:block]
+      return true unless block
+
+      instance_exec(context, &block) != false
     end
 
     # The response #run answers with, its body +route_value+ unless the

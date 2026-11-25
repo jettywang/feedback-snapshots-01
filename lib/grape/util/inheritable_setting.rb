@@ -526,6 +526,32 @@ module Grape
         stacked(:mount_path)
       end
 
+      # Endpoint role conditions registered by the +require_role+ DSL (see
+      # DSL::Roles), outermost scope first. The endpoint that serves a request
+      # evaluates them against the request's Authorization::Context; record
+      # one with #add_role_condition.
+      def role_conditions
+        stacked(:role_conditions)
+      end
+
+      def add_role_condition(condition)
+        stack(:role_conditions, condition)
+      end
+
+      # Composite role-policy entries registered by the +identity_source+,
+      # +version_role_map+, +grant_roles+ / +role_ceiling+ DSL and by mount
+      # declarations carrying an +authorization:+ option (see DSL::Roles and
+      # DSL::Mounting). Each entry is a small Hash; Authorization::Context
+      # merges the stack for the serving endpoint. Record with
+      # #add_authorization_policy.
+      def authorization_policies
+        stacked(:authorization_policies)
+      end
+
+      def add_authorization_policy(entry)
+        stack(:authorization_policies, entry)
+      end
+
       # Dry::Schema key maps registered by +contract+ blocks (see
       # Validations::ContractScope), one per contract, outermost scope first;
       # +declared+ uses them to write coerced params back under their

@@ -3923,6 +3923,45 @@ Use [Doorkeeper](https://github.com/doorkeeper-gem/doorkeeper), [warden-oauth2](
 
 You can access the controller params, headers, and helpers through the context with the `#context` method inside any auth middleware inherited from `Grape::Middleware::Auth::Base`.
 
+### Role Checks with the Authentication Context
+
+`require_role` (aliased as `role`) checks endpoint roles with a per-request `Grape::Authorization::Context`. Publish the source-attested identity produced by your authenticator from the `auth` block:
+
+```ruby
+http_basic do |name, _password|
+  identity = MyAuthenticator.new.call(name) # a Grape::Authorization::Identity
+  authenticate_identity(identity) if identity
+end
+
+get :secret, roles: :admin do
+  { roles: effective_roles }
+end
+```
+
+A role condition works on its own: with no source/version/mount policies declared, `require_role :admin` checks the roles carried by the identity directly, and a zero-argument predicate runs in the endpoint context. A block optionally receives the context:
+
+```ruby
+require_role :admin
+require_role { |context| context.source == :ledger && context.role?(:admin) }
+```
+
+When several identity sources are approved, declare them and let the source, negotiated API version and mount declaration compose the effective roles. Only a source registered with `management: true` keeps management roles such as `:admin`:
+
+```ruby
+identity_source :ledger, management: true
+identity_source :desk
+
+version %w[v1 v2], using: :header, vendor: 'myapi'
+version_role_map 'v1' => { steward: :admin },
+                 'v2' => { steward: :auditor }
+
+mount({ AdminAPI => '/console' })
+mount({ AdminAPI => '/floor' }, authorization: { ceiling: :reader, label: 'floor' })
+mount({ AdminAPI => '/booth' }, authorization: { grant: :auditor })
+```
+
+The same API mounted twice gets independent grants and ceilings: every declaration is scope-local and never reaches a sibling mount. The context (`authorization_context`, also available as `current_identity`) is built from the request env, the negotiated `api.version` and the serving endpoint's mount path, so two same-named users authenticated by different sources never share roles globally. See `spec/grape/authorization/role_context_acceptance_spec.rb` for a complete parent/child example with two fake authenticators and an audit trail of every authentication and business block.
+
 ## Describing and Inspecting an API
 
 Grape routes can be reflected at runtime. This can notably be useful for generating documentation.

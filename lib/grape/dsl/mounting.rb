@@ -14,6 +14,8 @@ module Grape
       end
 
       def mount(mounts, opts = {})
+        mounts, opts = split_mount_authorization(mounts, opts)
+
         mount_opts = opts
         if opts[:refresh_already_mounted]
           Grape.deprecator.warn('`refresh_already_mounted` is not a `mount` option and will be ignored in a future release.')
@@ -29,8 +31,10 @@ module Grape
             next
           end
 
+          setting = mounted_setting(app, path, mount_opts[:authorization])
+
           endpoints << Grape::Endpoint.new(
-            mounted_setting(app, path),
+            setting,
             http_methods: '*',
             path:,
             app:,
@@ -42,18 +46,45 @@ module Grape
 
       private
 
+      # `mount App => '/x', authorization: decl` parses as one Hash (the rocket
+      # opens it), while `mount({ App => '/x' }, authorization: decl)` parses as
+      # mounts + opts. Fold the first form's declaration back into opts.
+      def split_mount_authorization(mounts, opts)
+        return [mounts, opts] unless mounts.is_a?(Hash) && mounts.key?(:authorization)
+
+        [mounts.except(:authorization), { authorization: mounts[:authorization] }.merge(opts)]
+      end
+
+      # Applies an +authorization:+ mount declaration to the mounted API's own
+      # setting, so its grants / ceiling / label shape effective roles for this
+      # mount only. The setting is the per-mount instance's top-level setting
+      # (see #mounted_setting), never the mounted class's shared one, which is
+      # why the same API mounted twice gets two independent overrides.
+      def apply_mount_authorization(setting, authorization)
+        return if authorization.nil? || authorization.empty?
+
+        authorization = authorization.is_a?(Hash) ? authorization : { ceiling: authorization }
+        setting.add_authorization_policy(mount_label: authorization[:label].to_s) if authorization[:label]
+        grant = authorization[:grant] || authorization[:grants]
+        setting.add_authorization_policy(grants: Array(grant).map(&:to_sym)) if grant
+        ceiling = authorization[:ceiling] || authorization[:ceilings]
+        setting.add_authorization_policy(ceiling: Array(ceiling).map(&:to_sym)) if ceiling
+      end
+
       # The settings the endpoint mounting +app+ at +path+ is built with. Past
       # #mount's +mount_instance+ branch, a Grape app is an already instantiated
       # Grape::API::Instance (vs. a bare Rack app): it inherits this API's
       # settings and is built from its own.
-      def mounted_setting(app, path)
+      def mounted_setting(app, path, authorization = nil)
         return inheritable_setting unless app.is_a?(Grape::Mountable)
 
-        app.top_level_setting.add_mount_path(Grape::Util::PathNormalizer.call(path))
+        setting = app.top_level_setting
+        setting.add_mount_path(Grape::Util::PathNormalizer.call(path))
+        apply_mount_authorization(setting, authorization) if authorization
         app.inherit_settings(inheritable_setting)
         app.change!
         change!
-        app.top_level_setting
+        setting
       end
 
       # Re-mount +mounts+, replacing any endpoint already mounted for the same
