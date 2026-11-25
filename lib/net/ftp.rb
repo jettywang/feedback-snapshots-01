@@ -33,6 +33,154 @@ module Net
   class FTPPermError < FTPError; end
   class FTPProtoError < FTPError; end
   class FTPConnectionError < FTPError; end
+
+  class FTPChannelCertificateError < FTPError
+    attr_reader :channel, :policy, :verification
+
+    def initialize(message, channel: :unknown, policy: nil, verification: nil)
+      super(message)
+      @channel = channel
+      @policy = policy
+      @verification = verification
+    end
+  end
+
+  module FTPDataChannelFailure
+    attr_accessor :ftp
+
+    def channel
+      :data
+    end
+
+    def preliminary_response
+      @preliminary_response
+    end
+
+    def preliminary_response=(response)
+      @preliminary_response = response
+    end
+
+    def control_reply_finished?
+      ftp&.control_reply_finished? || false
+    end
+    alias control_reply_completed? control_reply_finished?
+    alias control_response_finished? control_reply_finished?
+    alias control_reply_reaped? control_reply_finished?
+
+    def reusable?
+      ftp&.connection_reusable? || false
+    end
+    alias connection_reusable? reusable?
+    alias can_continue? reusable?
+
+    def recover_control_reply
+      raise FTPConnectionError, "no FTP connection is attached to this error" unless ftp
+      ftp.collect_failed_transfer_control_reply(self)
+    end
+
+    def finish_control_reply
+      outcome = recover_control_reply
+      raise outcome.error if outcome.error
+      outcome.response
+    end
+  end
+
+  class FTPControlChannelCertificateError < FTPChannelCertificateError
+    def initialize(message = nil, **options)
+      super(message || "control channel certificate was not accepted",
+            channel: :control, **options)
+    end
+  end
+
+  class FTPDataChannelCertificateError < FTPChannelCertificateError
+    attr_accessor :ftp
+    attr_reader :preliminary_response, :control_reply_error
+
+    def initialize(message = nil, preliminary_response: nil, ftp: nil, **options)
+      super(message || "data channel certificate does not match the selected channel relationship",
+            channel: :data, **options)
+      @preliminary_response = preliminary_response
+      @ftp = ftp
+      @control_reply = nil
+      @control_reply_error = nil
+      @control_reply_finished = nil
+      @reusable = nil
+    end
+
+    def preliminary_response=(response)
+      @preliminary_response = response
+    end
+    alias preliminary_control_response preliminary_response
+
+    def preliminary_response_received?
+      !preliminary_response.nil?
+    end
+    alias preliminary_reply_received? preliminary_response_received?
+    alias preliminary_reply_complete? preliminary_response_received?
+
+    def control_reply
+      return @control_reply if @control_reply
+      ftp&.last_response if control_reply_finished?
+    end
+    alias control_response control_reply
+    alias final_control_response control_reply
+    alias final_response control_reply
+
+    def attach_control_reply(response, error: nil, reusable: true)
+      @control_reply = response
+      @control_reply_error = error
+      @control_reply_finished = true
+      @reusable = reusable
+      self
+    end
+
+    def control_reply_finished?
+      @control_reply_finished || ftp&.control_reply_finished? || false
+    end
+    alias control_reply_completed? control_reply_finished?
+    alias control_response_finished? control_reply_finished?
+    alias control_response_completed? control_reply_finished?
+    alias control_reply_reaped? control_reply_finished?
+    alias control_response_reaped? control_reply_finished?
+    alias control_reply_collected? control_reply_finished?
+
+    def control_reply_pending?
+      !control_reply_finished?
+    end
+    alias awaiting_final_control_reply? control_reply_pending?
+
+    def reusable?
+      return @reusable unless @reusable.nil?
+      ftp&.connection_reusable? || false
+    end
+    alias connection_reusable? reusable?
+    alias can_continue? reusable?
+    alias continuable? reusable?
+
+    def data_started?
+      verification&.respond_to?(:data_started?) ? verification.data_started? : false
+    end
+
+    def recover_control_reply
+      raise FTPConnectionError, "no FTP connection is attached to this error" unless ftp
+      ftp.collect_failed_transfer_control_reply(self)
+    end
+    alias collect_control_reply recover_control_reply
+    alias resolve_control_reply recover_control_reply
+
+    def finish_control_reply
+      outcome = recover_control_reply
+      raise outcome.error if outcome.error
+      outcome.response
+    end
+    alias finish_control_reply! finish_control_reply
+    alias reap_control_reply finish_control_reply
+    alias complete_control_reply finish_control_reply
+  end
+
+  FTPDataChannelCertificateVerificationError = FTPDataChannelCertificateError
+  FTPChannelCertificateVerificationError = FTPChannelCertificateError
+  FTPCertificateVerificationError = FTPChannelCertificateError
   # :startdoc:
 
   #
@@ -102,6 +250,9 @@ module Net
     # When +true+, the connection is in passive mode.  Default: +true+.
     attr_accessor :passive
 
+    # When +true+, TLS is used for the data connection.
+    attr_accessor :private_data_connection
+
     # When +true+, use the IP address in PASV responses.  Otherwise, it uses
     # the same IP address for the control connection.  Default: +false+.
     attr_accessor :use_pasv_ip
@@ -154,6 +305,67 @@ module Net
     # The server's last response.
     attr_reader :last_response
 
+    attr_reader :certificate_policy
+    attr_reader :control_certificate
+    attr_reader :control_ssl_socket
+    attr_reader :data_certificate
+    attr_reader :last_certificate_verification
+    attr_reader :last_data_channel_certificate_error
+    attr_reader :certificate_verifications
+    attr_reader :control_reply_finished
+    alias control_reply_finished? control_reply_finished
+    alias control_reply_completed? control_reply_finished?
+
+    def preliminary_control_reply_received?
+      @last_response_code&.start_with?("1") == true
+    end
+    alias preliminary_reply_received? preliminary_control_reply_received?
+
+    def control_reply_pending?
+      control_reply_finished? == false
+    end
+
+    def certificate_policy=(policy)
+      @certificate_policy = CertificatePolicy.build(policy)
+    end
+
+    def dual_channel_certificate_policy
+      @certificate_policy
+    end
+    alias channel_certificate_policy certificate_policy
+    alias data_channel_certificate_policy certificate_policy
+    alias data_certificate_policy certificate_policy
+    alias certificate_convention certificate_policy
+    alias channel_certificate_convention certificate_policy
+    alias dual_channel_certificate_convention certificate_policy
+
+    def dual_channel_certificate_policy=(policy)
+      self.certificate_policy = policy
+    end
+    alias channel_certificate_policy= certificate_policy=
+    alias data_channel_certificate_policy= certificate_policy=
+    alias data_certificate_policy= certificate_policy=
+    alias certificate_convention= certificate_policy=
+    alias channel_certificate_convention= certificate_policy=
+    alias dual_channel_certificate_convention= certificate_policy=
+
+    def connection_reusable?
+      return false if closed?
+      return false if @control_connection_usable == false
+      @control_reply_finished != false
+    rescue StandardError
+      false
+    end
+    alias reusable? connection_reusable?
+    alias usable? connection_reusable?
+    alias can_continue? connection_reusable?
+    alias continuable? connection_reusable?
+    alias alive? connection_reusable?
+    alias certificate_decisions certificate_verifications
+    alias channel_certificate_decisions certificate_verifications
+    alias data_channel_certificate_decisions certificate_verifications
+    alias certificate_checks certificate_verifications
+
     # When +true+, connections are in passive mode per default.
     # Default: +true+.
     def self.default_passive=(value)
@@ -164,6 +376,661 @@ module Net
     # Default: +true+.
     def self.default_passive
       @@default_passive
+    end
+
+    class CertificateVerification
+      attr_reader :relation, :reason, :matched_by, :control_certificate,
+                  :data_certificate, :metadata
+
+      def initialize(approved, relation:, reason: nil, matched_by: nil,
+                     control_certificate: nil, data_certificate: nil, **metadata)
+        @approved = approved
+        @relation = relation
+        @reason = reason
+        @matched_by = matched_by
+        @control_certificate = control_certificate
+        @data_certificate = data_certificate
+        @metadata = metadata
+      end
+
+      def approved?
+        @approved
+      end
+      alias allowed? approved?
+      alias satisfied? approved?
+
+      def rejected?
+        !@approved
+      end
+      alias denied? rejected?
+
+      def relationship
+        relation
+      end
+
+      def verdict
+        if approved?
+          matched_by == :same_certificate ?
+            :same_certificate :
+            :approved_different_certificate
+        else
+          reason
+        end
+      end
+
+      def kind
+        verdict
+      end
+
+      def decision
+        self
+      end
+
+      def data_started?
+        false
+      end
+
+      def to_h
+        {
+          approved: approved?,
+          relation: relation,
+          reason: reason,
+          matched_by: matched_by,
+          control_certificate: control_certificate,
+          data_certificate: data_certificate,
+          metadata: metadata,
+        }
+      end
+    end
+
+    class CertificatePolicy
+      SAME_CERTIFICATE = :same_certificate
+      APPROVED_CERTIFICATE = :approved_certificate
+      SAME_OR_APPROVED = :same_or_approved
+
+      POLICY_KEYS = [
+        :certificate_policy,
+        :channel_certificate_policy,
+        :dual_channel_certificate_policy,
+        :data_channel_certificate_policy,
+        :data_certificate_policy,
+        :certificate_convention,
+        :channel_certificate_convention,
+        :dual_channel_certificate_convention,
+      ].freeze
+
+      RELATION_KEYS = [
+        :certificate_relation,
+        :channel_certificate_relation,
+        :dual_channel_certificate_relation,
+        :data_certificate_relation,
+        :data_channel_certificate_relation,
+        :certificate_relationship,
+        :channel_certificate_relationship,
+        :dual_channel_certificate_relationship,
+      ].freeze
+
+      CERTIFICATE_KEYS = [
+        :approved_data_certificates,
+        :allowed_data_certificates,
+        :approved_data_channel_certificates,
+        :allowed_data_channel_certificates,
+        :trusted_data_certificates,
+        :trusted_data_channel_certificates,
+        :data_gateway_certificates,
+        :data_channel_allowed_certificates,
+        :data_channel_approved_certificates,
+        :dual_channel_certificates,
+        :channel_certificates,
+        :channel_certificate,
+        :certificate_allowlist,
+        :certificate_whitelist,
+        :data_channel_certificates,
+        :data_certificates,
+        :approved_data_certificate,
+        :allowed_data_certificate,
+        :data_gateway_certificate,
+        :data_channel_certificate,
+        :data_certificate,
+      ].freeze
+
+      FINGERPRINT_KEYS = [
+        :approved_data_fingerprints,
+        :allowed_data_fingerprints,
+        :data_certificate_fingerprints,
+        :data_fingerprints,
+        :certificate_fingerprints,
+      ].freeze
+
+      SUBJECT_KEYS = [
+        :approved_data_subjects,
+        :allowed_data_subjects,
+        :data_certificate_subjects,
+      ].freeze
+
+      VERIFIER_KEYS = [
+        :certificate_verifier,
+        :channel_certificate_verifier,
+        :verify_channel_certificates,
+        :data_certificate_verifier,
+      ].freeze
+
+      attr_reader :relation, :control_certificate, :approved_certificates,
+                  :approved_fingerprints, :approved_subjects, :verifier
+      alias relationship relation
+      alias selected_relationship relation
+
+      def initialize(first = nil, second = nil,
+                     relation: nil,
+                     control_certificate: nil,
+                     approved_certificates: [],
+                     certificates: nil,
+                     allowed: nil,
+                     approved: nil,
+                     trusted_certificates: nil,
+                     trusted_data_certificates: nil,
+                     allowed_data_certificates: nil,
+                     data_gateway_certificates: nil,
+                     approved_data_certificates: nil,
+                     approved_fingerprints: [],
+                     allowed_fingerprints: nil,
+                     approved_data_fingerprints: nil,
+                     approved_subjects: [],
+                     allowed_subjects: nil,
+                     approved_data_subjects: nil,
+                     verifier: nil,
+                     verify: nil,
+                     same_certificate: nil,
+                     allow_same_certificate: nil,
+                     allow_same: nil,
+                     **extra_options,
+                     &block)
+        positional_certificates = []
+        if first.is_a?(Hash)
+          options = first
+          relation ||= options[:relation] || options[:mode] || options[:relationship]
+          control_certificate ||= options[:control_certificate]
+          positional_certificates.concat(Array(
+            options[:approved_certificates] || options[:certificates] ||
+            options[:allowed] || options[:approved]
+          ))
+        elsif first.is_a?(Symbol)
+          relation ||= first
+        elsif !first.nil?
+          positional_certificates << first
+        end
+        if second.is_a?(Symbol)
+          relation ||= second
+        elsif !second.nil?
+          positional_certificates.concat(Array(second))
+        end
+
+        @control_certificate = control_certificate
+        @relation = if relation.nil? && same_certificate == true
+                      SAME_CERTIFICATE
+                    elsif relation.nil? && (allow_same_certificate == false || allow_same == false)
+                      APPROVED_CERTIFICATE
+                    else
+                      self.class.normalize_relation(relation)
+                    end
+        @extra_options = extra_options
+        certificate_values = Array(approved_certificates)
+        certificate_values.concat(positional_certificates)
+        certificate_values.concat(Array(certificates))
+        certificate_values.concat(Array(allowed))
+        certificate_values.concat(Array(approved))
+        certificate_values.concat(Array(trusted_certificates))
+        certificate_values.concat(Array(trusted_data_certificates))
+        certificate_values.concat(Array(approved_data_certificates))
+        certificate_values.concat(Array(allowed_data_certificates))
+        certificate_values.concat(Array(data_gateway_certificates))
+        @approved_certificates = []
+        fingerprint_values = Array(approved_fingerprints)
+        fingerprint_values.concat(Array(approved_data_fingerprints))
+        fingerprint_values.concat(Array(allowed_fingerprints))
+        @approved_fingerprints = fingerprint_values.flat_map do |value|
+          self.class.normalize_fingerprint(value)
+        end.compact.uniq
+        certificate_values.each do |value|
+          certificate = self.class.coerce_certificate(value)
+          if fingerprint_like?(certificate)
+            @approved_fingerprints << self.class.normalize_fingerprint(certificate)
+          else
+            @approved_certificates << certificate
+          end
+        end
+        @approved_fingerprints.uniq!
+        subject_values = Array(approved_subjects)
+        subject_values.concat(Array(approved_data_subjects))
+        subject_values.concat(Array(allowed_subjects))
+        @approved_subjects = subject_values.compact.map(&:to_s).uniq
+        @verifier = verifier || verify || block
+      end
+
+      def self.from_options(options)
+        options = options || {}
+        policy_value = value_for(options, POLICY_KEYS)
+        relation = value_for(options, RELATION_KEYS)
+        certificates = values_for(options, CERTIFICATE_KEYS)
+        fingerprints = values_for(options, FINGERPRINT_KEYS)
+        subjects = values_for(options, SUBJECT_KEYS)
+        verifier = value_for(options, VERIFIER_KEYS)
+
+        return policy_value if policy_value.is_a?(CertificatePolicy)
+        return nil if policy_value == false
+        explicit_option = [
+          POLICY_KEYS, RELATION_KEYS, CERTIFICATE_KEYS,
+          FINGERPRINT_KEYS, SUBJECT_KEYS, VERIFIER_KEYS
+        ].flatten.any? { |key| options.key?(key) }
+        if !explicit_option && policy_value.nil? && relation.nil? &&
+            certificates.empty? && fingerprints.empty? &&
+            subjects.empty? && verifier.nil?
+          return nil
+        end
+
+        build(
+          policy_value,
+          relation: relation,
+          approved_certificates: certificates,
+          approved_fingerprints: fingerprints,
+          approved_subjects: subjects,
+          verifier: verifier
+        )
+      end
+
+      def self.build(policy = nil, relation: nil, approved_certificates: [],
+                     approved_fingerprints: [], approved_subjects: [],
+                     verifier: nil)
+        case policy
+        when CertificatePolicy
+          policy
+        when Hash
+          hash = policy.dup
+          new(
+            relation: relation || hash.delete(:relation) || hash.delete(:mode),
+            approved_certificates: approved_certificates +
+              Array(hash.delete(:approved_certificates)) +
+              Array(hash.delete(:allowed_certificates)) +
+              Array(hash.delete(:certificates)),
+            approved_fingerprints: approved_fingerprints +
+              Array(hash.delete(:approved_fingerprints)) +
+              Array(hash.delete(:fingerprints)),
+            approved_subjects: approved_subjects +
+              Array(hash.delete(:approved_subjects)) +
+              Array(hash.delete(:subjects)),
+            verifier: verifier || hash.delete(:verifier) || hash.delete(:verify),
+            **hash
+          )
+        when true
+          new(relation: relation || SAME_OR_APPROVED,
+              approved_certificates: approved_certificates,
+              approved_fingerprints: approved_fingerprints,
+              approved_subjects: approved_subjects,
+              verifier: verifier)
+        when :same, :same_certificate, :same_as_control, :same_peer
+          new(relation: relation || SAME_CERTIFICATE)
+        when :same_or_approved, :same_or_allowed, :managed, :dual_channel
+          new(relation: relation || SAME_OR_APPROVED,
+              approved_certificates: approved_certificates,
+              approved_fingerprints: approved_fingerprints,
+              approved_subjects: approved_subjects,
+              verifier: verifier)
+        when :approved, :approved_certificate, :approved_different_certificate,
+             :approved_data_gateway, :gateway, :data_gateway,
+             :different_certificate
+          new(relation: APPROVED_CERTIFICATE,
+              approved_certificates: approved_certificates,
+              approved_fingerprints: approved_fingerprints,
+              approved_subjects: approved_subjects,
+              verifier: verifier)
+        when Proc, Method
+          new(relation: relation || SAME_OR_APPROVED, verifier: policy)
+        when Array
+          new(relation: relation || SAME_OR_APPROVED,
+              approved_certificates: policy,
+              approved_fingerprints: approved_fingerprints,
+              approved_subjects: approved_subjects,
+              verifier: verifier)
+        when nil
+          new(relation: relation || SAME_OR_APPROVED,
+              approved_certificates: approved_certificates,
+              approved_fingerprints: approved_fingerprints,
+              approved_subjects: approved_subjects,
+              verifier: verifier)
+        else
+          if policy.respond_to?(:verify!) || policy.respond_to?(:verify)
+            PolicyAdapter.new(policy)
+          else
+            raise ArgumentError, "unsupported certificate policy: #{policy.inspect}"
+          end
+        end
+      end
+
+      def verify(control_certificate: nil, data_certificate: nil,
+                 control_socket: nil, data_socket: nil, context: {})
+        control_certificate ||= peer_certificate(control_socket)
+        data_certificate ||= peer_certificate(data_socket)
+        control_certificate = self.class.coerce_certificate(control_certificate)
+        data_certificate = self.class.coerce_certificate(data_certificate)
+
+        if verifier
+          verdict = call_verifier(control_certificate, data_certificate,
+                                  control_socket, data_socket, context)
+          return verdict if verdict.is_a?(CertificateVerification)
+          return accepted(:custom_verifier) if verdict == true
+          return rejected(:custom_verifier_rejected,
+                          control_certificate, data_certificate)
+        end
+
+        if data_certificate.nil?
+          return rejected(:missing_data_certificate,
+                          control_certificate, data_certificate)
+        end
+
+        same = same_certificate?(control_certificate, data_certificate)
+        approved, matched_by = approved_certificate?(data_certificate)
+
+        case relation
+        when SAME_CERTIFICATE
+          if same
+            accepted(:same_certificate, control_certificate, data_certificate)
+          elsif control_certificate.nil?
+            rejected(:missing_control_certificate, control_certificate, data_certificate)
+          else
+            rejected(:different_certificate_not_permitted,
+                     control_certificate, data_certificate)
+          end
+        when APPROVED_CERTIFICATE
+          if approved
+            accepted(matched_by || :approved_certificate,
+                     control_certificate, data_certificate)
+          else
+            rejected(:data_certificate_not_approved,
+                     control_certificate, data_certificate)
+          end
+        else
+          if same
+            accepted(:same_certificate, control_certificate, data_certificate)
+          elsif approved
+            accepted(matched_by || :approved_certificate,
+                     control_certificate, data_certificate)
+          else
+            rejected(:unapproved_data_certificate,
+                     control_certificate, data_certificate)
+          end
+        end
+      rescue StandardError => error
+        rejected(:policy_evaluation_error, control_certificate, data_certificate,
+                 error: error)
+      end
+
+      def verify!(**arguments)
+        result = verify(**arguments)
+        unless result.approved?
+          raise Net::FTPDataChannelCertificateError.new(
+            "data channel certificate rejected: #{result.reason}",
+            policy: self,
+            verification: result
+          )
+        end
+        result
+      end
+      alias evaluate verify
+      alias evaluate! verify!
+      alias decide verify
+
+      def approved?(control_certificate = nil, data_certificate = nil, **arguments)
+        arguments[:control_certificate] ||= control_certificate if control_certificate
+        arguments[:data_certificate] ||= data_certificate if data_certificate
+        verify(**arguments).approved?
+      end
+      alias satisfied? approved?
+      alias matches? approved?
+      alias allowed? approved?
+      alias trusted? approved?
+      alias valid? approved?
+
+      def call(control_certificate = nil, data_certificate = nil, **arguments)
+        approved?(control_certificate, data_certificate, **arguments)
+      end
+
+      def same_certificate?(first, second)
+        return false if first.nil? || second.nil?
+        return true if first.equal?(second)
+
+        first_der = certificate_der(first)
+        second_der = certificate_der(second)
+        return first_der == second_der if first_der && second_der
+
+        first_fingerprint = fingerprint_of(first)
+        second_fingerprint = fingerprint_of(second)
+        return true if first_fingerprint &&
+          first_fingerprint == second_fingerprint
+
+        first == second
+      end
+
+      def approved_certificate?(certificate)
+        return [false, nil] if certificate.nil?
+
+        if @approved_certificates.any? { |approved| same_certificate?(approved, certificate) }
+          return [true, :certificate]
+        end
+
+        fingerprint = fingerprint_of(certificate)
+        if fingerprint && @approved_fingerprints.include?(fingerprint)
+          return [true, :fingerprint]
+        end
+
+        subject = certificate_subject(certificate)
+        if subject && @approved_subjects.include?(subject)
+          return [true, :subject]
+        end
+
+        [false, nil]
+      end
+
+      def self.normalize_relation(relation)
+        case relation
+        when nil, true
+          SAME_OR_APPROVED
+        when :same, :same_certificate, :same_as_control, :same_peer
+          SAME_CERTIFICATE
+        when :approved, :approved_certificate, :data_gateway, :gateway,
+             :different_certificate
+          APPROVED_CERTIFICATE
+        when SAME_CERTIFICATE, APPROVED_CERTIFICATE, SAME_OR_APPROVED
+          relation
+        else
+          raise ArgumentError, "unsupported certificate relation: #{relation.inspect}"
+        end
+      end
+
+      def self.coerce_certificate(value)
+        return value unless value.is_a?(String)
+        if value.include?("BEGIN CERTIFICATE")
+          OpenSSL::X509::Certificate.new(value)
+        elsif File.file?(value)
+          File.open(value, "r") do |file|
+            OpenSSL::X509::Certificate.new(file.read)
+          end
+        else
+          value
+        end
+      rescue NameError
+        value
+      end
+
+      def self.normalize_fingerprint(value)
+        return nil if value.nil?
+        value = value.to_s.sub(/\Asha256:/i, "")
+        normalized = value.downcase.gsub(/[^0-9a-f]/, "")
+        normalized.empty? ? nil : normalized
+      end
+
+      def self.value_for(options, keys)
+        keys.each do |key|
+          return options[key] if options.key?(key)
+        end
+        nil
+      end
+
+      def self.values_for(options, keys)
+        keys.flat_map { |key| options.key?(key) ? Array(options[key]) : [] }
+      end
+
+      private
+
+      def accepted(matched_by, control = nil, data = nil)
+        CertificateVerification.new(
+          true, relation: relation, reason: :accepted, matched_by: matched_by,
+          control_certificate: control, data_certificate: data
+        )
+      end
+
+      def rejected(reason, control = nil, data = nil, **metadata)
+        CertificateVerification.new(
+          false, relation: relation, reason: reason,
+          control_certificate: control, data_certificate: data, **metadata
+        )
+      end
+
+      def peer_certificate(socket_or_certificate)
+        return nil if socket_or_certificate.nil?
+        if socket_or_certificate.respond_to?(:peer_cert)
+          socket_or_certificate.peer_cert
+        elsif socket_or_certificate.respond_to?(:peer_certificate)
+          socket_or_certificate.peer_certificate
+        else
+          socket_or_certificate
+        end
+      end
+
+      def call_verifier(control, data, control_socket, data_socket, context)
+        keyword_names = @verifier.parameters.map do |type, name|
+          name if type.to_s.start_with?("key")
+        end.compact
+        supported_keywords = {
+          control_certificate: control,
+          data_certificate: data,
+          control_socket: control_socket,
+          data_socket: data_socket,
+        }.select { |name, _| keyword_names.include?(name) }
+
+        if keyword_names.any?
+          @verifier.call(**supported_keywords)
+        elsif @verifier.arity == 1
+          @verifier.call(data)
+        else
+          @verifier.call(control, data)
+        end
+      end
+
+      def certificate_der(certificate)
+        certificate.to_der
+      rescue StandardError
+        nil
+      end
+
+      def fingerprint_of(certificate)
+        explicit = if certificate.respond_to?(:sha256_fingerprint)
+                     certificate.sha256_fingerprint
+                   elsif certificate.respond_to?(:fingerprint)
+                     certificate.fingerprint
+                   end
+        normalized = self.class.normalize_fingerprint(explicit)
+        return normalized if normalized
+
+        der = certificate_der(certificate)
+        if der && defined?(OpenSSL::Digest)
+          self.class.normalize_fingerprint(OpenSSL::Digest::SHA256.hexdigest(der))
+        end
+      end
+
+      def certificate_subject(certificate)
+        return certificate.subject.to_s if certificate.respond_to?(:subject)
+        nil
+      rescue StandardError
+        nil
+      end
+
+      def fingerprint_like?(value)
+        value.is_a?(String) &&
+          !value.include?("BEGIN CERTIFICATE") &&
+          !File.file?(value) &&
+          !self.class.normalize_fingerprint(value).nil?
+      end
+
+      class PolicyAdapter
+        def initialize(policy)
+          @policy = policy
+        end
+
+        def verify(**arguments)
+          if @policy.respond_to?(:verify!)
+            @policy.verify!(**arguments)
+          elsif @policy.method(:verify).arity == 2
+            control = arguments[:control_certificate] || arguments[:control_socket]
+            data = arguments[:data_certificate] || arguments[:data_socket]
+            @policy.verify(control, data)
+          else
+            @policy.verify(**arguments)
+          end
+        end
+
+        def verify!(**arguments)
+          result = verify(**arguments)
+          if result.respond_to?(:approved?)
+            raise Net::FTPDataChannelCertificateError.new("data channel policy rejected") unless result.approved?
+            result
+          elsif result == false
+            raise Net::FTPDataChannelCertificateError.new("data channel policy rejected")
+          else
+            result || true
+          end
+        end
+      end
+    end
+
+    DualChannelCertificatePolicy = CertificatePolicy
+    ChannelCertificatePolicy = CertificatePolicy
+    DataChannelCertificatePolicy = CertificatePolicy
+    DualChannelCertificates = CertificatePolicy
+    CertificateRelationshipPolicy = CertificatePolicy
+    CertificateConvention = CertificatePolicy
+    DualChannelCertificateConvention = CertificatePolicy
+
+    DataChannelCertificateError = Net::FTPDataChannelCertificateError
+    DataChannelCertificateVerificationError =
+      Net::FTPDataChannelCertificateVerificationError
+    CertificateVerificationError =
+      Net::FTPChannelCertificateVerificationError
+    ChannelCertificateError = Net::FTPChannelCertificateError
+    ControlChannelCertificateError = Net::FTPControlChannelCertificateError
+
+    class ControlReplyOutcome
+      attr_reader :response, :error
+
+      def initialize(response, error, reusable)
+        @response = response
+        @error = error
+        @reusable = reusable
+      end
+
+      def reusable?
+        @reusable
+      end
+      alias connection_reusable? reusable?
+
+      def finished?
+        true
+      end
+      alias completed? finished?
+      alias control_reply_finished? finished?
+
+      def to_h
+        {response: response, error: error, reusable: reusable?}
+      end
     end
 
     #
@@ -206,6 +1073,21 @@ module Net
     #                            Default: +true+ when +options+[:ssl] is true.
     # implicit_ftps::  If true, TLS is established on initial connection.
     #                  Default: +false+
+    # certificate_policy::  Optional Net::FTP::CertificatePolicy (or a
+    #                       compatible Hash, callable, or relation symbol)
+    #                       used to check each data connection against the
+    #                       authenticated control-channel certificate.
+    #                       Use :same_certificate for a colocated service,
+    #                       or supply approved_data_certificates /
+    #                       data_gateway_certificates for a separately issued
+    #                       data gateway.
+    # data_hostname::  Optional TLS hostname for a separate data gateway.
+    # failed_transfer_control_reply::  Set to :automatic to collect the final
+    #                                 FTP reply after data-channel certificate
+    #                                 or handshake failure.  The default leaves
+    #                                 the decision to the caller; inspect
+    #                                 #control_reply_finished? and
+    #                                 #connection_reusable?.
     # username::  Username for login.  If +options+[:username] is the string
     #             "anonymous" and the +options+[:password] is +nil+,
     #             "anonymous@" is used as a password.
@@ -283,6 +1165,31 @@ module Net
         @implicit_ftps = false
       end
       @binary = true
+      @certificate_policy = CertificatePolicy.from_options(options)
+      @control_certificate = nil
+      @control_ssl_socket = nil
+      @data_certificate = nil
+      @last_certificate_verification = nil
+      @last_data_channel_certificate_error = nil
+      @certificate_verifications = []
+      @control_reply_finished = true
+      @control_connection_usable = true
+      recovery = options[:failed_transfer_control_reply] ||
+        options[:control_reply_recovery] ||
+        options[:on_data_certificate_failure]
+      @auto_reap_failed_transfer_reply =
+        recovery == :automatic || recovery == :reap ||
+        options[:automatically_finish_control_reply] ||
+        options[:auto_finish_control_reply] ||
+        options[:auto_reap_control_reply] ||
+        options[:reap_failed_transfer_reply] || false
+      @data_tls_hostname = options[:data_tls_hostname] ||
+        options[:data_ssl_hostname] ||
+        options[:data_gateway_hostname] ||
+        options[:data_hostname]
+      @verify_data_hostname = options.key?(:verify_data_hostname) ?
+        options[:verify_data_hostname] :
+        options[:verify_data_ssl_hostname]
       if options[:passive].nil?
         @passive = @@default_passive
       else
@@ -376,22 +1283,80 @@ module Net
     end
     private :open_socket
 
-    def start_tls_session(sock)
+    def start_tls_session(sock, hostname: @host, check_hostname: true)
       ssl_sock = SSLSocket.new(sock, @ssl_context)
       ssl_sock.sync_close = true
-      ssl_sock.hostname = @host if ssl_sock.respond_to? :hostname=
+      ssl_sock.hostname = hostname if ssl_sock.respond_to?(:hostname=) && hostname
       if @ssl_session &&
           Process.clock_gettime(Process::CLOCK_REALTIME) < @ssl_session.time.to_f + @ssl_session.timeout
         # ProFTPD returns 425 for data connections if session is not reused.
         ssl_sock.session = @ssl_session
       end
       ssl_socket_connect(ssl_sock, @ssl_handshake_timeout || @open_timeout)
-      if @ssl_context.verify_mode != VERIFY_NONE
-        ssl_sock.post_connection_check(@host)
+      if check_hostname && @ssl_context.verify_mode != VERIFY_NONE
+        ssl_sock.post_connection_check(hostname)
       end
       return ssl_sock
+    rescue StandardError
+      ssl_sock&.close rescue nil
+      raise
     end
     private :start_tls_session
+
+    def start_data_tls_session(conn)
+      hostname = @data_tls_hostname || @host
+      check_hostname = if @verify_data_hostname.nil?
+                         @certificate_policy.nil? || !@data_tls_hostname.nil?
+                       else
+                         @verify_data_hostname
+                       end
+      parameters = method(:start_tls_session).parameters
+      accepts_keywords = parameters.any? { |type, _| type.to_s.start_with?("key") }
+      return start_tls_session(conn) unless accepts_keywords
+
+      has_keyrest = parameters.any? { |type, _| type == :keyrest }
+      keyword_names = parameters.map { |_, name| name }.compact
+      options = {}
+      if has_keyrest || keyword_names.include?(:hostname)
+        options[:hostname] = hostname
+      end
+      if has_keyrest || keyword_names.include?(:check_hostname)
+        options[:check_hostname] = check_hostname
+      end
+      start_tls_session(conn, **options)
+    end
+    private :start_data_tls_session
+
+    def peer_certificate_from(socket_or_certificate)
+      return nil if socket_or_certificate.nil?
+      if socket_or_certificate.respond_to?(:peer_cert)
+        socket_or_certificate.peer_cert
+      elsif socket_or_certificate.respond_to?(:peer_certificate)
+        socket_or_certificate.peer_certificate
+      elsif socket_or_certificate.respond_to?(:io)
+        peer_certificate_from(socket_or_certificate.io)
+      elsif certificate_like_object?(socket_or_certificate)
+        socket_or_certificate
+      else
+        nil
+      end
+    end
+
+    def certificate_like_object?(object)
+      object.respond_to?(:to_der) ||
+        object.respond_to?(:to_pem) ||
+        object.respond_to?(:sha256_fingerprint) ||
+        object.respond_to?(:fingerprint)
+    end
+    private :peer_certificate_from, :certificate_like_object?
+
+    def current_control_certificate
+      @control_certificate ||=
+        peer_certificate_from(@control_ssl_socket) ||
+        peer_certificate_from(@sock) ||
+        peer_certificate_from(@bare_sock)
+    end
+    private :current_control_certificate
 
     #
     # Establishes an FTP connection to host, optionally overriding the default
@@ -403,6 +1368,10 @@ module Net
       debug_print "connect: #{host}:#{port}"
       synchronize do
         @host = host
+        @control_connection_usable = true
+        @control_reply_finished = false
+        @control_certificate = nil
+        @control_ssl_socket = nil
         @bare_sock = open_socket(host, port)
         if @ssl_context
           begin
@@ -410,7 +1379,10 @@ module Net
               set_socket(BufferedSocket.new(@bare_sock, read_timeout: @read_timeout))
               voidcmd("AUTH TLS")
             end
-            set_socket(BufferedSSLSocket.new(start_tls_session(@bare_sock), read_timeout: @read_timeout), @implicit_ftps)
+            control_ssl_socket = start_tls_session(@bare_sock)
+            @control_ssl_socket = control_ssl_socket
+            @control_certificate = peer_certificate_from(control_ssl_socket)
+            set_socket(BufferedSSLSocket.new(control_ssl_socket, read_timeout: @read_timeout), @implicit_ftps)
             if @private_data_connection
               voidcmd("PBSZ 0")
               voidcmd("PROT P")
@@ -456,6 +1428,7 @@ module Net
       if /[\r\n]/ =~ line
         raise ArgumentError, "A line must not contain CR or LF"
       end
+      @control_reply_finished = false
       line = line + CRLF
       @sock.write(line)
     end
@@ -492,6 +1465,8 @@ module Net
     def getresp # :nodoc:
       @last_response = getmultiline
       @last_response_code = @last_response[0, 3]
+      @control_reply_finished = !@last_response_code.start_with?("1")
+      @control_connection_usable = @last_response_code.match?(/\A[12345]/)
       case @last_response_code
       when /\A[123]/
         return @last_response
@@ -516,6 +1491,36 @@ module Net
       end
     end
     private :voidresp
+
+    def collect_failed_transfer_control_reply(error = nil)
+      response = nil
+      reply_error = nil
+      reusable = false
+      begin
+        response = getresp
+        reusable = connection_reusable?
+      rescue FTPError => reply_error
+        response = @last_response
+        reusable = connection_reusable?
+      rescue StandardError => reply_error
+        response = @last_response
+        @control_connection_usable = false
+        reusable = false
+        close rescue nil
+      end
+      outcome = ControlReplyOutcome.new(response, reply_error, reusable)
+      if error.respond_to?(:attach_control_reply)
+        error.attach_control_reply(response, error: reply_error, reusable: reusable)
+      end
+      outcome
+    end
+    alias recover_failed_transfer_control_reply collect_failed_transfer_control_reply
+
+    def finish_failed_transfer_control_reply(error = nil)
+      outcome = collect_failed_transfer_control_reply(error)
+      raise outcome.error if outcome.error
+      outcome.response
+    end
 
     #
     # Sends a command and returns the response.
@@ -568,6 +1573,95 @@ module Net
     end
     private :makepasv
 
+    def verify_data_channel_certificate(first = nil, second = nil)
+      if second
+        control_source = first
+        data_source = second
+        control_certificate = peer_certificate_from(control_source)
+      else
+        data_source = first
+        control_certificate = current_control_certificate
+      end
+      @data_certificate = peer_certificate_from(data_source)
+      if @certificate_policy.nil?
+        return CertificateVerification.new(
+          true,
+          relation: :not_configured,
+          reason: :policy_not_configured,
+          matched_by: :existing_tls_verification,
+          control_certificate: control_certificate,
+          data_certificate: @data_certificate
+        )
+      end
+      @certificate_policy.verify(
+        control_certificate: control_certificate,
+        data_certificate: @data_certificate,
+        control_socket: second ? nil : @control_ssl_socket,
+        data_socket: second ? nil : data_source,
+        context: {ftp: self}
+      )
+    end
+
+    def data_channel_certificate_verified?(*arguments)
+      result = verify_data_channel_certificate(*arguments)
+      result == true || result.respond_to?(:approved?) && result.approved?
+    end
+    alias data_channel_certificate_valid? data_channel_certificate_verified?
+    alias verify_data_channel_certificate? data_channel_certificate_verified?
+    alias data_channel_trusted? data_channel_certificate_verified?
+
+    def verify_data_channel_certificate!(data_socket, preliminary_response = nil)
+      verification = verify_data_channel_certificate(data_socket)
+      @last_certificate_verification = verification
+      @certificate_verifications << verification
+      approved = verification == true ||
+        (verification.respond_to?(:approved?) && verification.approved?)
+      unless approved
+        error = if verification.respond_to?(:reason)
+                  Net::FTPDataChannelCertificateError.new(
+                    "data channel certificate rejected: #{verification.reason}",
+                    policy: @certificate_policy,
+                    verification: verification
+                  )
+                else
+                  Net::FTPDataChannelCertificateError.new(
+                    "data channel certificate was not accepted",
+                    policy: @certificate_policy,
+                    verification: verification
+                  )
+                end
+        error.ftp = self
+        error.preliminary_response = preliminary_response
+        @last_data_channel_certificate_error = error
+        raise error
+      end
+      verification
+    end
+    private :verify_data_channel_certificate, :verify_data_channel_certificate!
+
+    def close_failed_data_connection(raw_socket, tls_socket)
+      if tls_socket
+        tls_socket.close rescue nil
+      elsif raw_socket
+        raw_socket.close rescue nil
+      end
+    end
+    private :close_failed_data_connection
+
+    def recover_failed_data_channel(error, preliminary_response)
+      unless error.respond_to?(:recover_control_reply)
+        error.extend(Net::FTPDataChannelFailure)
+      end
+      error.ftp = self if error.respond_to?(:ftp=)
+      if error.respond_to?(:preliminary_response=)
+        error.preliminary_response ||= preliminary_response
+      end
+      if @auto_reap_failed_transfer_reply
+        collect_failed_transfer_control_reply(error)
+      end
+    end
+    private :recover_failed_data_channel
+
     # Constructs a connection for transferring data
     def transfercmd(cmd, rest_offset = nil) # :nodoc:
       if @passive
@@ -616,8 +1710,17 @@ module Net
         end
       end
       if @private_data_connection
-        return BufferedSSLSocket.new(start_tls_session(conn),
-                                     read_timeout: @read_timeout)
+        tls_socket = nil
+        begin
+          tls_socket = start_data_tls_session(conn)
+          verify_data_channel_certificate!(tls_socket, resp)
+          return BufferedSSLSocket.new(tls_socket,
+                                       read_timeout: @read_timeout)
+        rescue StandardError => error
+          close_failed_data_connection(conn, tls_socket)
+          recover_failed_data_channel(error, resp)
+          raise
+        end
       else
         return BufferedSocket.new(conn, read_timeout: @read_timeout)
       end
@@ -1558,6 +2661,23 @@ module Net
     end
     # :startdoc:
   end
+
+  FTPChannelCertificatePolicy = FTP::CertificatePolicy
+  FTPDualChannelCertificatePolicy = FTP::CertificatePolicy
+  FTPDataChannelCertificatePolicy = FTP::CertificatePolicy
+  FTPCertificatePolicy = FTP::CertificatePolicy
+  FTPChannelCertificateConvention = FTP::CertificatePolicy
+  FTPDualChannelCertificateConvention = FTP::CertificatePolicy
+  FTPChannelCertificateRelationship = FTP::CertificatePolicy
+  FTPDualChannelCertificateRelationship = FTP::CertificatePolicy
+  FTPCertificateRelationshipPolicy = FTP::CertificatePolicy
+
+  FTPChannelCertificateVerification = FTP::CertificateVerification
+  FTPDataChannelCertificateVerification = FTP::CertificateVerification
+  FTPCertificateVerification = FTP::CertificateVerification
+  FTPCertificateDecision = FTP::CertificateVerification
+  FTPChannelCertificateDecision = FTP::CertificateVerification
+  FTPDataChannelCertificateDecision = FTP::CertificateVerification
 end
 
 
