@@ -762,6 +762,449 @@ class TestAuthorizedSession(object):
             assert not mock_helper.check_parameters_for_unauthorized_response.called
 
 
+class RecordingTransport(AdapterStub):
+    """Transport adapter that records each application send."""
+
+    def __init__(self, responses, on_send=None):
+        super(RecordingTransport, self).__init__(responses)
+        self.sent = []
+        self._on_send = on_send
+
+    def send(self, request, **kwargs):
+        self.sent.append((request.method, request.url, dict(request.headers)))
+        if self._on_send is not None:
+            self._on_send(request)
+        return super(RecordingTransport, self).send(request, **kwargs)
+
+
+class RecordingCredentials(CredentialsStub):
+    """Credentials that record every refresh request they receive."""
+
+    def __init__(self, token="token"):
+        super(RecordingCredentials, self).__init__(token=token)
+        self.refreshes = []
+
+    def refresh(self, request):
+        self.refreshes.append(request)
+        super(RecordingCredentials, self).refresh(request)
+
+
+class TestOperationPermission(object):
+    """Tests for operation-level approval on AuthorizedSession."""
+
+    READ_URL = "https://example.com/items/1"
+    WRITE_URL = "https://example.com/items/1"
+
+    @staticmethod
+    def permission(allowed_methods):
+        return google.auth.authorization.OperationPermission(allowed_methods)
+
+    def make_session(self, credentials, responses, on_send=None):
+        transport = RecordingTransport(responses, on_send=on_send)
+        session = google.auth.transport.requests.AuthorizedSession(credentials)
+        session.mount("https://", transport)
+        return session, transport
+
+    def test_allows_matching_method_and_resource(self):
+        credentials = RecordingCredentials()
+        final_response = make_response(http_client.OK, b"read")
+        session, transport = self.make_session(credentials, [final_response])
+
+        response = session.request(
+            "GET",
+            self.READ_URL,
+            operation_permission=self.permission(
+                {"GET": [r"https://example\.com/items/1"]}
+            ),
+        )
+
+        assert response is final_response
+        assert [method for method, _, _ in transport.sent] == ["GET"]
+        assert transport.sent[0][2]["authorization"] == "token"
+        assert credentials.refreshes == []
+
+    def test_rejects_mismatched_method_before_any_auth_work(self):
+        credentials = RecordingCredentials()
+        session, transport = self.make_session(credentials, [])
+
+        with pytest.raises(exceptions.OperationNotPermitted):
+            session.request(
+                "DELETE",
+                self.READ_URL,
+                operation_permission=self.permission(
+                    {"GET": [r"https://example\.com/items/1"]}
+                ),
+            )
+
+        assert transport.sent == []
+        assert credentials.refreshes == []
+
+    def test_rejects_mismatched_resource_before_any_auth_work(self):
+        credentials = RecordingCredentials()
+        session, transport = self.make_session(credentials, [])
+
+        with pytest.raises(exceptions.OperationNotPermitted):
+            session.request(
+                "GET",
+                "https://example.com/items/2",
+                operation_permission=self.permission(
+                    {"GET": [r"https://example\.com/items/1"]}
+                ),
+            )
+
+        assert transport.sent == []
+
+    def test_interleaved_read_and_write_use_separate_permissions(self):
+        credentials = RecordingCredentials()
+        read_response = make_response(http_client.OK, b"read")
+        write_response = make_response(http_client.OK, b"write")
+        session, transport = self.make_session(
+            credentials, [read_response, write_response]
+        )
+
+        read_result = session.request(
+            "GET",
+            self.READ_URL,
+            operation_permission=self.permission(
+                {"GET": [r"https://example\.com/items/1"]}
+            ),
+        )
+        write_result = session.request(
+            "PUT",
+            self.WRITE_URL,
+            operation_permission=self.permission(
+                {"PUT": [r"https://example\.com/items/1"]}
+            ),
+        )
+
+        assert read_result is read_response
+        assert write_result is write_response
+        assert [(method, url) for method, url, _ in transport.sent] == [
+            ("GET", self.READ_URL),
+            ("PUT", self.WRITE_URL),
+        ]
+        assert credentials.refreshes == []
+
+    def test_401_retry_keeps_the_requests_permission(self):
+        credentials = RecordingCredentials()
+        final_response = make_response(http_client.OK, b"read")
+        session, transport = self.make_session(
+            credentials,
+            [make_response(http_client.UNAUTHORIZED), final_response],
+        )
+
+        response = session.request(
+            "GET",
+            self.READ_URL,
+            operation_permission=self.permission(
+                {"GET": [r"https://example\.com/items/1"]}
+            ),
+        )
+
+        assert response is final_response
+        assert [(method, url) for method, url, _ in transport.sent] == [
+            ("GET", self.READ_URL),
+            ("GET", self.READ_URL),
+        ]
+        # The retry carried the refreshed token and the original approval.
+        assert transport.sent[1][2]["authorization"] == "token1"
+        assert len(credentials.refreshes) == 1
+
+    def test_withdrawn_write_permission_stops_only_that_retry(self):
+        credentials = RecordingCredentials()
+        state = {"write_allowed": True}
+
+        def permission(method, url):
+            if method == "PUT":
+                return state["write_allowed"] and url == self.WRITE_URL
+            return method == "GET" and url == self.READ_URL
+
+        def withdraw_write_after_401(request):
+            if request.method == "PUT":
+                state["write_allowed"] = False
+
+        response_401 = make_response(http_client.UNAUTHORIZED)
+        read_after_refresh = make_response(http_client.OK, b"read-after-refresh")
+        write_401 = make_response(http_client.UNAUTHORIZED)
+        session, transport = self.make_session(
+            credentials,
+            [response_401, read_after_refresh, write_401],
+            on_send=withdraw_write_after_401,
+        )
+
+        # The first application send is a read. The read receives a 401, which
+        # refreshes credentials and retries successfully.
+        read_result = session.request(
+            "GET", self.READ_URL, operation_permission=permission
+        )
+        assert read_result is read_after_refresh
+
+        # The write on the same session receives a 401. The application
+        # withdraws the write approval while the credentials are being
+        # refreshed. The write is not resent, but its refresh does not disturb
+        # the earlier read, which already recovered normally.
+        with pytest.raises(exceptions.OperationNotPermitted):
+            session.request("PUT", self.WRITE_URL, operation_permission=permission)
+
+        assert [(method, url) for method, url, _ in transport.sent] == [
+            ("GET", self.READ_URL),
+            ("GET", self.READ_URL),
+            ("PUT", self.WRITE_URL),
+        ]
+        # One refresh for the read, one for the write before its denied retry.
+        assert len(credentials.refreshes) == 2
+        assert transport.sent[2][2]["authorization"] == "token1"
+
+    def test_credential_permission_withdrawn_only_stops_write_retry(self):
+        # The credential itself carries the permission floor. The read and
+        # write are interleaved on one session; the write's permission is
+        # revoked while its credentials refresh.
+        credentials = RecordingCredentials()
+        state = {"write_allowed": True}
+
+        def permission(method, url):
+            if method == "PUT":
+                return state["write_allowed"] and url == self.WRITE_URL
+            return method == "GET" and url == self.READ_URL
+
+        credentials.operation_permission = permission
+        write_401 = make_response(http_client.UNAUTHORIZED)
+        read_401 = make_response(http_client.UNAUTHORIZED)
+        read_ok = make_response(http_client.OK, b"read-after-refresh")
+        session, transport = self.make_session(
+            credentials, [write_401, read_401, read_ok]
+        )
+
+        def withdraw_after_write_401(request):
+            if request.method == "PUT":
+                state["write_allowed"] = False
+
+        # First, trigger the write 401 and withdraw the write approval.
+        transport._on_send = withdraw_after_write_401
+        with pytest.raises(exceptions.OperationNotPermitted):
+            session.request("PUT", self.WRITE_URL)
+
+        # The credential permission has been withdrawn for writes, but the
+        # read is still approved. It refreshes normally and completes.
+        transport._on_send = None
+        read_response = session.request("GET", self.READ_URL)
+
+        assert read_response is read_ok
+        assert [method for method, _, _ in transport.sent] == [
+            "PUT",
+            "GET",
+            "GET",
+        ]
+        # One refresh for the withdrawn write, one for the read retry.
+        assert len(credentials.refreshes) == 2
+        assert credentials.token == "token11"
+        # The read sent its refreshed token on the retry.
+        assert transport.sent[1][2]["authorization"] == "token1"
+        assert transport.sent[2][2]["authorization"] == "token11"
+
+    def test_two_resources_show_which_refreshes_and_which_reaches_api(self):
+        credentials = RecordingCredentials()
+        read_response = make_response(http_client.OK, b"read")
+        write_response = make_response(http_client.OK, b"written")
+        session, transport = self.make_session(
+            credentials,
+            [read_response, make_response(http_client.UNAUTHORIZED), write_response],
+        )
+        other_url = "https://example.com/items/2"
+        permission_calls = []
+
+        def read_permission(method, url):
+            permission_calls.append(("read", method, url))
+            return method == "GET" and url == self.READ_URL
+
+        def write_permission(method, url):
+            permission_calls.append(("write", method, url))
+            return method == "PUT" and url == other_url
+
+        assert (
+            session.request("GET", self.READ_URL, operation_permission=read_permission)
+            is read_response
+        )
+        # The read was approved and sent without refreshing.
+        assert credentials.refreshes == []
+
+        assert (
+            session.request("PUT", other_url, operation_permission=write_permission)
+            is write_response
+        )
+
+        # Only the update refresh; both its first attempt and its retry were
+        # sent to the API under the write authorization.
+        assert [(method, url) for method, url, _ in transport.sent] == [
+            ("GET", self.READ_URL),
+            ("PUT", other_url),
+            ("PUT", other_url),
+        ]
+        assert len(credentials.refreshes) == 1
+        assert permission_calls == [
+            ("read", "GET", self.READ_URL),
+            ("write", "PUT", other_url),
+            ("write", "PUT", other_url),
+        ]
+
+    def test_three_records_application_refresh_and_final_response(self):
+        events = []
+
+        class EventCredentials(RecordingCredentials):
+            def refresh(self, request):
+                events.append(("refresh",))
+                super(EventCredentials, self).refresh(request)
+
+        class EventTransport(RecordingTransport):
+            def send(self, request, **kwargs):
+                response = super(EventTransport, self).send(request, **kwargs)
+                events.append(("application", request.method, response.status_code))
+                return response
+
+        credentials = EventCredentials()
+        final_response = make_response(http_client.OK, b"written")
+        transport = EventTransport(
+            [make_response(http_client.UNAUTHORIZED), final_response]
+        )
+        session = google.auth.transport.requests.AuthorizedSession(credentials)
+        session.mount("https://", transport)
+
+        response = session.request(
+            "PUT",
+            self.WRITE_URL,
+            operation_permission=self.permission(
+                {"PUT": [r"https://example\.com/items/1"]}
+            ),
+        )
+
+        assert response is final_response
+        assert events == [
+            ("application", "PUT", http_client.UNAUTHORIZED),
+            ("refresh",),
+            ("application", "PUT", http_client.OK),
+        ]
+        assert response.status_code == http_client.OK
+
+    def test_withdrawn_session_permission_stops_only_that_request(self):
+        # Two operations are registered on one session. Only the write's
+        # permission is withdrawn before its retry. The read on the same
+        # session must still refresh and retry normally.
+        credentials = RecordingCredentials()
+        read_401 = make_response(http_client.UNAUTHORIZED)
+        read_ok = make_response(http_client.OK, b"read")
+        write_401 = make_response(http_client.UNAUTHORIZED)
+        session = google.auth.transport.requests.AuthorizedSession(credentials)
+        state = {"write_allowed": True}
+
+        def permission(method, url):
+            if method == "PUT":
+                return state["write_allowed"]
+            return method == "GET" and url == self.READ_URL
+
+        class InterleavedTransport(RecordingTransport):
+            def __init__(self, session, responses):
+                super(InterleavedTransport, self).__init__(responses)
+                self.session = session
+                self.read_response = None
+
+            def send(self, request, **kwargs):
+                result = super(InterleavedTransport, self).send(request, **kwargs)
+                if (
+                    request.method == "PUT"
+                    and result.status_code == http_client.UNAUTHORIZED
+                ):
+                    state["write_allowed"] = False
+                    self.read_response = self.session.request(
+                        "GET", TestOperationPermission.READ_URL
+                    )
+                return result
+
+        session.operation_permission = permission
+        transport = InterleavedTransport(session, [read_401, write_401, read_ok])
+        session.mount("https://", transport)
+
+        with pytest.raises(exceptions.OperationNotPermitted):
+            session.request("PUT", self.WRITE_URL)
+
+        assert transport.read_response is read_ok
+        assert [(method, url) for method, url, _ in transport.sent] == [
+            ("PUT", self.WRITE_URL),
+            ("GET", self.READ_URL),
+            ("GET", self.READ_URL),
+        ]
+        assert len(credentials.refreshes) == 2
+
+    def test_per_request_none_disables_session_permission_for_that_call(self):
+        credentials = RecordingCredentials()
+        response = make_response(http_client.OK)
+        session, transport = self.make_session(credentials, [response])
+        session.operation_permission = self.permission(
+            {"GET": [r"https://example\.com/items/1"]}
+        )
+
+        result = session.request("DELETE", self.READ_URL, operation_permission=None)
+
+        assert result is response
+        assert [method for method, _, _ in transport.sent] == ["DELETE"]
+
+    def test_approved_write_still_recovers_after_401(self):
+        """Control: an approved write refreshes and is resent after a 401."""
+        credentials = RecordingCredentials()
+        final_response = make_response(http_client.OK, b"written")
+        session, transport = self.make_session(
+            credentials,
+            [make_response(http_client.UNAUTHORIZED), final_response],
+        )
+
+        response = session.request(
+            "PUT",
+            self.WRITE_URL,
+            operation_permission=self.permission(
+                {"PUT": [r"https://example\.com/items/1"]}
+            ),
+        )
+
+        assert response is final_response
+        assert [method for method, _, _ in transport.sent] == ["PUT", "PUT"]
+        assert len(credentials.refreshes) == 1
+        assert transport.sent[0][2]["authorization"] == "token"
+        assert transport.sent[1][2]["authorization"] == "token1"
+
+    def test_constructor_permission_applies_to_all_requests(self):
+        credentials = RecordingCredentials()
+        final_response = make_response(http_client.OK, b"read")
+        transport = RecordingTransport([final_response])
+        session = google.auth.transport.requests.AuthorizedSession(
+            credentials,
+            operation_permission=self.permission(
+                {"GET": [r"https://example\.com/items/1"]}
+            ),
+        )
+        session.mount("https://", transport)
+
+        assert session.request("GET", self.READ_URL) is final_response
+        with pytest.raises(exceptions.OperationNotPermitted):
+            session.request("PUT", self.WRITE_URL)
+
+    def test_operation_permission_is_callable_and_can_be_revoked(self):
+        credentials = RecordingCredentials()
+        calls = []
+
+        def permission(method, url):
+            calls.append((method, url))
+            return method == "GET"
+
+        transport = RecordingTransport(
+            [make_response(http_client.UNAUTHORIZED), make_response(http_client.OK)]
+        )
+        session = google.auth.transport.requests.AuthorizedSession(credentials)
+        session.mount("https://", transport)
+
+        session.request("GET", self.READ_URL, operation_permission=permission)
+
+        assert calls == [("GET", self.READ_URL), ("GET", self.READ_URL)]
+
+
 class TestMutualTlsOffloadAdapter(object):
     @mock.patch.object(requests.adapters.HTTPAdapter, "init_poolmanager")
     @mock.patch.object(requests.adapters.HTTPAdapter, "proxy_manager_for")

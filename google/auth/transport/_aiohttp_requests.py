@@ -28,17 +28,21 @@ import aiohttp  # type: ignore
 import urllib3  # type: ignore
 
 from google.auth import _helpers
+from google.auth import authorization
 from google.auth import exceptions
 from google.auth import transport
 from google.auth.aio import _helpers as _helpers_async
 from google.auth.transport import requests
-
 
 _LOGGER = logging.getLogger(__name__)
 
 # Timeout can be re-defined depending on async requirement. Currently made 60s more than
 # sync timeout.
 _DEFAULT_TIMEOUT = 180  # in seconds
+
+# Public aliases for convenience when configuring operation permissions.
+OperationPermission = authorization.OperationPermission
+OperationNotPermitted = exceptions.OperationNotPermitted
 
 
 class _CombinedResponse(transport.Response):
@@ -239,6 +243,10 @@ class AuthorizedSession(aiohttp.ClientSession):
             refreshing credentials. If not passed,
             an instance of :class:`~google.auth.transport.aiohttp_requests.Request`
             is created.
+        operation_permission (Optional[Union[google.auth.authorization.OperationPermission, Callable]]):
+            An optional permission that approves the HTTP method and URL of
+            each application request, checked before every send including
+            retries after a credential refresh.
         kwargs: Additional arguments passed through to the underlying
             ClientSession :meth:`aiohttp.ClientSession` object.
     """
@@ -251,8 +259,12 @@ class AuthorizedSession(aiohttp.ClientSession):
         refresh_timeout=None,
         auth_request=None,
         auto_decompress=False,
+        operation_permission=None,
         **kwargs,
     ):
+        operation_permission = authorization._extract_operation_permission(
+            kwargs, default=operation_permission
+        )
         super(AuthorizedSession, self).__init__(**kwargs)
         self.credentials = credentials
         self._refresh_status_codes = refresh_status_codes
@@ -264,6 +276,7 @@ class AuthorizedSession(aiohttp.ClientSession):
         self._loop = asyncio.get_event_loop()
         self._refresh_lock = asyncio.Lock()
         self._auto_decompress = auto_decompress
+        self._operation_permission = operation_permission
 
     async def request(
         self,
@@ -274,6 +287,7 @@ class AuthorizedSession(aiohttp.ClientSession):
         max_allowed_time=None,
         timeout=_DEFAULT_TIMEOUT,
         auto_decompress=False,
+        operation_permission=authorization._UNSET,
         **kwargs,
     ):
         """Implementation of Authorized Session aiohttp request.
@@ -303,7 +317,25 @@ class AuthorizedSession(aiohttp.ClientSession):
                 itself does not timeout, e.g. if a large file is being
                 transmitted. The timeout error will be raised after such
                 request completes.
+            operation_permission (Optional[Union[google.auth.authorization.OperationPermission, Callable]]):
+                An optional permission for this specific operation. If omitted,
+                the permission passed to the constructor is used. The
+                permission is checked before the request is sent and again
+                before any retry.
         """
+        permission_is_session_default = operation_permission is authorization._UNSET
+        requested_permission = operation_permission
+        if permission_is_session_default:
+            requested_permission = self._operation_permission
+
+        # Check the operation immediately before every send, including the
+        # retry after a credential refresh. The credential's own permission is
+        # a separate floor.
+        authorization.check_operation_permission(
+            getattr(self.credentials, "operation_permission", None), method, url
+        )
+        authorization.check_operation_permission(requested_permission, method, url)
+
         # Headers come in as bytes which isn't expected behavior, the resumable
         # media libraries in some cases expect a str type for the header values,
         # but sometimes the operations return these in bytes types.
@@ -382,6 +414,11 @@ class AuthorizedSession(aiohttp.ClientSession):
 
                 remaining_time = guard.remaining_timeout
 
+                retry_permission = (
+                    authorization._UNSET
+                    if permission_is_session_default
+                    else requested_permission
+                )
                 return await self.request(
                     method,
                     url,
@@ -389,6 +426,7 @@ class AuthorizedSession(aiohttp.ClientSession):
                     headers=headers,
                     max_allowed_time=remaining_time,
                     timeout=timeout,
+                    operation_permission=retry_permission,
                     _credential_refresh_attempt=_credential_refresh_attempt + 1,
                     **kwargs,
                 )

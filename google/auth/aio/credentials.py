@@ -15,8 +15,10 @@
 
 """Interfaces for asynchronous credentials."""
 
+import copy
 
 from google.auth import _helpers
+from google.auth import authorization
 from google.auth import exceptions
 from google.auth._credentials_base import _BaseCredentials
 
@@ -66,11 +68,38 @@ class Credentials(_BaseCredentials):
         """
         raise NotImplementedError("Refresh must be implemented")
 
+    @property
+    def operation_permission(self):
+        """Optional permission checked by :meth:`before_request`."""
+        return getattr(self, "_operation_permission", None)
+
+    @operation_permission.setter
+    def operation_permission(self, value):
+        self._operation_permission = value
+
+    def with_operation_permission(self, operation_permission):
+        """Returns a copy of these credentials with an operation permission.
+
+        Args:
+            operation_permission (Optional[Union[google.auth.authorization.OperationPermission, Callable]]):
+                The permission to approve on :meth:`before_request`.
+
+        Returns:
+            google.auth.aio.credentials.Credentials: A copy with the permission.
+        """
+        credentials = copy.copy(self)
+        credentials.operation_permission = operation_permission
+        return credentials
+
     async def before_request(self, request, method, url, headers):
         """Performs credential-specific before request logic.
 
         Refreshes the credentials if necessary, then calls :meth:`apply` to
         apply the token to the authentication header.
+
+        When the credential has an ``operation_permission`` attribute, it is
+        checked against the supplied method and URL before the token is
+        applied.
 
         Args:
             request (google.auth.aio.transport.Request): The object used to make
@@ -80,6 +109,9 @@ class Credentials(_BaseCredentials):
             url (str): The request's URI or the RPC service's URI.
             headers (Mapping): The request's headers.
         """
+        authorization.check_operation_permission(
+            getattr(self, "operation_permission", None), method, url
+        )
         await self.apply(headers)
 
 

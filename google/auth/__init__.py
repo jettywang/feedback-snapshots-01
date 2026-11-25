@@ -24,12 +24,19 @@ from google.auth._default import (
     load_credentials_from_dict,
     load_credentials_from_file,
 )
-
+from google.auth.authorization import OperationPermission
+from google.auth.exceptions import OperationNotPermitted
 
 __version__ = google_auth_version.__version__
 
 
-__all__ = ["default", "load_credentials_from_file", "load_credentials_from_dict"]
+__all__ = [
+    "default",
+    "load_credentials_from_file",
+    "load_credentials_from_dict",
+    "OperationPermission",
+    "OperationNotPermitted",
+]
 
 
 class Python37DeprecationWarning(DeprecationWarning):  # pragma: NO COVER

@@ -19,6 +19,7 @@ This module provides authentication using the `API key`_.
 """
 
 from google.auth import _helpers
+from google.auth import authorization
 from google.auth import credentials
 from google.auth import exceptions
 
@@ -73,4 +74,7 @@ class Credentials(credentials.Credentials):
             url (str): The request's URI or the RPC service's URI.
             headers (Mapping): The request's headers.
         """
+        authorization.check_operation_permission(
+            getattr(self, "operation_permission", None), method, url
+        )
         self.apply(headers)

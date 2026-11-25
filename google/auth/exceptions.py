@@ -88,6 +88,20 @@ class InvalidOperation(DefaultCredentialsError, ValueError):
     """An exception for invalid operation."""
 
 
+class OperationNotPermitted(InvalidOperation, TransportError, PermissionError):
+    """Used to indicate that an HTTP operation was not approved.
+
+    This is raised before a request is sent when the configured operation
+    permission does not allow the request's method and URL.
+    """
+
+
+# Alias names kept for callers that describe the same condition as a denial.
+OperationNotAllowed = OperationNotPermitted
+OperationDenied = OperationNotPermitted
+PermissionDenied = OperationNotPermitted
+
+
 class InvalidValue(DefaultCredentialsError, ValueError):
     """Used to wrap general ValueError of python."""
 

@@ -18,6 +18,7 @@
 import abc
 import inspect
 
+from google.auth import authorization
 from google.auth import credentials
 
 
@@ -58,6 +59,9 @@ class Credentials(credentials.Credentials, metaclass=abc.ABCMeta):
         # pylint: disable=unused-argument
         # (Subclasses may use these arguments to ascertain information about
         # the http request.)
+        authorization.check_operation_permission(
+            getattr(self, "operation_permission", None), method, url
+        )
 
         if not self.valid:
             if inspect.iscoroutinefunction(self.refresh):

@@ -1363,6 +1363,38 @@ you use a custom `Session`_ object::
 .. _Requests: http://docs.python-requests.org/en/master/
 .. _Session: http://docs.python-requests.org/en/master/user/advanced/#session-objects
 
+Operation permissions
++++++++++++++++++++++
+
+Scopes limit which APIs a credential may call, but sometimes an application
+also needs to approve the concrete operation it is about to perform. Pass an
+:class:`google.auth.authorization.OperationPermission` to restrict requests by
+HTTP method and resource::
+
+    from google.auth.authorization import OperationPermission
+    from google.auth.transport.requests import AuthorizedSession
+
+    permission = OperationPermission(
+        {
+            "GET": [r"https://www.googleapis.com/storage/v1/b/my-bucket/.*"],
+            "PUT": [r"https://www.googleapis.com/storage/v1/b/my-bucket/.*"],
+        }
+    )
+    authed_session = AuthorizedSession(credentials, operation_permission=permission)
+
+The permission may also be attached to the credential itself, so any transport
+that calls :meth:`~google.auth.credentials.Credentials.before_request` checks
+it before refreshing or applying the token::
+
+    scoped_credentials = credentials.with_operation_permission(permission)
+
+The permission is checked before every application request, including requests
+retried after a ``401`` refreshes the credentials. A denied request raises
+:class:`google.auth.exceptions.OperationNotPermitted` without sending anything;
+other requests on the same session continue to refresh and retry normally. A
+plain callable taking ``(method, url)`` may be used instead, and the
+``operation_permission`` argument is also accepted per request.
+
 urllib3
 +++++++
 

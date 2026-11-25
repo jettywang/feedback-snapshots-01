@@ -18,6 +18,8 @@ import pytest  # type: ignore
 
 from google.auth import _credentials_async as credentials
 from google.auth import _helpers
+from google.auth import authorization
+from google.auth import exceptions
 
 
 class CredentialsImpl(credentials.Credentials):
@@ -34,6 +36,36 @@ def test_credentials_constructor():
     assert not credentials.expiry
     assert not credentials.expired
     assert not credentials.valid
+
+
+@pytest.mark.asyncio
+async def test_before_request_allows_approved_operation():
+    creds = CredentialsImpl()
+    creds.operation_permission = authorization.OperationPermission(
+        {"GET": ["https://example.com/items/1"]}
+    )
+    headers = {}
+
+    await creds.before_request(
+        "refreshed-token", "GET", "https://example.com/items/1", headers
+    )
+
+    assert headers["authorization"] == "Bearer refreshed-token"
+
+
+@pytest.mark.asyncio
+async def test_before_request_rejects_unapproved_operation_without_refresh():
+    creds = CredentialsImpl()
+    creds.operation_permission = authorization.OperationPermission(
+        {"GET": ["https://example.com/items/1"]}
+    )
+
+    with pytest.raises(exceptions.OperationNotPermitted):
+        await creds.before_request(
+            "refreshed-token", "PUT", "https://example.com/items/1", {}
+        )
+
+    assert creds.token is None
 
 
 def test_expired_and_valid():

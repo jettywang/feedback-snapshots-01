@@ -20,6 +20,7 @@ from unittest import mock
 import pytest  # type: ignore
 
 from google.auth import _helpers
+from google.auth import authorization
 from google.auth import credentials
 from google.auth import environment_vars
 from google.auth import exceptions
@@ -117,6 +118,97 @@ def test_before_request():
     assert credentials.token == "refreshed-token"
     assert headers["authorization"] == "Bearer refreshed-token"
     assert "x-allowed-locations" not in headers
+
+
+def test_before_request_allows_approved_operation():
+    credentials = CredentialsImpl()
+    credentials.operation_permission = authorization.OperationPermission(
+        {"GET": ["https://example.com/items/1"]}
+    )
+    request = mock.Mock()
+    headers = {}
+
+    credentials.before_request(request, "GET", "https://example.com/items/1", headers)
+
+    assert credentials.token == "refreshed-token"
+    assert headers["authorization"] == "Bearer refreshed-token"
+
+
+def test_before_request_rejects_unapproved_operation_without_refresh():
+    credentials = CredentialsImpl()
+    credentials.operation_permission = authorization.OperationPermission(
+        {"GET": ["https://example.com/items/1"]}
+    )
+    request = mock.Mock()
+    headers = {}
+
+    with pytest.raises(exceptions.OperationNotPermitted):
+        credentials.before_request(
+            request, "PUT", "https://example.com/items/1", headers
+        )
+
+    assert credentials.token is None
+    assert headers == {}
+
+
+def test_with_operation_permission_does_not_restrict_original_credentials():
+    original = CredentialsImpl()
+    scoped = original.with_operation_permission(
+        authorization.OperationPermission({"GET": ["https://example.com/items/1"]})
+    )
+
+    assert original.operation_permission is None
+    assert scoped.operation_permission is not None
+
+    headers = {}
+    scoped.before_request(mock.Mock(), "GET", "https://example.com/items/1", headers)
+    assert headers["authorization"] == "Bearer refreshed-token"
+    assert original.token is None
+
+
+def test_before_request_permission_can_be_a_callable():
+    calls = []
+    credentials = CredentialsImpl()
+    credentials.operation_permission = lambda method, url: calls.append(
+        (method, url)
+    ) or (method == "PUT" and url == "https://example.com/items/1")
+
+    credentials.before_request(mock.Mock(), "PUT", "https://example.com/items/1", {})
+    with pytest.raises(exceptions.OperationNotPermitted):
+        credentials.before_request(
+            mock.Mock(), "DELETE", "https://example.com/items/1", {}
+        )
+
+    assert calls == [
+        ("PUT", "https://example.com/items/1"),
+        ("DELETE", "https://example.com/items/1"),
+    ]
+
+
+def test_with_operation_permission_preserves_unrelated_state():
+    original = CredentialsImpl()
+    original.token = "original-token"
+    scoped = original.with_operation_permission(
+        authorization.OperationPermission({"GET": ["https://example.com/items/1"]})
+    )
+
+    assert scoped.token == "original-token"
+    assert scoped is not original
+    assert original.operation_permission is None
+
+
+def test_clearing_operation_permission_allows_all_operations():
+    credentials = CredentialsImpl()
+    credentials.operation_permission = authorization.OperationPermission(
+        {"GET": ["https://example.com/items/1"]}
+    )
+    del credentials.operation_permission
+
+    headers = {}
+    credentials.before_request(
+        mock.Mock(), "DELETE", "https://example.com/items/1", headers
+    )
+    assert headers["authorization"] == "Bearer refreshed-token"
 
 
 def test_before_request_with_trust_boundary():

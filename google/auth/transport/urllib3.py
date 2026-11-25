@@ -51,6 +51,7 @@ except ImportError as caught_exc:  # pragma: NO COVER
 
 
 from google.auth import _helpers
+from google.auth import authorization
 from google.auth import exceptions
 from google.auth import transport
 from google.auth.transport import _mtls_helper
@@ -62,6 +63,10 @@ else:  # pragma: NO COVER
     RequestMethods = urllib3.request.RequestMethods  # type: ignore
 
 _LOGGER = logging.getLogger(__name__)
+
+# Public aliases for convenience when configuring operation permissions.
+OperationPermission = authorization.OperationPermission
+OperationNotPermitted = exceptions.OperationNotPermitted
 
 
 class _Response(transport.Response):
@@ -276,6 +281,15 @@ class AuthorizedHttp(RequestMethods):  # type: ignore
         default_host (Optional[str]): A host like "pubsub.googleapis.com".
             This is used when a self-signed JWT is created from service
             account credentials.
+        operation_permission (Optional[Union[google.auth.authorization.OperationPermission, Callable]]):
+            An optional permission that approves the HTTP method and URL of
+            each application request. It may be an
+            :class:`~google.auth.authorization.OperationPermission` or a
+            callable taking ``(method, url)`` and returning a truthy value.
+            The permission is checked immediately before every application
+            request, including requests retried after credentials are
+            refreshed. A denied request raises
+            :class:`google.auth.exceptions.OperationNotPermitted`.
     """
 
     def __init__(
@@ -285,7 +299,17 @@ class AuthorizedHttp(RequestMethods):  # type: ignore
         refresh_status_codes=transport.DEFAULT_REFRESH_STATUS_CODES,
         max_refresh_attempts=transport.DEFAULT_MAX_REFRESH_ATTEMPTS,
         default_host=None,
+        operation_permission=None,
+        **kwargs,
     ):
+        operation_permission = authorization._extract_operation_permission(
+            kwargs, default=operation_permission
+        )
+        if kwargs:
+            raise TypeError(
+                "Unexpected keyword arguments: {}".format(", ".join(sorted(kwargs)))
+            )
+
         if http is None:
             self.http = _make_default_http()
             self._has_user_provided_http = False
@@ -297,6 +321,7 @@ class AuthorizedHttp(RequestMethods):  # type: ignore
         self._refresh_status_codes = refresh_status_codes
         self._max_refresh_attempts = max_refresh_attempts
         self._default_host = default_host
+        self._operation_permission = operation_permission
         # Request instance used by internal methods (for example,
         # credentials.refresh).
         self._request = Request(self.http)
@@ -373,8 +398,31 @@ class AuthorizedHttp(RequestMethods):  # type: ignore
 
         return found_cert_key
 
-    def urlopen(self, method, url, body=None, headers=None, **kwargs):
-        """Implementation of urllib3's urlopen."""
+    def urlopen(
+        self,
+        method,
+        url,
+        body=None,
+        headers=None,
+        operation_permission=authorization._UNSET,
+        **kwargs,
+    ):
+        """Implementation of urllib3's urlopen.
+
+        Args:
+            method (str): The HTTP method to use for the request.
+            url (str): The URI to be requested.
+            body (bytes): The payload / body in HTTP request.
+            headers (Mapping[str, str]): Request headers.
+            operation_permission (Optional[Union[google.auth.authorization.OperationPermission, Callable]]):
+                An optional permission for this specific operation. If omitted,
+                the permission passed to the constructor is used. Passing
+                ``None`` explicitly removes the operation restriction for this
+                request. The permission is checked before the request is sent
+                and again before any retry.
+            kwargs: Additional arguments passed through to the underlying
+                urllib3 request method.
+        """
         # pylint: disable=arguments-differ
         # We use kwargs to collect additional args that we don't need to
         # introspect here. However, we do explicitly collect the two
@@ -383,6 +431,22 @@ class AuthorizedHttp(RequestMethods):  # type: ignore
         # Use a kwarg for this instead of an attribute to maintain
         # thread-safety.
         _credential_refresh_attempt = kwargs.pop("_credential_refresh_attempt", 0)
+
+        requested_permission = operation_permission
+        if requested_permission is authorization._UNSET:
+            requested_permission = authorization._extract_operation_permission(
+                kwargs, default=authorization._UNSET
+            )
+        permission_is_session_default = requested_permission is authorization._UNSET
+        if permission_is_session_default:
+            requested_permission = self._operation_permission
+
+        # Check before every send, including the retry after a refresh. The
+        # credential's own permission is a separate floor.
+        authorization.check_operation_permission(
+            getattr(self.credentials, "operation_permission", None), method, url
+        )
+        authorization.check_operation_permission(requested_permission, method, url)
 
         if headers is None:
             headers = self.headers
@@ -457,11 +521,21 @@ class AuthorizedHttp(RequestMethods):  # type: ignore
             self.credentials.refresh(self._request)
 
             # Recurse. Pass in the original headers, not our modified set.
+            # A permission supplied for this operation is bound to it, so
+            # interleaved operations keep their own approval. A permission
+            # inherited from the session is re-read so withdrawing it takes
+            # effect before the retry is sent.
+            retry_permission = (
+                authorization._UNSET
+                if permission_is_session_default
+                else requested_permission
+            )
             return self.urlopen(
                 method,
                 url,
                 body=body,
                 headers=headers,
+                operation_permission=retry_permission,
                 _credential_refresh_attempt=_credential_refresh_attempt + 1,
                 **kwargs,
             )

@@ -23,6 +23,7 @@ Submodules
    :maxdepth: 4
 
    google.auth.app_engine
+   google.auth.authorization
    google.auth.aws
    google.auth.credentials
    google.auth._credentials_async

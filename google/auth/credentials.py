@@ -16,12 +16,14 @@
 """Interfaces for credentials."""
 
 import abc
+import copy
 from enum import Enum
 import logging
 import os
 from typing import List
 
 from google.auth import _helpers, environment_vars
+from google.auth import authorization
 from google.auth import exceptions
 from google.auth import metrics
 from google.auth._credentials_base import _BaseCredentials
@@ -213,6 +215,12 @@ class Credentials(_BaseCredentials):
         Refreshes the credentials if necessary, then calls :meth:`apply` to
         apply the token to the authentication header.
 
+        When the credential has an
+        :attr:`operation_permission`, it is checked against the supplied
+        method and URL before the token is refreshed or applied. A denied
+        operation raises
+        :class:`google.auth.exceptions.OperationNotPermitted`.
+
         Args:
             request (google.auth.transport.Request): The object used to make
                 HTTP requests.
@@ -224,6 +232,7 @@ class Credentials(_BaseCredentials):
         # pylint: disable=unused-argument
         # (Subclasses may use these arguments to ascertain information about
         # the http request.)
+        authorization.check_operation_permission(self.operation_permission, method, url)
         if self._use_non_blocking_refresh:
             self._non_blocking_refresh(request)
         else:
@@ -234,6 +243,46 @@ class Credentials(_BaseCredentials):
 
     def with_non_blocking_refresh(self):
         self._use_non_blocking_refresh = True
+
+    @property
+    def operation_permission(self):
+        """Optional permission checked by :meth:`before_request`.
+
+        The permission approves the HTTP method and URL of each request that
+        uses this credential. It may be an
+        :class:`google.auth.authorization.OperationPermission`, a callable
+        taking ``(method, url)``, or ``None`` (no additional restriction).
+        """
+        return getattr(self, "_operation_permission", None)
+
+    @operation_permission.setter
+    def operation_permission(self, value):
+        self._operation_permission = value
+
+    @operation_permission.deleter
+    def operation_permission(self):
+        try:
+            del self._operation_permission
+        except AttributeError:
+            pass
+
+    def with_operation_permission(self, operation_permission):
+        """Returns a copy of these credentials with an operation permission.
+
+        The returned copy carries independent credential state and can be used
+        for one purpose without restricting other callers holding the original
+        credentials.
+
+        Args:
+            operation_permission (Optional[Union[google.auth.authorization.OperationPermission, Callable]]):
+                The permission to approve on :meth:`before_request`.
+
+        Returns:
+            google.auth.credentials.Credentials: A copy with the permission.
+        """
+        credentials = copy.copy(self)
+        credentials.operation_permission = operation_permission
+        return credentials
 
 
 class CredentialsWithQuotaProject(Credentials):

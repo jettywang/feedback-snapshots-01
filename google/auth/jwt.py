@@ -53,6 +53,7 @@ import urllib
 from google.auth import _cache
 from google.auth import _helpers
 from google.auth import _service_account_info
+from google.auth import authorization
 from google.auth import crypt
 from google.auth import exceptions
 import google.auth.credentials
@@ -854,6 +855,9 @@ class OnDemandCredentials(
         """
         # pylint: disable=unused-argument
         # (pylint doesn't correctly recognize overridden methods.)
+        authorization.check_operation_permission(
+            getattr(self, "operation_permission", None), method, url
+        )
         parts = urllib.parse.urlsplit(url)
         # Strip query string and fragment
         audience = urllib.parse.urlunsplit(

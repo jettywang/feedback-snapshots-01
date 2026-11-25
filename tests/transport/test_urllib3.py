@@ -528,3 +528,71 @@ class TestAuthorizedHttp(object):
 
             # Assert mTLS check logic was SKIPPED (Inner Check was False)
             assert not mock_helper.check_parameters_for_unauthorized_response.called
+
+
+class RecordingHttpStub(HttpStub):
+    """Records each application request and the authorization header sent."""
+
+    def urlopen(self, method, url, body=None, headers=None, **kwargs):
+        result = super(RecordingHttpStub, self).urlopen(
+            method, url, body=body, headers=headers, **kwargs
+        )
+        return result
+
+
+class RecordingCredentials(CredentialsStub):
+    def __init__(self, token="token"):
+        super(RecordingCredentials, self).__init__(token=token)
+        self.refreshes = []
+
+    def refresh(self, request):
+        self.refreshes.append(request)
+        super(RecordingCredentials, self).refresh(request)
+
+
+class TestOperationPermission(object):
+    URL = "https://example.com/items/1"
+
+    @staticmethod
+    def permission(methods):
+        return google.auth.authorization.OperationPermission(methods)
+
+    def test_rejects_mismatched_method(self):
+        credentials = RecordingCredentials()
+        http = HttpStub([])
+        authed_http = google.auth.transport.urllib3.AuthorizedHttp(
+            credentials, http=http
+        )
+
+        with pytest.raises(exceptions.OperationNotPermitted):
+            authed_http.urlopen(
+                "PUT",
+                self.URL,
+                operation_permission=self.permission(
+                    {"GET": [r"https://example\.com/items/1"]}
+                ),
+            )
+
+        assert http.requests == []
+        assert credentials.refreshes == []
+
+    def test_retry_keeps_permission_and_refreshes(self):
+        credentials = RecordingCredentials()
+        final_response = ResponseStub(status=http_client.OK)
+        http = HttpStub([ResponseStub(status=http_client.UNAUTHORIZED), final_response])
+        authed_http = google.auth.transport.urllib3.AuthorizedHttp(
+            credentials, http=http
+        )
+
+        result = authed_http.urlopen(
+            "PUT",
+            self.URL,
+            operation_permission=self.permission(
+                {"PUT": [r"https://example\.com/items/1"]}
+            ),
+        )
+
+        assert result is final_response
+        assert len(credentials.refreshes) == 1
+        assert [method for method, _, _, _, _ in http.requests] == ["PUT", "PUT"]
+        assert http.requests[1][3]["authorization"] == "token1"

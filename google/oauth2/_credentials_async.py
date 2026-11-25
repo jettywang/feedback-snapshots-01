@@ -33,6 +33,7 @@ Authorization Code grant flow.
 
 from google.auth import _credentials_async as credentials
 from google.auth import _helpers
+from google.auth import authorization
 from google.auth import exceptions
 from google.oauth2 import _reauth_async as reauth
 from google.oauth2 import credentials as oauth2_credentials
@@ -98,6 +99,9 @@ class Credentials(oauth2_credentials.Credentials):
 
     @_helpers.copy_docstring(credentials.Credentials)
     async def before_request(self, request, method, url, headers):
+        authorization.check_operation_permission(
+            getattr(self, "operation_permission", None), method, url
+        )
         if not self.valid:
             await self.refresh(request)
         self.apply(headers)

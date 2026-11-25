@@ -39,6 +39,7 @@ import warnings
 
 from google.auth import _cloud_sdk
 from google.auth import _helpers
+from google.auth import authorization
 from google.auth import credentials
 from google.auth import exceptions
 from google.auth import metrics
@@ -613,5 +614,8 @@ class UserAccessTokenCredentials(credentials.CredentialsWithQuotaProject):
 
     @_helpers.copy_docstring(credentials.Credentials)
     def before_request(self, request, method, url, headers):
+        authorization.check_operation_permission(
+            getattr(self, "operation_permission", None), method, url
+        )
         self.refresh(request)
         self.apply(headers)

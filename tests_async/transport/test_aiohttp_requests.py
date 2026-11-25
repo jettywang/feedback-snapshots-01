@@ -20,6 +20,8 @@ import pytest  # type: ignore
 from tests_async.transport import async_compliance
 
 import google.auth._credentials_async
+from google.auth import exceptions
+import google.auth.authorization
 from google.auth.transport import _aiohttp_requests as aiohttp_requests
 import google.auth.transport._mtls_helper
 
@@ -255,3 +257,43 @@ class TestAuthorizedSession(object):
             assert response.status == 200
 
             await authed_session.close()
+
+
+class TestOperationPermission(object):
+    URL = "https://example.com/items/1"
+
+    @pytest.mark.asyncio
+    async def test_credential_permission_is_checked(self):
+        credentials = mock.Mock(wraps=CredentialsStub())
+        credentials.operation_permission = (
+            google.auth.authorization.OperationPermission({"GET": [self.URL]})
+        )
+        session = aiohttp_requests.AuthorizedSession(credentials, auto_decompress=False)
+
+        with pytest.raises(exceptions.OperationNotPermitted):
+            await session.request("PUT", self.URL)
+
+        credentials.before_request.assert_not_called()
+        await session.close()
+
+    @pytest.mark.asyncio
+    async def test_mismatched_operation_is_rejected_before_auth(self):
+        credentials = mock.Mock(wraps=CredentialsStub())
+        with aioresponses() as mocked:
+            mocked.get(self.URL, status=200, body="ok")
+            session = aiohttp_requests.AuthorizedSession(
+                credentials, auto_decompress=False
+            )
+
+            with pytest.raises(exceptions.OperationNotPermitted):
+                await session.request(
+                    "DELETE",
+                    self.URL,
+                    operation_permission=google.auth.authorization.OperationPermission(
+                        {"GET": [self.URL]}
+                    ),
+                )
+
+            credentials.before_request.assert_not_called()
+            credentials.refresh.assert_not_called()
+            await session.close()

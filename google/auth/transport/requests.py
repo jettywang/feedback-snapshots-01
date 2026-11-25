@@ -36,6 +36,7 @@ from requests.packages.urllib3.util.ssl_ import (  # type: ignore
 )  # pylint: disable=ungrouped-imports
 
 from google.auth import _helpers
+from google.auth import authorization
 from google.auth import exceptions
 from google.auth import transport
 from google.auth.transport import _mtls_helper
@@ -45,6 +46,13 @@ from google.oauth2 import service_account
 _LOGGER = logging.getLogger(__name__)
 
 _DEFAULT_TIMEOUT = 120  # in seconds
+
+_UNSET = authorization._UNSET
+
+# Public aliases for convenience when configuring operation permissions.
+OperationPermission = authorization.OperationPermission
+OperationApproval = authorization.OperationPermission
+OperationNotPermitted = exceptions.OperationNotPermitted
 
 
 class _Response(transport.Response):
@@ -380,6 +388,16 @@ class AuthorizedSession(requests.Session):
         default_host (Optional[str]): A host like "pubsub.googleapis.com".
             This is used when a self-signed JWT is created from service
             account credentials.
+        operation_permission (Optional[Union[google.auth.authorization.OperationPermission, Callable]]):
+            An optional permission that approves the HTTP method and URL of
+            each application request. It may be an
+            :class:`~google.auth.authorization.OperationPermission` or a
+            callable taking ``(method, url)`` and returning a truthy value.
+            The permission is checked immediately before every application
+            request, including requests retried after credentials are
+            refreshed. A denied request raises
+            :class:`google.auth.exceptions.OperationNotPermitted`; credential
+            refreshes for other requests are unaffected.
     """
 
     def __init__(
@@ -390,14 +408,24 @@ class AuthorizedSession(requests.Session):
         refresh_timeout=None,
         auth_request=None,
         default_host=None,
+        operation_permission=None,
+        **kwargs
     ):
         super(AuthorizedSession, self).__init__()
+        operation_permission = authorization._extract_operation_permission(
+            kwargs, default=operation_permission
+        )
+        if kwargs:
+            raise TypeError(
+                "Unexpected keyword arguments: {}".format(", ".join(sorted(kwargs)))
+            )
         self.credentials = credentials
         self._refresh_status_codes = refresh_status_codes
         self._max_refresh_attempts = max_refresh_attempts
         self._refresh_timeout = refresh_timeout
         self._is_mtls = False
         self._default_host = default_host
+        self._operation_permission = operation_permission
 
         if auth_request is None:
             self._auth_request_session = requests.Session()
@@ -424,6 +452,15 @@ class AuthorizedSession(requests.Session):
             self.credentials._create_self_signed_jwt(
                 "https://{}/".format(self._default_host) if self._default_host else None
             )
+
+    @property
+    def operation_permission(self):
+        """Optional permission applied to requests that do not specify one."""
+        return self._operation_permission
+
+    @operation_permission.setter
+    def operation_permission(self, value):
+        self._operation_permission = value
 
     def configure_mtls_channel(self, client_cert_callback=None):
         """Configure the client certificate and key for SSL connection.
@@ -484,6 +521,7 @@ class AuthorizedSession(requests.Session):
         headers=None,
         max_allowed_time=None,
         timeout=_DEFAULT_TIMEOUT,
+        operation_permission=_UNSET,
         **kwargs
     ):
         """Implementation of Requests' request.
@@ -506,9 +544,18 @@ class AuthorizedSession(requests.Session):
                 itself does not timeout, e.g. if a large file is being
                 transmitted. The timeout error will be raised after such
                 request completes.
+            operation_permission (Optional[Union[google.auth.authorization.OperationPermission, Callable]]):
+                An optional permission for this specific operation. If omitted,
+                the permission passed to the constructor is used. Passing
+                ``None`` explicitly removes the operation restriction for this
+                request. The permission is checked before the request is sent
+                and again before any retry, so a permission withdrawn between
+                attempts prevents only the denied request from being resent.
         Raises:
             google.auth.exceptions.MutualTLSChannelError: If mutual TLS
                 channel creation fails for any reason.
+            google.auth.exceptions.OperationNotPermitted: If the operation is
+                not approved by the active permission.
             ValueError: If the client certificate is invalid.
         """
         # pylint: disable=arguments-differ
@@ -519,6 +566,26 @@ class AuthorizedSession(requests.Session):
         # Use a kwarg for this instead of an attribute to maintain
         # thread-safety.
         _credential_refresh_attempt = kwargs.pop("_credential_refresh_attempt", 0)
+
+        requested_permission = operation_permission
+        if requested_permission is _UNSET:
+            requested_permission = authorization._extract_operation_permission(
+                kwargs, default=_UNSET
+            )
+        permission_is_session_default = requested_permission is _UNSET
+        if permission_is_session_default:
+            requested_permission = self._operation_permission
+
+        # Check the operation immediately before every send, including the
+        # retry after a credential refresh. Keeping the permission as a local
+        # argument means interleaved requests on the same session cannot
+        # overwrite each other's approval. The credential's own permission is
+        # a separate floor and is checked even when a credential subclass
+        # overrides before_request.
+        authorization.check_operation_permission(
+            getattr(self.credentials, "operation_permission", None), method, url
+        )
+        authorization.check_operation_permission(requested_permission, method, url)
 
         # Make a copy of the headers. They will be modified by the credentials
         # and we want to pass the original headers if we recurse.
@@ -610,6 +677,13 @@ class AuthorizedSession(requests.Session):
 
             # Recurse. Pass in the original headers, not our modified set, but
             # do pass the adjusted max allowed time (i.e. the remaining total time).
+            # A permission supplied for this operation is bound to it, so
+            # interleaved operations keep their own approval. A permission
+            # inherited from the session is re-read so withdrawing it takes
+            # effect before the retry is sent.
+            retry_permission = (
+                _UNSET if permission_is_session_default else requested_permission
+            )
             return self.request(
                 method,
                 url,
@@ -617,6 +691,7 @@ class AuthorizedSession(requests.Session):
                 headers=headers,
                 max_allowed_time=remaining_time,
                 timeout=timeout,
+                operation_permission=retry_permission,
                 _credential_refresh_attempt=_credential_refresh_attempt + 1,
                 **kwargs
             )
