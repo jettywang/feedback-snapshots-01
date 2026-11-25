@@ -8,6 +8,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## Unreleased
 
+***Added:***
+
+- A safe metadata reading mode (`hatchling.metadata.safe.SafeMetadataReader`) that inspects project metadata without executing unapproved plugins. Static fields are always reported; explicitly approved metadata hooks may fill dynamic fields, while fields that require an unapproved plugin or a formal build environment remain `dynamic-pending` and are never treated as confirmed. The report records hook callback counts and can re-verify the values embedded in a built artifact.
+
 ## [1.33.0](https://github.com/pypa/hatch/releases/tag/hatchling-v1.33.0) - 2026-10-27 ## {: #hatchling-v1.33.0 }
 
 ***Added:***
