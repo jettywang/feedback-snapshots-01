@@ -45,6 +45,36 @@ Net::FTP.open('example.com') do |ftp|
 end
 ```
 
+### Rotating client certificates
+
+A client certificate is pinned to each control connection.  Rotate it while
+transfers are running; the in-flight transfer keeps the generation it started
+with, and the next connection uses the newly approved material.
+
+```ruby
+ftp = Net::FTP.new(
+  "example.com",
+  ssl: { ca_file: "ca.pem" },
+  client_credential: { certificate: File.read("client.pem"),
+                       private_key: File.read("client.key") },
+  certificate_id: "client-2026-11",
+)
+
+receipt = ftp.update_client_credential(
+  certificate: File.read("client-2027-01.pem"),
+  private_key: File.read("client-2027-01.key"),
+  identifier: "client-2027-01",
+)
+receipt.state                  # => :pending
+ftp.credential_generations     # safe identifiers for both generations
+ftp.in_flight_transfers        # transfers still on the old generation
+ftp.cancel_credential_rotation(receipt)  # optional, before it is consumed
+```
+
+Receipts, audit records and transfer records contain certificate identifiers
+only.  Private keys stay in the local credential objects and are never
+serialized into those records.
+
 ## Development
 
 After checking out the repo, run `bin/setup` to install dependencies. Then, run `rake test` to run the tests. You can also run `bin/console` for an interactive prompt that will allow you to experiment.

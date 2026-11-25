@@ -33,6 +33,10 @@ module Net
   class FTPPermError < FTPError; end
   class FTPProtoError < FTPError; end
   class FTPConnectionError < FTPError; end
+  # Raised when a client credential is invalid or a rotation cannot be
+  # applied.
+  class CredentialError < FTPError; end
+  class CredentialRotationError < CredentialError; end
   # :startdoc:
 
   #
@@ -88,6 +92,11 @@ module Net
       include SSL
     end
 
+    # Credential errors are also reachable as Net::FTP::CredentialError and
+    # Net::FTP::CredentialRotationError.
+    CredentialError = Net::CredentialError
+    CredentialRotationError = Net::CredentialRotationError
+
     # :stopdoc:
     VERSION = "0.3.9"
     FTP_PORT = 21
@@ -95,6 +104,259 @@ module Net
     DEFAULT_BLOCKSIZE = BufferedIO::BUFSIZE
     @@default_passive = true
     # :startdoc:
+
+    # A client certificate and its private key, together with a stable
+    # identifier that can safely appear in logs and receipts.
+    #
+    # The private key is intentionally left out of #to_h, #inspect and
+    # #to_s so that credential identifiers can be recorded without
+    # disclosing key material.
+    class ClientCredential
+      attr_reader :certificate, :private_key, :identifier, :subject,
+                  :issuer, :not_before, :not_after
+
+      alias certificate_id identifier
+      alias id identifier
+
+      def self.coerce(value, identifier: nil)
+        return value if value.is_a?(self)
+
+        hash = value.respond_to?(:to_hash) ? value.to_hash : nil
+        unless hash
+          raise ArgumentError, "client credential must be a Net::FTP::ClientCredential or a Hash"
+        end
+
+        certificate = hash[:certificate] || hash[:cert] || hash[:client_certificate]
+        private_key = hash[:private_key] || hash[:key] || hash[:client_key]
+        id = identifier || hash[:identifier] || hash[:certificate_id] || hash[:id]
+        new(certificate, private_key, identifier: id)
+      end
+
+      def initialize(certificate, private_key, identifier: nil)
+        @certificate = coerce_certificate(certificate)
+        @private_key = coerce_private_key(private_key)
+        unless @certificate.check_private_key(@private_key)
+          raise ArgumentError, "client certificate does not match the private key"
+        end
+
+        @identifier = (identifier || default_identifier).to_s
+        if @identifier.empty?
+          raise ArgumentError, "client certificate identifier must not be empty"
+        end
+
+        @subject = @certificate.subject.to_s
+        @issuer = @certificate.issuer.to_s
+        @not_before = @certificate.not_before
+        @not_after = @certificate.not_after
+      end
+
+      # A safe representation that may be placed in receipts.
+      def to_h
+        {
+          certificate_id: @identifier,
+          subject: @subject,
+          issuer: @issuer,
+          not_before: @not_before && @not_before.utc.iso8601,
+          not_after: @not_after && @not_after.utc.iso8601,
+        }
+      end
+
+      def to_s
+        @identifier
+      end
+
+      def inspect
+        "#<#{self.class} id=#{@identifier.inspect} subject=#{@subject.inspect} " \
+          "private_key=[REDACTED]>"
+      end
+
+      def ==(other)
+        other.is_a?(ClientCredential) && other.identifier == @identifier
+      end
+      alias eql? ==
+
+      def hash
+        @identifier.hash
+      end
+
+      private
+
+      def default_identifier
+        "sha256:" + OpenSSL::Digest::SHA256.hexdigest(@certificate.to_der)
+      end
+
+      def coerce_certificate(value)
+        certificate = case value
+                      when OpenSSL::X509::Certificate
+                        value
+                      when String
+                        OpenSSL::X509::Certificate.new(value)
+                      else
+                        if value.respond_to?(:read)
+                          OpenSSL::X509::Certificate.new(value.read)
+                        end
+                      end
+        unless certificate
+          raise ArgumentError, "client certificate is required"
+        end
+        certificate
+      end
+
+      def coerce_private_key(value)
+        private_key = case value
+                      when OpenSSL::PKey::PKey
+                        value
+                      when String
+                        OpenSSL::PKey.read(value)
+                      else
+                        if value.respond_to?(:read)
+                          OpenSSL::PKey.read(value.read)
+                        end
+                      end
+        unless private_key
+          raise ArgumentError, "client private key is required"
+        end
+        private_key
+      end
+    end
+
+    # A read-only receipt for a client credential rotation.  It contains
+    # certificate identifiers only; private keys never appear here.
+    class CredentialRotationReceipt
+      attr_reader :rotation_id, :certificate_id, :previous_certificate_id,
+                  :requested_at
+
+      def initialize(owner, rotation_id, certificate_id,
+                     previous_certificate_id, requested_at)
+        @owner = owner
+        @rotation_id = rotation_id
+        @certificate_id = certificate_id
+        @previous_certificate_id = previous_certificate_id
+        @requested_at = requested_at
+      end
+
+      # Read-only by design: a receipt is a record of what was approved, not
+      # a handle that can mutate credential state.
+
+      def state
+        @owner.rotation_state(@rotation_id)
+      end
+
+      def pending?
+        state == :pending
+      end
+
+      def active?
+        state == :active
+      end
+
+      def cancelled?
+        state == :cancelled
+      end
+
+      def [](key)
+        to_h[key]
+      end
+
+      def to_h
+        record = @owner.rotation_record(@rotation_id)
+        {
+          rotation_id: @rotation_id,
+          certificate_id: @certificate_id,
+          previous_certificate_id: @previous_certificate_id,
+          state: record ? record[:state] : :unknown,
+          requested_at: @requested_at,
+          activated_at: record && record[:activated_at],
+          cancelled_at: record && record[:cancelled_at],
+        }
+      end
+
+      def inspect
+        "#<#{self.class} #{to_h.inspect}>"
+      end
+    end
+
+    # Default transport used for TCP connections and TLS handshakes.
+    #
+    # A transport may be supplied through the +transport:+ option; it must
+    # respond to #open(host, port, timeout:) and
+    # #start_tls(io, context, host:, timeout:, session:, credential:).
+    # This makes connection ordering and certificate selection observable in
+    # tests without opening sockets.
+    class Transport
+      def open(host, port, timeout: nil)
+        Socket.tcp(host, port)
+      end
+
+      def start_tls(io, context, host:, timeout: nil, session: nil, credential: nil)
+        ssl_sock = OpenSSL::SSL::SSLSocket.new(io, context)
+        ssl_sock.sync_close = true
+        ssl_sock.hostname = host if host && ssl_sock.respond_to?(:hostname=)
+        ssl_sock.session = session if session
+        ssl_handshake(ssl_sock, timeout)
+        ssl_sock
+      end
+
+      private
+
+      def ssl_handshake(ssl_sock, timeout)
+        if timeout
+          while true
+            raise Net::OpenTimeout if timeout <= 0
+            start = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+            case ssl_sock.connect_nonblock(exception: false)
+            when :wait_readable
+              ssl_sock.to_io.wait_readable(timeout)
+            when :wait_writable
+              ssl_sock.to_io.wait_writable(timeout)
+            else
+              break
+            end
+            timeout -= Process.clock_gettime(Process::CLOCK_MONOTONIC) - start
+          end
+        else
+          ssl_sock.connect
+        end
+      end
+    end
+
+    # An in-flight transfer's safe summary.  The private key is never
+    # included; only the certificate identifier used by the connection.
+    class TransferRecord
+      attr_reader :id, :certificate_id, :rotation_id, :command, :started_at,
+                  :status
+
+      def initialize(id, certificate_id, rotation_id, command)
+        @id = id
+        @certificate_id = certificate_id
+        @rotation_id = rotation_id
+        @command = command
+        @started_at = Time.now.utc
+        @finished_at = nil
+        @status = :running
+      end
+
+      def finish!(status)
+        @status = status
+        @finished_at = Time.now.utc
+      end
+
+      def to_h
+        {
+          transfer_id: @id,
+          certificate_id: @certificate_id,
+          rotation_id: @rotation_id,
+          command: @command,
+          status: @status,
+          started_at: @started_at,
+          finished_at: @finished_at,
+        }
+      end
+
+      def inspect
+        "#<#{self.class} #{to_h.inspect}>"
+      end
+    end
 
     # When +true+, transfers are performed in binary mode.  Default: +true+.
     attr_reader :binary
@@ -142,6 +404,40 @@ module Net
     def read_timeout=(sec)
       @sock.read_timeout = sec
       @read_timeout = sec
+    end
+
+    # Returns the credential currently pinned to the control connection.
+    # The private key remains local to the credential object.
+    #
+    # This is a read-only view.  Use #client_credential= to stage a
+    # certified update; assigning a credential directly would bypass
+    # receipts and the in-flight transfer check.
+    def client_credential
+      credential_synchronize do
+        @connection_credential || @active_credential
+      end
+    end
+
+    # Stages a client credential rotation and returns the
+    # CredentialRotationReceipt.
+    #
+    # This is the tracked update entry point.  In the assignment form
+    # <tt>ftp.client_credential = cred</tt>, Ruby evaluates the expression to
+    # +cred+; call this method directly when the receipt is needed.  The
+    # change takes effect on the next control connection, never on a transfer
+    # already in flight.
+    #
+    # +credential+ may be a Net::FTP::ClientCredential or a Hash with
+    # :certificate and :private_key.  +identifier+ overrides the certificate
+    # identifier recorded in the receipt and audit log.
+    def update_client_credential(credential = nil, identifier: nil, **material)
+      rotate_client_credential(credential, identifier: identifier, **material)
+    end
+
+    # Assignment form of #update_client_credential.  See
+    # #rotate_client_credential for the staged update semantics.
+    def client_credential=(credential, identifier: nil, **material)
+      update_client_credential(credential, identifier: identifier, **material)
     end
 
     # The server's welcome message.
@@ -202,6 +498,18 @@ module Net
     #             extensions need to be installed.  If +options+[:ssl] is a
     #             hash, it's passed to OpenSSL::SSL::SSLContext#set_params
     #             as parameters.
+    # client_credential::  A Net::FTP::ClientCredential (or a Hash with
+    #                      :certificate and :private_key) used as the TLS
+    #                      client certificate.  See #client_credential=.
+    # client_cert::  Client certificate (PEM String, OpenSSL certificate
+    #                object, or IO).  Requires +client_key+.
+    # client_key::   Client private key (PEM String, OpenSSL key object, or
+    #                IO).  Requires +client_cert+.
+    # certificate_id::  Identifier to record in receipts for the credential
+    #                   supplied through +client_credential+ or
+    #                   +client_cert+/+client_key+.  Defaults to a SHA-256
+    #                   digest of the certificate DER.
+    # transport::  Socket/TLS transport.  See Net::FTP::Transport.
     # private_data_connection::  If true, TLS is used for data connections.
     #                            Default: +true+ when +options+[:ssl] is true.
     # implicit_ftps::  If true, TLS is established on initial connection.
@@ -239,11 +547,37 @@ module Net
         options[:account] = acct
       end
       @host = nil
+      @transport = options[:transport] || Transport.new
+      @generations = []
+      @rotations = {}
+      @rotation_sequence = 0
+      @transfer_sequence = 0
+      @in_flight = {}
+      @transfer_records = []
+      @credential_log = []
+      @credential_monitor = Monitor.new
+      if (options[:client_credential] || options[:client_cert]) &&
+         !defined?(OpenSSL::SSL)
+        raise "SSL extension not installed"
+      end
+      @initial_credential = build_initial_credential(options)
+      if @initial_credential && !options[:ssl]
+        raise ArgumentError,
+              "client credentials require ssl to be enabled"
+      end
+      @active_credential = @initial_credential
+      @active_rotation_id = nil
+      @connection_credential = nil
+      @connection_rotation_id = nil
+      @generation_contexts = {}
+      @ssl_session_credential_id = nil
+      @generations << @initial_credential if @initial_credential
       if options[:ssl]
         unless defined?(OpenSSL::SSL)
           raise "SSL extension not installed"
         end
         ssl_params = options[:ssl] == true ? {} : options[:ssl]
+        @ssl_params = ssl_params
         @ssl_context = SSLContext.new
         @ssl_context.set_params(ssl_params)
         if defined?(VerifyCallbackProc)
@@ -348,6 +682,231 @@ module Net
     end
     private :with_binary
 
+    # Returns the certificate identifier that will be used for the next
+    # control connection.  May be +nil+ when no client credential is
+    # configured.  While a rotation is pending the old identifier stays
+    # active until a connection actually consumes the rotation.
+    def active_certificate_id
+      credential_synchronize do
+        @active_credential && @active_credential.identifier
+      end
+    end
+
+    # Returns the certificate identifier pinned to the current control
+    # connection, or +nil+ when not connected.
+    def connection_certificate_id
+      credential_synchronize do
+        @connection_credential && @connection_credential.identifier
+      end
+    end
+    alias client_certificate_id connection_certificate_id
+
+    # Returns the rotation id whose credential is pinned to the current
+    # control connection, or +nil+ when the connection uses the initial
+    # credential.
+    def connection_rotation_id
+      credential_synchronize { @connection_rotation_id }
+    end
+
+    # Returns the safe (key-free) state of every credential generation the
+    # worker is currently holding.  During a rotation this includes both the
+    # old and the newly approved generation.  Private keys stay in the
+    # in-memory ClientCredential objects and are never exposed here.
+    def credential_generations
+      credential_synchronize do
+        @generations.map { |generation|
+          generation.to_h.merge(in_use: generation.identifier ==
+                                  (@connection_credential || @active_credential)&.identifier)
+        }
+      end
+    end
+
+    # Returns the safe records of transfers currently in flight.
+    def in_flight_transfers
+      credential_synchronize do
+        @in_flight.values.map(&:to_h)
+      end
+    end
+
+    # Returns safe records of all transfers observed, oldest first.  Each
+    # record includes the certificate identifier actually pinned for that
+    # transfer.
+    def transfer_records
+      credential_synchronize do
+        @transfer_records.map(&:to_h)
+      end
+    end
+
+    # Returns the audit records of credential selection.  Entries contain
+    # certificate identifiers only; private keys never appear here.
+    def credential_audit_log
+      credential_synchronize do
+        @credential_log.map(&:dup)
+      end
+    end
+
+    # Returns the latest control-connection handshake record, or +nil+ when
+    # no handshake has happened yet.  The record contains the certificate
+    # identifier, subject, rotation id and purpose only.
+    def last_handshake
+      credential_synchronize do
+        entry = @credential_log.reverse_each.find { |e|
+          e[:event] == :handshake && e[:purpose] == :control
+        }
+        entry && entry.dup
+      end
+    end
+
+    # Returns receipts for rotations that are still pending.
+    def pending_credential_rotations
+      credential_synchronize do
+        @rotations.values.select { |r| r[:state] == :pending }.map { |r|
+          receipt_for(r[:id])
+        }
+      end
+    end
+
+    # Returns the receipt for +rotation+, which may be a
+    # CredentialRotationReceipt or a rotation id String.
+    def credential_rotation_receipt(rotation)
+      credential_synchronize do
+        rotation_id = rotation.is_a?(CredentialRotationReceipt) ?
+          rotation.rotation_id : rotation.to_s
+        unless @rotations.key?(rotation_id)
+          raise CredentialRotationError, "unknown rotation: #{rotation_id}"
+        end
+        receipt_for(rotation_id)
+      end
+    end
+
+    # Rotates to a new, approved client certificate.
+    #
+    # +credential+ may be a ClientCredential, or a Hash with
+    # :certificate/:private_key (and optional :identifier), or an
+    # OpenSSL certificate passed together with +private_key+.
+    #
+    # The returned CredentialRotationReceipt records the new certificate
+    # identifier, the previous one and the rotation state.  The private key
+    # is retained locally and is never copied into the receipt.
+    #
+    # The rotation is pending and is consumed by the next control
+    # connection.  Transfers already in flight keep the generation they were
+    # started with and finish normally; a control connection opened while a
+    # transfer is still running keeps the old identity and leaves the
+    # rotation pending, so a paused transfer is never re-keyed silently.
+    #
+    # Raises CredentialRotationError if a rotation is already pending, if the
+    # identifier is already active, or if a credential is supplied without
+    # TLS being enabled.
+    def rotate_client_credential(credential = nil, private_key = nil,
+                                 identifier: nil, **material)
+      credential_synchronize do
+        unless @ssl_context
+          raise CredentialRotationError,
+                "client credentials require Net::FTP.new(:ssl => true)"
+        end
+
+        if material[:certificate] || material[:cert]
+          material[:private_key] ||= private_key
+          credential = material
+          identifier ||= material[:identifier] || material[:certificate_id]
+        end
+
+        new_credential =
+          if credential.nil?
+            raise ArgumentError, "client credential is required"
+          elsif credential.is_a?(ClientCredential)
+            credential
+          elsif private_key
+            ClientCredential.new(credential, private_key,
+                                 identifier: identifier)
+          else
+            ClientCredential.coerce(credential, identifier: identifier)
+          end
+
+        if (pending = pending_rotation)
+          raise CredentialRotationError,
+                "a credential rotation is already pending " \
+                "(#{pending[:certificate_id]})"
+        end
+        if @active_credential &&
+           @active_credential.identifier == new_credential.identifier
+          raise CredentialRotationError,
+                "certificate #{new_credential.identifier} is already active"
+        end
+
+        @rotation_sequence += 1
+        rotation_id = format("rot-%04d", @rotation_sequence)
+        record = {
+          id: rotation_id,
+          certificate_id: new_credential.identifier,
+          previous_certificate_id: @active_credential&.identifier,
+          state: :pending,
+          requested_at: Time.now.utc,
+          activated_at: nil,
+          cancelled_at: nil,
+          credential: new_credential,
+        }
+        @rotations[rotation_id] = record
+        unless @generations.any? { |g| g.identifier == new_credential.identifier }
+          @generations << new_credential
+        end
+        audit(:rotation_requested,
+              certificate_id: new_credential.identifier,
+              previous_certificate_id: record[:previous_certificate_id],
+              rotation_id: rotation_id)
+        receipt_for(rotation_id)
+      end
+    end
+
+    # Cancels a pending rotation.  The approved replacement is discarded and
+    # the next connection keeps the current identity.
+    #
+    # Cancelling an already-activated rotation raises
+    # CredentialRotationError, because a connection has already used it.  A
+    # cancelled rotation is idempotent.
+    def cancel_credential_rotation(rotation)
+      credential_synchronize do
+        rotation_id = rotation.is_a?(CredentialRotationReceipt) ?
+          rotation.rotation_id : rotation.to_s
+        record = @rotations[rotation_id]
+        unless record
+          raise CredentialRotationError, "unknown rotation: #{rotation_id}"
+        end
+
+        case record[:state]
+        when :pending
+          record[:state] = :cancelled
+          record[:cancelled_at] = Time.now.utc
+          record.delete(:credential)
+          prune_generations
+          audit(:rotation_cancelled,
+                certificate_id: record[:certificate_id],
+                rotation_id: rotation_id)
+          receipt_for(rotation_id)
+        when :cancelled
+          receipt_for(rotation_id)
+        else
+          raise CredentialRotationError,
+                "rotation #{rotation_id} is already #{record[:state]}"
+        end
+      end
+    end
+
+    def rotation_state(rotation_id) # :nodoc:
+      credential_synchronize do
+        record = @rotations[rotation_id]
+        record ? record[:state] : :unknown
+      end
+    end
+
+    def rotation_record(rotation_id) # :nodoc:
+      credential_synchronize do
+        record = @rotations[rotation_id]
+        record && record.reject { |k, _| k == :credential }
+      end
+    end
+
     # Obsolete
     def return_code # :nodoc:
       warn("Net::FTP#return_code is obsolete and do nothing", uplevel: 1)
@@ -370,28 +929,243 @@ module Net
           @passive = true
           SOCKSSocket.open(host, port)
         else
-          Socket.tcp(host, port)
+          @transport.open(host, port, timeout: @open_timeout)
         end
       }
     end
     private :open_socket
 
-    def start_tls_session(sock)
-      ssl_sock = SSLSocket.new(sock, @ssl_context)
-      ssl_sock.sync_close = true
-      ssl_sock.hostname = @host if ssl_sock.respond_to? :hostname=
-      if @ssl_session &&
-          Process.clock_gettime(Process::CLOCK_REALTIME) < @ssl_session.time.to_f + @ssl_session.timeout
-        # ProFTPD returns 425 for data connections if session is not reused.
-        ssl_sock.session = @ssl_session
-      end
-      ssl_socket_connect(ssl_sock, @ssl_handshake_timeout || @open_timeout)
-      if @ssl_context.verify_mode != VERIFY_NONE
+    # Returns the client credential pinned to +generation+, or nil.
+    #
+    # A generation is pinned per control connection; data connections and
+    # transfers started while that control connection is in use reuse the
+    # same generation, even if a rotation was requested in between.
+    def start_tls_session(sock, generation = nil, purpose: :control) # :nodoc:
+      credential = generation || connection_credential
+      context = ssl_context_for(credential)
+      session = reusable_ssl_session(credential)
+      ssl_sock = @transport.start_tls(sock, context,
+                                      host: @host,
+                                      timeout: @ssl_handshake_timeout || @open_timeout,
+                                      session: session,
+                                      credential: credential)
+      if context.verify_mode != VERIFY_NONE
         ssl_sock.post_connection_check(@host)
       end
+      log_handshake(credential, purpose)
       return ssl_sock
     end
     private :start_tls_session
+
+    # Returns a context configured for +credential+.
+    #
+    # The base context built from the +ssl:+ option is left untouched; a
+    # generation-specific copy is created lazily so that two generations can
+    # coexist on the same worker.
+    def ssl_context_for(credential)
+      return @ssl_context unless credential
+      context = @generation_contexts[credential.identifier]
+      unless context
+        context = SSLContext.new
+        context.set_params(@ssl_params)
+        if defined?(VerifyCallbackProc)
+          context.verify_callback = VerifyCallbackProc
+        end
+        unless RUBY_ENGINE == "jruby"
+          context.session_cache_mode =
+            OpenSSL::SSL::SSLContext::SESSION_CACHE_CLIENT |
+            OpenSSL::SSL::SSLContext::SESSION_CACHE_NO_INTERNAL_STORE
+          context.session_new_cb = proc {|sock, sess| @ssl_session = sess }
+        end
+        context.cert = credential.certificate
+        context.key = credential.private_key
+        @generation_contexts[credential.identifier] = context
+      end
+      context
+    end
+
+    # Returns the cached TLS session only when it belongs to +credential+.
+    # A different generation must not resume another identity's session.
+    def reusable_ssl_session(credential)
+      return nil unless @ssl_session
+      session_id = credential && credential.identifier
+      return nil if @ssl_session_credential_id != session_id
+      if Process.clock_gettime(Process::CLOCK_REALTIME) <
+         @ssl_session.time.to_f + @ssl_session.timeout
+        @ssl_session
+      end
+    end
+    private :reusable_ssl_session
+
+    def connection_credential # :nodoc:
+      @connection_credential
+    end
+    private :connection_credential
+
+    # Guards credential generations, rotation receipts and the in-flight
+    # transfer registry.  It is deliberately separate from the FTP monitor
+    # so that a rotation can be requested and inspected while a transfer is
+    # running under #synchronize.
+    def credential_synchronize(&block)
+      @credential_monitor.synchronize(&block)
+    end
+    private :credential_synchronize
+
+    def pending_rotation
+      @rotations.values.find { |r| r[:state] == :pending }
+    end
+    private :pending_rotation
+
+    def receipt_for(rotation_id) # :nodoc:
+      record = @rotations[rotation_id]
+      CredentialRotationReceipt.new(self, record[:id],
+                                    record[:certificate_id],
+                                    record[:previous_certificate_id],
+                                    record[:requested_at])
+    end
+    private :receipt_for
+
+    def build_initial_credential(options)
+      raw = options[:client_credential]
+      if raw.nil? && (options[:client_cert] || options[:client_key])
+        unless options[:client_cert] && options[:client_key]
+          raise ArgumentError,
+                "client_cert and client_key must be given together"
+        end
+        raw = {
+          certificate: options[:client_cert],
+          private_key: options[:client_key],
+        }
+      end
+      return nil if raw.nil?
+
+      ClientCredential.coerce(raw, identifier: options[:certificate_id])
+    end
+    private :build_initial_credential
+
+    def audit(event, details = {})
+      @credential_log << { event: event, at: Time.now.utc }.merge(details)
+    end
+    private :audit
+
+    def log_handshake(credential, purpose = :control)
+      return unless credential
+      credential_synchronize do
+        audit(:handshake,
+              certificate_id: credential.identifier,
+              subject: credential.subject,
+              rotation_id: @connection_rotation_id,
+              purpose: purpose)
+        # Record which identity owns the cached session.  Data connections
+        # handshake under the same generation, so this stays consistent.
+        @ssl_session_credential_id = credential.identifier
+      end
+    end
+    private :log_handshake
+
+    # Selects the credential for a new control connection without changing
+    # any state.  A rotation becomes active only in #commit_rotation, after
+    # the connection and its handshake have succeeded.
+    def select_credential_for_connect
+      credential_synchronize do
+        pending = pending_rotation
+        return [@active_credential, nil, @active_rotation_id] unless pending
+
+        if !@in_flight.empty?
+          # A transfer is parked on the current identity.  Do not switch it
+          # silently; keep the old generation and leave the rotation pending.
+          audit(:rotation_deferred,
+                certificate_id: pending[:certificate_id],
+                rotation_id: pending[:id],
+                in_flight_transfers: @in_flight.size)
+          return [@active_credential, nil, @active_rotation_id]
+        end
+        [pending[:credential], pending, pending[:id]]
+      end
+    end
+    private :select_credential_for_connect
+
+    # Activates +rotation+ after a successful connect.
+    def commit_rotation(rotation)
+      credential_synchronize do
+        rotation[:state] = :active
+        rotation[:activated_at] = Time.now.utc
+        @active_credential = rotation[:credential]
+        rotation.delete(:credential)
+        @active_rotation_id = rotation[:id]
+        @ssl_session = nil
+        @ssl_session_credential_id = nil
+        audit(:rotation_activated,
+              certificate_id: rotation[:certificate_id],
+              previous_certificate_id: rotation[:previous_certificate_id],
+              rotation_id: rotation[:id])
+        prune_generations
+      end
+    end
+    private :commit_rotation
+
+    # Registers a transfer so a rotation can tell whether the old identity
+    # is still in use.  The certificate identifier is pinned from the
+    # control connection, never from the currently active generation.
+    def register_transfer(cmd)
+      credential = connection_credential
+      credential_synchronize do
+        @transfer_sequence += 1
+        record = TransferRecord.new(
+          format("xfer-%04d", @transfer_sequence),
+          credential && credential.identifier,
+          @connection_rotation_id,
+          cmd,
+        )
+        @in_flight[record.id] = record
+        @transfer_records << record
+        audit(:transfer_started,
+              transfer_id: record.id,
+              certificate_id: record.certificate_id,
+              rotation_id: record.rotation_id,
+              command: cmd)
+        record
+      end
+    end
+    private :register_transfer
+
+    def finish_transfer(record, status)
+      credential_synchronize do
+        record.finish!(status)
+        @in_flight.delete(record.id)
+        audit(:transfer_finished,
+              transfer_id: record.id,
+              certificate_id: record.certificate_id,
+              rotation_id: record.rotation_id,
+              status: status)
+      end
+    end
+    private :finish_transfer
+
+    def with_transfer_record(cmd)
+      record = register_transfer(cmd)
+      begin
+        result = yield(record)
+        finish_transfer(record, :completed)
+        result
+      rescue Exception
+        finish_transfer(record, :aborted)
+        raise
+      end
+    end
+    private :with_transfer_record
+
+    # During a pending rotation the worker holds two generations: the active
+    # one and the approved replacement.  Anything else is released.
+    def prune_generations
+      pending = pending_rotation
+      keep = [@active_credential&.identifier]
+      keep << pending[:certificate_id] if pending
+      keep.compact!
+      @generations.select! { |g| keep.include?(g.identifier) }
+      @generation_contexts.keep_if { |id, _| keep.include?(id) }
+    end
+    private :prune_generations
 
     #
     # Establishes an FTP connection to host, optionally overriding the default
@@ -403,24 +1177,41 @@ module Net
       debug_print "connect: #{host}:#{port}"
       synchronize do
         @host = host
-        @bare_sock = open_socket(host, port)
-        if @ssl_context
-          begin
-            unless @implicit_ftps
-              set_socket(BufferedSocket.new(@bare_sock, read_timeout: @read_timeout))
-              voidcmd("AUTH TLS")
+        # Pin the credential generation for this control connection before
+        # any handshake happens.  A pending rotation is consumed only once
+        # the connection (including its TLS handshake) succeeds; until then
+        # the old generation stays active so a failed connect does not
+        # silently switch identity.
+        credential, rotation, rotation_id = select_credential_for_connect
+        previous = [@active_credential, @active_rotation_id,
+                    @connection_credential, @connection_rotation_id]
+        @connection_credential = credential
+        @connection_rotation_id = rotation_id
+        begin
+          @bare_sock = open_socket(host, port)
+          if @ssl_context
+            begin
+              unless @implicit_ftps
+                set_socket(BufferedSocket.new(@bare_sock, read_timeout: @read_timeout))
+                voidcmd("AUTH TLS")
+              end
+              set_socket(BufferedSSLSocket.new(start_tls_session(@bare_sock), read_timeout: @read_timeout), @implicit_ftps)
+              if @private_data_connection
+                voidcmd("PBSZ 0")
+                voidcmd("PROT P")
+              end
+            rescue OpenSSL::SSL::SSLError, OpenTimeout
+              @sock.close
+              raise
             end
-            set_socket(BufferedSSLSocket.new(start_tls_session(@bare_sock), read_timeout: @read_timeout), @implicit_ftps)
-            if @private_data_connection
-              voidcmd("PBSZ 0")
-              voidcmd("PROT P")
-            end
-          rescue OpenSSL::SSL::SSLError, OpenTimeout
-            @sock.close
-            raise
+          else
+            set_socket(BufferedSocket.new(@bare_sock, read_timeout: @read_timeout))
           end
-        else
-          set_socket(BufferedSocket.new(@bare_sock, read_timeout: @read_timeout))
+          commit_rotation(rotation) if rotation
+        rescue Exception
+          @active_credential, @active_rotation_id,
+            @connection_credential, @connection_rotation_id = previous
+          raise
         end
       end
     end
@@ -616,7 +1407,7 @@ module Net
         end
       end
       if @private_data_connection
-        return BufferedSSLSocket.new(start_tls_session(conn),
+        return BufferedSSLSocket.new(start_tls_session(conn, purpose: :data),
                                      read_timeout: @read_timeout)
       else
         return BufferedSocket.new(conn, read_timeout: @read_timeout)
@@ -665,19 +1456,21 @@ module Net
     #
     def retrbinary(cmd, blocksize, rest_offset = nil) # :yield: data
       synchronize do
-        with_binary(true) do
-          begin
-            conn = transfercmd(cmd, rest_offset)
-            while data = conn.read(blocksize)
-              yield(data)
+        with_transfer_record(cmd) do
+          with_binary(true) do
+            begin
+              conn = transfercmd(cmd, rest_offset)
+              while data = conn.read(blocksize)
+                yield(data)
+              end
+              conn.shutdown(Socket::SHUT_WR) rescue nil
+              conn.read_timeout = 1
+              conn.read rescue nil
+            ensure
+              conn.close if conn
             end
-            conn.shutdown(Socket::SHUT_WR) rescue nil
-            conn.read_timeout = 1
-            conn.read rescue nil
-          ensure
-            conn.close if conn
+            voidresp
           end
-          voidresp
         end
       end
     end
@@ -690,19 +1483,21 @@ module Net
     #
     def retrlines(cmd) # :yield: line
       synchronize do
-        with_binary(false) do
-          begin
-            conn = transfercmd(cmd)
-            while line = conn.gets
-              yield(line.sub(/\r?\n\z/, ""), !line.match(/\n\z/).nil?)
+        with_transfer_record(cmd) do
+          with_binary(false) do
+            begin
+              conn = transfercmd(cmd)
+              while line = conn.gets
+                yield(line.sub(/\r?\n\z/, ""), !line.match(/\n\z/).nil?)
+              end
+              conn.shutdown(Socket::SHUT_WR) rescue nil
+              conn.read_timeout = 1
+              conn.read rescue nil
+            ensure
+              conn.close if conn
             end
-            conn.shutdown(Socket::SHUT_WR) rescue nil
-            conn.read_timeout = 1
-            conn.read rescue nil
-          ensure
-            conn.close if conn
+            voidresp
           end
-          voidresp
         end
       end
     end
@@ -718,20 +1513,22 @@ module Net
         file.seek(rest_offset, IO::SEEK_SET)
       end
       synchronize do
-        with_binary(true) do
-          begin
-            conn = transfercmd(cmd)
-            while buf = file.read(blocksize)
-              conn.write(buf)
-              yield(buf) if block_given?
+        with_transfer_record(cmd) do
+          with_binary(true) do
+            begin
+              conn = transfercmd(cmd)
+              while buf = file.read(blocksize)
+                conn.write(buf)
+                yield(buf) if block_given?
+              end
+              conn.shutdown(Socket::SHUT_WR) rescue nil
+              conn.read_timeout = 1
+              conn.read rescue nil
+            ensure
+              conn.close if conn
             end
-            conn.shutdown(Socket::SHUT_WR) rescue nil
-            conn.read_timeout = 1
-            conn.read rescue nil
-          ensure
-            conn.close if conn
+            voidresp
           end
-          voidresp
         end
       end
     rescue Errno::EPIPE
@@ -751,23 +1548,25 @@ module Net
     #
     def storlines(cmd, file) # :yield: line
       synchronize do
-        with_binary(false) do
-          begin
-            conn = transfercmd(cmd)
-            while buf = file.gets
-              if buf[-2, 2] != CRLF
-                buf = buf.chomp + CRLF
+        with_transfer_record(cmd) do
+          with_binary(false) do
+            begin
+              conn = transfercmd(cmd)
+              while buf = file.gets
+                if buf[-2, 2] != CRLF
+                  buf = buf.chomp + CRLF
+                end
+                conn.write(buf)
+                yield(buf) if block_given?
               end
-              conn.write(buf)
-              yield(buf) if block_given?
+              conn.shutdown(Socket::SHUT_WR) rescue nil
+              conn.read_timeout = 1
+              conn.read rescue nil
+            ensure
+              conn.close if conn
             end
-            conn.shutdown(Socket::SHUT_WR) rescue nil
-            conn.read_timeout = 1
-            conn.read rescue nil
-          ensure
-            conn.close if conn
+            getresp # The response might be important when connected to a mainframe
           end
-          getresp # The response might be important when connected to a mainframe
         end
       end
     rescue Errno::EPIPE
@@ -1405,6 +2204,11 @@ module Net
           self.read_timeout = orig
         end
       end
+      credential_synchronize do
+        @connection_credential = nil
+        @connection_rotation_id = nil
+      end
+      nil
     end
 
     #
