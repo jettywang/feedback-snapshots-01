@@ -25,7 +25,8 @@ from hatch.cli.shell import shell
 from hatch.cli.status import status
 from hatch.cli.test import test
 from hatch.cli.version import version
-from hatch.config.constants import AppEnvVars, ConfigEnvVars
+from hatch.config.constants import AppEnvVars, ConfigEnvVars, ExecutionEnvVars
+from hatch.execution import ExecutionPolicy
 from hatch.project.core import Project
 from hatch.utils.ci import running_in_ci
 from hatch.utils.fs import Path
@@ -77,6 +78,26 @@ from hatch.utils.fs import Path
     ),
 )
 @click.option(
+    "--execution-policy",
+    envvar=ExecutionEnvVars.POLICY,
+    help=(
+        "Opt in to the runtime execution convention, allowing only the listed stages: "
+        "`prebuild` (create environments and install their declared dependencies) or `execute` "
+        "(also run project commands and executable plugin callbacks, each still requiring an "
+        "approval) [env var: `HATCH_EXECUTION_POLICY`]"
+    ),
+)
+@click.option(
+    "--approve",
+    "approvals",
+    multiple=True,
+    envvar=ExecutionEnvVars.APPROVAL,
+    help=(
+        "Approve an action fingerprint shown when execution is denied, or `*` to approve all "
+        "execution for this run [env var: `HATCH_EXECUTION_APPROVAL`]"
+    ),
+)
+@click.option(
     "--data-dir",
     envvar=ConfigEnvVars.DATA,
     help="The path to a custom directory used to persist data [env var: `HATCH_DATA_DIR`]",
@@ -102,6 +123,8 @@ def hatch(
     quiet,
     color,
     interactive,
+    execution_policy,
+    approvals,
     data_dir,
     cache_dir,
     config_file,
@@ -124,7 +147,23 @@ def hatch(
     if interactive is None and running_in_ci():
         interactive = False
 
-    app = Application(ctx.exit, verbosity=verbose - quiet, enable_color=color, interactive=interactive)
+    try:
+        policy = ExecutionPolicy.from_values(execution_policy, approvals)
+    except ValueError as e:
+        click.echo(str(e), err=True)
+        ctx.exit(1)
+
+    app = Application(
+        ctx.exit,
+        verbosity=verbose - quiet,
+        enable_color=color,
+        interactive=interactive,
+        execution_policy=policy,
+    )
+    # Flush the execution journal on every exit path, including aborts, so automation has a
+    # complete comparison record of what was and was not allowed to run.
+    ctx.call_on_close(app.finalize_execution)
+
     app.env_active = os.environ.get(AppEnvVars.ENV_ACTIVE)
     if (
         app.env_active

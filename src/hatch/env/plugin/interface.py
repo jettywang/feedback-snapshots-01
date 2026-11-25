@@ -80,6 +80,11 @@ class EnvironmentInterface(ABC):
 
         self.additional_dependencies = []
 
+        # When the optional execution convention withholds the execute stage, the project's
+        # own install (which runs its build code) must not happen during provisioning. This
+        # lets the environment still be created with only its declared dependencies.
+        self._skip_local_install = False
+
     @property
     def matrix_variables(self):
         return self.__matrix_variables
@@ -389,17 +394,40 @@ class EnvironmentInterface(ABC):
         """
         return tuple(str(dependency) for dependency in self.project_dependencies_complex)
 
+    @property
+    def skip_local_install(self) -> bool:
+        """
+        Whether the project's own install should be omitted during provisioning.
+
+        This is set by the execution convention when the ``execute`` stage is withheld, so that
+        an environment can still be prebuilt from its declared dependencies without running the
+        project's build code. Setting it invalidates the cached dependency views.
+        """
+        return self._skip_local_install
+
+    @skip_local_install.setter
+    def skip_local_install(self, value: bool) -> None:
+        self._skip_local_install = bool(value)
+        for attr in (
+            "local_dependencies_complex",
+            "dependencies_complex",
+            "dependencies",
+            "all_dependencies_complex",
+            "all_dependencies",
+        ):
+            vars(self).pop(attr, None)
+
     @cached_property
     def local_dependencies_complex(self) -> tuple[Dependency, ...]:
         """Editable install entries for the root project and workspace members (file:// URLs)."""
         from hatch.dep.core import Dependency
 
         local_dependencies_complex = []
-        if not self.skip_install:
+        if not self.skip_install and not self.skip_local_install:
             local_dependencies_complex.append(
                 Dependency(f"{self.metadata.name} @ {self.root.as_uri()}", editable=self.dev_mode)
             )
-        if self.workspace.members:
+        if not self.skip_local_install and self.workspace.members:
             local_dependencies_complex.extend(
                 Dependency(f"{member.project.metadata.name} @ {member.project.location.as_uri()}", editable=True)
                 for member in self.workspace.members

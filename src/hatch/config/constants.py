@@ -39,3 +39,13 @@ class PythonEnvVars:
 
 class VersionEnvVars:
     VALIDATE_BUMP = "HATCH_VERSION_VALIDATE_BUMP"
+
+
+class ExecutionEnvVars:
+    # The opt-in runtime execution convention. Only an exact ``1``/``true`` enables it so that
+    # an inherited or empty value can never silently widen permissions.
+    POLICY = "HATCH_EXECUTION_POLICY"
+    # A one-shot token minted once the user has approved a specific pending action.
+    APPROVAL = "HATCH_EXECUTION_APPROVAL"
+    # Optional path to write a JSON journal of every attempted action, for comparison records.
+    JOURNAL = "HATCH_EXECUTION_JOURNAL"

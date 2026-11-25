@@ -6,6 +6,7 @@ from contextlib import contextmanager
 from functools import cached_property
 from typing import TYPE_CHECKING, Any, cast
 
+from hatch.execution import EXECUTE, PREBUILD, PROVISION, PROJECT_COMMAND, ExecutionAction, ExecutionGate
 from hatch.project.env import EnvironmentMetadata
 from hatch.utils.fs import Path
 from hatch.utils.runner import ExecutionContext
@@ -192,43 +193,112 @@ class Project:
                 environment.remove()
             raise
 
+    def _execution_gate(self) -> ExecutionGate | None:
+        """
+        The active gate, or ``None`` when the execution convention is disabled.
+
+        Tests and non-CLI callers may construct a project without an execution gate. Returning
+        ``None`` for a disabled policy keeps the original provisioning code path, and therefore
+        its output and behavior, byte for byte.
+        """
+        gate = getattr(self.app, "execution_gate", None)
+        if isinstance(gate, ExecutionGate) and gate.policy.enabled:
+            return gate
+
+        return None
+
     # Ensure that this method is clearly written since it is
     # used for documenting the life cycle of environments.
-    def prepare_environment(self, environment: EnvironmentInterface, *, keep_env: bool):
+    def prepare_environment(
+        self,
+        environment: EnvironmentInterface,
+        *,
+        keep_env: bool,
+        gate: ExecutionGate | None = None,
+    ):
+        """
+        Provision an environment and make its dependencies current.
+
+        When an execution gate is supplied, the two stages of the optional runtime convention
+        are honored: creating the environment and installing its declared dependencies is the
+        ``prebuild`` stage, while installing the project and running the environment's
+        pre/post-install commands execute project code and belong to the ``execute`` stage.
+        """
+        if gate is None:
+            gate = self._execution_gate()
+
+        def run_provision(label: str, callback):
+            if gate is None:
+                callback()
+                return
+
+            gate.provision(
+                ExecutionAction(PREBUILD, PROVISION, label, environment=environment.name)
+            )
+            callback()
+
+        def run_step(label: str, callback, *, source: str) -> bool:
+            """
+            Run an executable provisioning step and report whether it ran.
+
+            Once the execute stage is granted and approved this runs normally. Before then it is
+            deferred rather than aborting, so an environment can still be prebuilt for its
+            declared dependencies.
+            """
+            if gate is None:
+                callback()
+                return True
+
+            action = ExecutionAction(EXECUTE, PROJECT_COMMAND, label, environment=environment.name, source=source)
+            if gate.request(action, defer=True):
+                callback()
+                gate.mark_executed(action)
+                return True
+
+            return False
+
         if not environment.exists():
             with self.managed_environment(environment, keep_env=keep_env):
                 self.env_metadata.reset(environment)
 
                 with environment.app_status_creation():
-                    environment.create()
+                    run_provision("create-environment", environment.create)
 
                 if not environment.skip_install:
+                    # Pre-install commands execute project-declared shell commands, so they
+                    # require the execute stage even though they run during provisioning.
                     if environment.pre_install_commands:
                         with environment.app_status_pre_installation():
-                            self.app.run_shell_commands(
-                                ExecutionContext(
-                                    environment,
-                                    shell_commands=environment.pre_install_commands,
-                                    source="pre-install",
-                                    show_code_on_error=True,
-                                )
+                            self._run_environment_commands(
+                                environment,
+                                environment.pre_install_commands,
+                                source="pre-install",
+                                gate=gate,
                             )
 
                     with environment.app_status_project_installation():
-                        if environment.dev_mode:
-                            environment.install_project_dev_mode()
-                        else:
-                            environment.install_project()
+
+                        def install_project():
+                            if environment.dev_mode:
+                                environment.install_project_dev_mode()
+                            else:
+                                environment.install_project()
+
+                        # Installing the project runs project build code.
+                        installed = run_step("install-project", install_project, source="install")
+                        if gate is not None and not installed:
+                            # The project install is deferred, so the dependency synchronization
+                            # below must not install the local project (which would run its
+                            # build code anyway). Only the declared dependencies are installed.
+                            environment.skip_local_install = True
 
                     if environment.post_install_commands:
                         with environment.app_status_post_installation():
-                            self.app.run_shell_commands(
-                                ExecutionContext(
-                                    environment,
-                                    shell_commands=environment.post_install_commands,
-                                    source="post-install",
-                                    show_code_on_error=True,
-                                )
+                            self._run_environment_commands(
+                                environment,
+                                environment.post_install_commands,
+                                source="post-install",
+                                gate=gate,
                             )
 
         with environment.app_status_dependency_state_check():
@@ -255,6 +325,32 @@ class Project:
 
             self.env_metadata.update_dependency_hash(environment, new_dep_hash)
 
+    def _run_environment_commands(
+        self,
+        environment: EnvironmentInterface,
+        commands: tuple[str, ...],
+        *,
+        source: str,
+        gate: ExecutionGate | None,
+    ) -> None:
+        """
+        Run environment pre/post-install commands under the execution convention.
+
+        When the convention is active these commands run during provisioning, so any that are
+        not yet approved are skipped instead of aborting. Each command is gated individually
+        by the shared runner, which keeps the decision and journal consistent with commands run
+        through `hatch run`.
+        """
+        self.app.run_shell_commands(
+            ExecutionContext(
+                environment,
+                shell_commands=commands,
+                source=source,
+                show_code_on_error=True,
+                skip_unapproved=gate is not None,
+            )
+        )
+
     def prepare_build_environment(self, *, targets: list[str] | None = None, keep_env: bool = False) -> None:
         from hatch.project.constants import BUILD_BACKEND, BuildEnvVars
         from hatch.utils.structures import EnvVars
@@ -271,7 +367,7 @@ class Project:
                 except Exception as e:  # noqa: BLE001
                     self.app.abort(f"Environment `{self.build_env.name}` is incompatible: {e}")
 
-            self.prepare_environment(self.build_env, keep_env=keep_env)
+            self.prepare_environment(self.build_env, keep_env=keep_env, gate=self._execution_gate())
 
             additional_dependencies: list[str] = []
             with self.app.status("Inspecting build dependencies"):

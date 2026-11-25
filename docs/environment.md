@@ -61,6 +61,10 @@ hatch run python -c "import sys;print(sys.executable)"
 !!! tip
     Be sure to check out how to define [scripts](config/environment/overview.md#scripts) for your project.
 
+## Automated execution
+
+Environments are often prepared by an automated service that should not run arbitrary project code. Hatch's optional [runtime execution convention](how-to/environment/execution-policy.md) splits preparation into a **prebuild** stage (create the environment and install its declared dependencies) and an **execute** stage (install the project, run its commands and scripts, and invoke executable plugin callbacks). It is disabled by default; opt in with the `HATCH_EXECUTION_POLICY` environment variable and approve individual actions with `HATCH_EXECUTION_APPROVAL`.
+
 ## Dependencies
 
 Hatch ensures that environments are always compatible with the currently defined [project dependencies](config/metadata.md#dependencies) (if [installed](config/environment/overview.md#skip-install) and in [dev mode](config/environment/overview.md#dev-mode)) and [environment dependencies](config/environment/overview.md#dependencies).

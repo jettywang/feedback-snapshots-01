@@ -70,7 +70,7 @@ def version(app: Application, *, desired_version: str | None, force: bool):
             app.ensure_environment_plugin_dependencies()
             app.project.prepare_build_environment()
 
-            context = ExecutionContext(app.project.build_env)
+            context = ExecutionContext(app.project.build_env, source="version")
             command = ["python", "-u", "-m", "hatchling", "version"]
             if desired_version:
                 command.append(desired_version)

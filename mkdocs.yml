@@ -137,6 +137,7 @@ nav:
       - Dependency resolution: how-to/environment/dependency-resolution.md
       - Lockfiles: how-to/environment/lockfiles.md
       - Workspace: how-to/environment/workspace.md
+      - Gate execution: how-to/environment/execution-policy.md
     - Static analysis:
       - Customize behavior: how-to/static-analysis/behavior.md
     - Python:

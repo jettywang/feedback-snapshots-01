@@ -38,7 +38,7 @@ def create(app: Application, env_name: str):
 
             app.abort(f"Environment `{env}` is incompatible: {e}")
 
-        app.project.prepare_environment(environment, keep_env=bool(os.environ.get(AppEnvVars.KEEP_ENV)))
+        app.prepare_environment(environment, keep_env=bool(os.environ.get(AppEnvVars.KEEP_ENV)))
 
     if incompatible:
         num_incompatible = len(incompatible)

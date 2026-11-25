@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, cast
 
 from hatch.cli.terminal import Terminal
 from hatch.config.user import ConfigFile, RootConfig
+from hatch.execution import ExecutionGate, ExecutionPolicy
 from hatch.project.core import Project
 from hatch.utils.fs import Path
 from hatch.utils.platform import Platform
@@ -21,7 +22,7 @@ if TYPE_CHECKING:
 
 
 class Application(Terminal):
-    def __init__(self, exit_func, *args, **kwargs):
+    def __init__(self, exit_func, *args, execution_policy: ExecutionPolicy | None = None, **kwargs):
         super().__init__(*args, **kwargs)
         self.platform = Platform(self.output)
         self.__exit_func = exit_func
@@ -29,6 +30,10 @@ class Application(Terminal):
         self.config_file = ConfigFile()
         self.quiet = self.verbosity < 0
         self.verbose = self.verbosity > 0
+
+        # The optional runtime execution convention. When disabled (the default) nothing changes.
+        self.execution_policy = execution_policy if execution_policy is not None else ExecutionPolicy()
+        self.execution_gate = ExecutionGate(self.execution_policy)
 
         # Lazily set these as we acquire more knowledge about the environment
         self.data_dir = cast(Path, None)
@@ -49,7 +54,14 @@ class Application(Terminal):
         return self.project.get_environment(env_name)
 
     def prepare_environment(self, environment: EnvironmentInterface, *, keep_env: bool = False):
-        self.project.prepare_environment(environment, keep_env=keep_env)
+        gate = self.execution_gate if self.execution_gate.policy.enabled else None
+        self.project.prepare_environment(environment, keep_env=keep_env, gate=gate)
+
+    def finalize_execution(self) -> None:
+        """Persist the execution journal, if one was requested."""
+        gate = getattr(self, "execution_gate", None)
+        if gate is not None:
+            gate.write_journal()
 
     def run_shell_commands(self, context: ExecutionContext) -> None:
         with context.env.command_context():
@@ -70,6 +82,21 @@ class Application(Terminal):
                     continue_on_error = True
                     command = command[2:]
 
+                # The same identity is used regardless of the working directory or how many
+                # times this command is attempted, so retries follow one decision.
+                action = context.execution_action(command)
+                if not self.execution_gate.request(action, defer=context.skip_unapproved):
+                    if context.skip_unapproved:
+                        # Skipped rather than treated as an error, so provisioning can continue.
+                        continue
+
+                    self.display_error(self.execution_gate.decide(action).message)
+                    if continue_on_error:
+                        first_error_code = first_error_code or 1
+                        continue
+
+                    self.abort(code=1)
+
                 # Ignore SIGINT in the parent process while the child command runs so that
                 # only the child handles Ctrl-C.  The terminal sends SIGINT to the entire
                 # foreground process group; without this the parent raises KeyboardInterrupt
@@ -82,12 +109,20 @@ class Application(Terminal):
                 original_sigint = signal.getsignal(signal.SIGINT)
                 try:
                     signal.signal(signal.SIGINT, lambda *_: None)
-                    process = context.env.run_shell_command(command)
+                    try:
+                        process = context.env.run_shell_command(command)
+                    except BaseException:
+                        # A raised error (e.g. a transient spawn failure) is not an approval
+                        # decision. Record the failure so a retry is governed by the same
+                        # decision and may run the exact approved action again.
+                        self.execution_gate.mark_failed(action)
+                        raise
                 finally:
                     # Restore the original handler in finally so the parent stays
                     # responsive to Ctrl-C even if the child raises or is cancelled.
                     # Don't hoist this out of the finally block.
                     signal.signal(signal.SIGINT, original_sigint)
+                self.execution_gate.mark_executed(action)
                 sys.stdout.flush()
                 sys.stderr.flush()
                 if process.returncode:

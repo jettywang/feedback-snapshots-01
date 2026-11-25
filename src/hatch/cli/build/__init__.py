@@ -202,7 +202,9 @@ def _build_project(
                 if clean_only:
                     command.append("--clean-only")
 
-                context = ExecutionContext(project.build_env)
+                # The build backend runs project build hooks (plugin callbacks), which are
+                # distinct from the project's own commands under the execution convention.
+                context = ExecutionContext(project.build_env, source="build")
                 context.add_shell_command(command)
                 context.env_vars.update(env_vars)
                 app.execute_context(context)

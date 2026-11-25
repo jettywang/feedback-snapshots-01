@@ -38,7 +38,7 @@ class BuildFrontend:
             script_context.local_path.write_text(script)
             script_context.sync_env()
 
-            context = ExecutionContext(self.__env)
+            context = ExecutionContext(self.__env, source="build")
             context.add_shell_command(["python", "-u", script_context.env_path])
             self.__env.app.execute_context(context)
             output_context.sync_local()
@@ -62,7 +62,7 @@ class BuildFrontend:
             script_context.local_path.write_text(script)
             script_context.sync_env()
 
-            context = ExecutionContext(self.__env)
+            context = ExecutionContext(self.__env, source="build")
             context.add_shell_command(["python", "-u", script_context.env_path])
             self.__env.app.execute_context(context)
             output_context.sync_local()
@@ -88,7 +88,7 @@ class BuildFrontend:
             script_context.local_path.write_text(script)
             script_context.sync_env()
 
-            context = ExecutionContext(self.__env)
+            context = ExecutionContext(self.__env, source="build")
             context.add_shell_command(["python", "-u", script_context.env_path])
             self.__env.app.execute_context(context)
             output_context.sync_local()
@@ -112,7 +112,7 @@ class BuildFrontend:
             script_context.local_path.write_text(script)
             script_context.sync_env()
 
-            context = ExecutionContext(self.__env)
+            context = ExecutionContext(self.__env, source="build")
             context.add_shell_command(["python", "-u", script_context.env_path])
             self.__env.app.execute_context(context)
             output_context.sync_local()
@@ -148,7 +148,7 @@ class HatchBuildFrontend:
             script_context.local_path.write_text(script)
             script_context.sync_env()
 
-            context = ExecutionContext(self.__env)
+            context = ExecutionContext(self.__env, source="build")
             context.add_shell_command(["python", "-u", script_context.env_path])
             self.__env.app.execute_context(context)
             output_context.sync_local()
@@ -170,7 +170,7 @@ class HatchBuildFrontend:
             script_context.local_path.write_text(script)
             script_context.sync_env()
 
-            context = ExecutionContext(self.__env)
+            context = ExecutionContext(self.__env, source="build")
             context.add_shell_command(["python", "-u", script_context.env_path])
             self.__env.app.execute_context(context)
             output_context.sync_local()

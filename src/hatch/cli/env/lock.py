@@ -141,7 +141,7 @@ def run_lock_workflow(
         try:
             if check:
                 with app.status(f"Checking lockfile for: {display_name}"):
-                    app.project.prepare_environment(environment, keep_env=bool(os.environ.get(AppEnvVars.KEEP_ENV)))
+                    app.prepare_environment(environment, keep_env=bool(os.environ.get(AppEnvVars.KEEP_ENV)))
                     if not lockfile_in_sync(
                         environment,
                         output_path,
@@ -156,7 +156,7 @@ def run_lock_workflow(
                 continue
 
             with app.status(f"Locking environment: {display_name}"):
-                app.project.prepare_environment(environment, keep_env=bool(os.environ.get(AppEnvVars.KEEP_ENV)))
+                app.prepare_environment(environment, keep_env=bool(os.environ.get(AppEnvVars.KEEP_ENV)))
                 generate_lockfile(
                     environment,
                     output_path,

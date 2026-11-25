@@ -8,6 +8,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## Unreleased
 
+***Added:***
+
+- Add an optional runtime execution convention for automated services. Opt in with `HATCH_EXECUTION_POLICY` (or `--execution-policy`) to allow only the `prebuild` stage (create environments and install their declared dependencies) and/or the `execute` stage (install the project, run its commands and scripts, and invoke executable plugin callbacks). Executable actions require a matching `HATCH_EXECUTION_APPROVAL` fingerprint (or `*`), project commands and plugin callbacks are approved independently, decisions are stable across working directory changes and retries, and `HATCH_EXECUTION_JOURNAL` writes a JSON comparison record of what ran. The convention is disabled by default.
+
 ## [1.18.2](https://github.com/pypa/hatch/releases/tag/hatch-v1.18.2) - 2026-10-27 ## {: #hatch-v1.18.2 }
 
 ***Changed:***
