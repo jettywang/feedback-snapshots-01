@@ -38,6 +38,7 @@
 * [#3073](https://github.com/ruby-grape/grape/pull/3073): Let a `rescue_from :all` in a namespace or mounted API outrank the enclosing scope's handlers - [@ericproulx](https://github.com/ericproulx).
 * [#3075](https://github.com/ruby-grape/grape/pull/3075): Validate the params of an optional Hash scope without the attributes iterator - [@ericproulx](https://github.com/ericproulx).
 * [#3076](https://github.com/ruby-grape/grape/pull/3076): Skip the query merge when building the params of a body sent without a query string - [@ericproulx](https://github.com/ericproulx).
+* [#3078](https://github.com/ruby-grape/grape/pull/3078): Resolve the selected version's body parser before reading request input - [@jettywang](https://github.com/jettywang).
 * [#3079](https://github.com/ruby-grape/grape/pull/3079): Fix two dead links in the README - [@farisbasha](https://github.com/farisbasha).
 * Your contribution here.
 

@@ -241,21 +241,26 @@ module Grape
         input = request.body # reads RACK_INPUT
         return if input.nil?
 
+        # Resolve before +input.read+: an unsupported format must not consume the body.
+        parser = parser_for_body(env, media_type)
         rewind = input.respond_to?(:rewind)
 
         input.rewind if rewind
         body = env[Grape::Env::API_REQUEST_INPUT] = input.read
         begin
-          read_rack_input(env, body, media_type)
+          read_rack_input(env, body, parser)
         ensure
           input.rewind if rewind
         end
       end
 
-      def read_rack_input(env, body, media_type)
-        return if body.empty?
+      def parser_for_body(env, media_type)
+        format = body_format(env, media_type)
+        Grape::Parser.parser_for(format, parsers)
+      end
 
-        parser = Grape::Parser.parser_for body_format(env, media_type), parsers
+      def read_rack_input(env, body, parser)
+        return if body.empty?
         return env[Grape::Env::API_REQUEST_BODY] = body unless parser
 
         begin
