@@ -454,6 +454,24 @@ module Grape
       root_element ? { root_element => inner } : inner
     end
 
+    # Renders only exposures permitted outside the controlled context.
+    # Restricted exposures are omitted before their attributes are read.
+    def self.represent_external(objects, options = {})
+      represent(objects, options.merge(visibility: :public))
+    end
+
+    def self.represent_controlled(objects, options = {})
+      represent(objects, options.merge(visibility: :controlled))
+    end
+
+    class << self
+      alias represent_public represent_external
+      alias external_representation represent_external
+      alias external_representation_constraint represent_external
+      alias represent_internal represent_controlled
+      alias controlled_representation represent_controlled
+    end
+
     # This method returns the entity's root or collection root node, or its parent's
     # @param root_type: either :collection_root or just :root
     def self.root_element(root_type)
@@ -519,6 +537,22 @@ module Grape
       opts = options.merge(runtime_options || {})
 
       root_exposure.serializable_value(self, opts)
+    end
+
+    def external_representation_hash(runtime_options = {})
+      serializable_hash((runtime_options || {}).merge(visibility: :public))
+    end
+
+    alias public_representation_hash external_representation_hash
+
+    def external_representation?
+      options.external_representation?
+    end
+
+    alias public_representation? external_representation?
+
+    def controlled_representation?
+      options.controlled_representation?
     end
 
     def exec_with_object(options, &block)
@@ -681,7 +715,9 @@ module Grape
     # @param options [Hash] Exposure options.
     def self.valid_options(options)
       options.each_key do |key|
-        raise ArgumentError, "#{key.inspect} is not a valid option." unless OPTIONS.include?(key)
+        unless OPTIONS.include?(key) || Visibility.exposure_option_key?(key)
+          raise ArgumentError, "#{key.inspect} is not a valid option."
+        end
       end
 
       options[:using] = options.delete(:with) if options.key?(:with)

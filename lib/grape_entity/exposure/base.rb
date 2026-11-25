@@ -2,12 +2,13 @@
 
 require 'active_support'
 require 'active_support/core_ext'
+require_relative '../visibility'
 
 module Grape
   class Entity
     module Exposure
       class Base
-        attr_reader :attribute, :is_safe, :documentation, :override, :conditions, :for_merge
+        attr_reader :attribute, :is_safe, :is_restricted, :documentation, :override, :conditions, :for_merge
 
         def self.new(attribute, options, conditions, ...)
           super(attribute, options, conditions).tap { |e| e.setup(...) }
@@ -19,6 +20,7 @@ module Grape
           key = options[:as] || attribute
           @key = key.respond_to?(:to_sym) ? key.to_sym : key
           @is_safe = options[:safe]
+          @is_restricted = Visibility.restricted_exposure?(options)
           @default_value = options[:default]
           @for_merge = options[:merge]
           @attr_path_proc = options[:attr_path]
@@ -105,7 +107,13 @@ module Grape
         end
 
         def should_expose?(entity, options)
+          return false if hidden_from_external_representation?(options)
+
           should_return_key?(options) && conditions_met?(entity, options)
+        end
+
+        def hidden_from_external_representation?(options)
+          is_restricted && Visibility.external_representation?(options)
         end
 
         def attr_path(entity, options)

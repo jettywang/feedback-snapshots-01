@@ -14,6 +14,7 @@
       - [Exposing with a Presenter](#exposing-with-a-presenter)
       - [Conditional Exposure](#conditional-exposure)
       - [Safe Exposure](#safe-exposure)
+      - [External Representation](#external-representation)
       - [Nested Exposure](#nested-exposure)
       - [Collection Exposure](#collection-exposure)
       - [Merge Fields](#merge-fields)
@@ -161,6 +162,28 @@ Don't raise an exception and expose as nil, even if the :x cannot be evaluated.
 ```ruby
 expose :ip, safe: true
 ```
+
+#### External Representation
+
+Use the optional external representation constraint when the same entity serves both external and controlled viewers. Mark exposures that must not reveal either their value or their existence externally:
+
+```ruby
+class UserEntity < Grape::Entity
+  expose :name
+  expose :internal_score, external: false, safe: true
+  expose :audit_note, visibility: :controlled, safe: true
+end
+```
+
+Render the constrained view with `external: true`, `visibility: :public`, or the convenience method:
+
+```ruby
+UserEntity.represent(user, external: true)
+UserEntity.represent(user, visibility: :public)
+UserEntity.represent_external(user)
+```
+
+Constrained exposures are filtered before their delegator, formatter input, condition, or block is evaluated. They therefore do not leave a `nil` key and differences in whether a Hash key or private object method exists cannot change the public structure or raise an attribute error. The default representation remains the controlled view and preserves the usual full output. `restricted: true`, `private: true`, `internal: true`, and `public: false` are accepted as aliases for marking an exposure controlled-only.
 
 #### Nested Exposure
 

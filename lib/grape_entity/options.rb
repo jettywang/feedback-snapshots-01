@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require 'forwardable'
+require_relative 'visibility'
 
 module Grape
   class Entity
@@ -10,6 +11,20 @@ module Grape
       attr_reader :opts_hash
 
       def_delegators :opts_hash, :dig, :key?, :fetch, :[], :empty?
+
+      def external_representation?
+        Visibility.external_representation?(self)
+      end
+
+      alias external? external_representation?
+      alias public? external_representation?
+
+      def controlled_representation?
+        !external_representation?
+      end
+
+      alias controlled? controlled_representation?
+      alias internal? controlled_representation?
 
       def initialize(opts_hash = {})
         @opts_hash = opts_hash
