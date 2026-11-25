@@ -63,7 +63,15 @@ module Grape
         # compiled rather than re-reading @instance — +change!+ can nil it
         # between the two reads (see #call / #recognize_path).
         def compile!
-          @instance || LOCK.synchronize { @instance ||= new }
+          @instance || LOCK.synchronize { @instance ||= build_compiled_instance }
+        end
+
+        # Build the current definitions and publish the result in one
+        # assignment. The candidate stays local until construction and router
+        # compilation have completed, so a failed replacement leaves the last
+        # published instance as the read snapshot.
+        def recompile!
+          LOCK.synchronize { @instance = build_compiled_instance }
         end
 
         # Compiles the API and loads I18n's translations, which its first
@@ -103,6 +111,10 @@ module Grape
         end
 
         private
+
+        def build_compiled_instance
+          new
+        end
 
         def inherited(subclass)
           super

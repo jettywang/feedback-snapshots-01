@@ -4479,7 +4479,15 @@ end
 
 ### Reloading in Rack Applications
 
-Use [grape-reload](https://github.com/AlexYankee/grape-reload).
+Use [grape-reload](https://github.com/AlexYankee/grape-reload) for development code reloading.
+
+For a long-running process, treat each route definition as an immutable edition. Build the replacement API in its own class or factory, call `compile!` while the previous edition remains published, and only then store the compiled Rack app in a holder under a mutex. Each request reads the holder once and calls that same edition, so its routes and auth settings cannot be mixed. If compilation raises, do not publish the candidate; the holder still points at the previous edition. `Grape::API.recompile!` applies the same build-then-publish boundary to one API class.
+
+A small runnable Rack example that prepares two editions, injects a compile failure, blocks an in-flight compilation, and checks handlers, Basic auth challenges and recovery is available in [`examples/atomic_reloading/check.rb`](examples/atomic_reloading/check.rb):
+
+```bash
+bundle exec ruby -Ilib examples/atomic_reloading/check.rb
+```
 
 ### Reloading in Rails Applications
 
