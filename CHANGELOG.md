@@ -7,6 +7,7 @@
 
 #### Features
 
+* Add opt-in per-object disclosure scopes and a controlled receipt: `expose ..., scope:`, `Entity.represent_with_receipt`, and `Grape::Entity::Disclosure::Policy` grant visibility per output occurrence so repeated references can differ by group.
 * Your contribution here.
 
 

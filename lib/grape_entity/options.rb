@@ -92,17 +92,43 @@ module Grape
         result
       end
 
+      # The disclosure scope that applies to the entity rendering with these
+      # options. Only present when the caller opted into a disclosure policy.
+      def disclosure_scope
+        opts_hash[:disclosure_scope]
+      end
+
+      def disclosure_context
+        opts_hash[:disclosure_context]
+      end
+
+      # The output position of the entity rendering with these options.
+      def disclosure_occurrence
+        opts_hash[:disclosure_occurrence]
+      end
+
       private
 
       def build_for_nesting(key)
-        Options.new(
-          opts_hash.dup.reject { |current_key| current_key == :collection }.merge(
-            root: nil,
-            only: only_fields(key),
-            except: except_fields(key),
-            attr_path: opts_hash[:attr_path]
-          )
+        skipped_keys = %i[collection disclosure_skip_entry disclosure_rollup]
+        nested_opts = opts_hash.dup.reject { |current_key| skipped_keys.include?(current_key) }.merge(
+          root: nil,
+          only: only_fields(key),
+          except: except_fields(key),
+          attr_path: opts_hash[:attr_path]
         )
+        nested_opts[:disclosure_occurrence] = nested_occurrence(key) if opts_hash.key?(:disclosure_occurrence)
+
+        Options.new(nested_opts)
+      end
+
+      # Advance the output path by one key without deciding yet whether the
+      # nested value is a collection; the represent call adds the index.
+      def nested_occurrence(key)
+        occurrence = opts_hash[:disclosure_occurrence]
+        return unless occurrence
+
+        Grape::Entity::Disclosure::Occurrence.new(path: occurrence.path + [key], collection: false)
       end
 
       def build_symbolized_hash(attribute, hash)

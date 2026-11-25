@@ -7,7 +7,7 @@ module Grape
   class Entity
     module Exposure
       class Base
-        attr_reader :attribute, :is_safe, :documentation, :override, :conditions, :for_merge
+        attr_reader :attribute, :is_safe, :documentation, :override, :conditions, :for_merge, :scope
 
         def self.new(attribute, options, conditions, ...)
           super(attribute, options, conditions).tap { |e| e.setup(...) }
@@ -25,6 +25,7 @@ module Grape
           @documentation = options[:documentation]
           @override = options[:override]
           @conditions = conditions
+          @scope = options[:scope]
         end
 
         def dup(&block)
@@ -105,7 +106,35 @@ module Grape
         end
 
         def should_expose?(entity, options)
-          should_return_key?(options) && conditions_met?(entity, options)
+          should_return_key?(options) && scope_allowed?(entity, options) && conditions_met?(entity, options)
+        end
+
+        # An exposure that declares a +:scope+ is only rendered when the
+        # occurrence's effective scope includes that level. Without a
+        # disclosure context this always returns true, so existing rendering is
+        # unchanged.
+        #
+        # A rejection recorded here is a scope-only rejection: conditions were
+        # not consulted, so the receipt can report it without running them.
+        def scope_allowed?(entity, options)
+          return true if @scope.nil?
+
+          requirement = Array(@scope).compact
+          return true if requirement.empty?
+
+          context = options.respond_to?(:disclosure_context) ? options.disclosure_context : nil
+          return true unless context
+          # Without declared levels there is no ordering to compare, so every
+          # labelled exposure stays visible.
+          return true if context.levels.empty?
+
+          effective = options.disclosure_scope
+          return true if effective.nil?
+
+          allowed = Disclosure.expand_scope(effective, context.levels)
+          permitted = requirement.any? { |level| allowed.include?(level.to_sym) }
+          entity.record_scope_withheld(@attribute) unless permitted
+          permitted
         end
 
         def attr_path(entity, options)

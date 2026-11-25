@@ -21,6 +21,7 @@
       - [Unexpose](#unexpose)
       - [Overriding exposures](#overriding-exposures)
       - [Returning only the fields you want](#returning-only-the-fields-you-want)
+      - [Per-Object Disclosure](#per-object-disclosure)
       - [Aliases](#aliases)
       - [Format Before Exposing](#format-before-exposing)
       - [Expose Nil](#expose-nil)
@@ -366,6 +367,102 @@ The same result can be achieved with the following exposure:
 data = Entity.represent(model, except: [:id, { user: [:id] }])
 data.as_json
 ```
+
+#### Per-Object Disclosure
+
+A single collection sometimes mixes records with different clearance. Use a
+disclosure policy to grant visibility per occurrence while keeping one normal
+representation (and one controlled receipt) for the whole batch.
+
+```ruby
+class OrderEntity < Grape::Entity
+  expose :id, scope: :summary
+  expose :total, scope: :summary
+  expose :memo, scope: :detail     # only rendered when :detail is granted
+  expose :note, scope: :detail
+end
+
+class GroupEntity < Grape::Entity
+  expose :name
+  expose :orders, using: OrderEntity
+end
+
+class BatchEntity < Grape::Entity
+  expose :batch_id
+  expose :groups, using: GroupEntity
+end
+```
+
+A policy is consulted once per occurrence with the represented object, its
+output position and the same runtime options as the rest of the representation.
+Returning `nil` inherits the enclosing occurrence's scope. `default:` applies to
+the root occurrence only; it never upgrades a nested group that a resolver
+abstained on.
+
+```ruby
+policy = Grape::Entity::Disclosure::Policy.new(levels: %i[summary detail]) do |object, occurrence, options|
+  # occurrence.group_path == [:groups, 0, :orders]
+  # occurrence.index      == 1
+  # occurrence.path       == [:groups, 0, :orders, 1]
+  object.clearance_for(options[:partner])
+end
+
+result = BatchEntity.represent_with_receipt(batch, disclosure: policy)
+result.payload  # the same Hash `represent(batch, serializable: true)` would produce
+result.receipt  # controlled, read-only record of every occurrence
+```
+
+If the server already has a plain map of occurrence paths to scopes, it can pass
+that instead of a callable:
+
+```ruby
+BatchEntity.represent_with_receipt(
+  batch,
+  disclosure: {
+    levels: %i[summary detail],
+    default: :detail,
+    paths: { [:groups, 0, :orders, 1] => :summary }
+  }
+)
+```
+
+Scopes are ordered from least to most privileged (`levels.last` means full
+detail). Granting a level also grants every level below it. The same object may
+be granted different scopes in different groups, because the scope is attached
+to the occurrence rather than to the object. Group order and item order follow
+the actual output, and the receipt entries are emitted in that same order.
+
+```ruby
+result.receipt.to_a
+# => [{ position: 1, path: [], group: nil, group_path: [],
+#       entity: "BatchEntity", mode: :full, granted_scope: [],
+#       effective_scope: [], inherited: true, policy_applied: false,
+#       identifier: nil, fields: [:batch_id, :groups],
+#       scope_withheld_fields: [] },
+#     { position: 2, path: [:groups, 0], ... },
+#     { position: 3, path: [:groups, 0, :orders, 0], group: :orders,
+#       group_path: [:groups, 0, :orders], index: 0, entity: "OrderEntity",
+#       mode: :full, granted_scope: [:detail],
+#       effective_scope: [:summary, :detail], inherited: false,
+#       policy_applied: true, identifier: 1,
+#       fields: [:id, :total, :memo, :note], scope_withheld_fields: [] },
+#     { position: 4, path: [:groups, 0, :orders, 1], ..., mode: :summary,
+#       fields: [:id, :total], scope_withheld_fields: [:memo, :note] }]
+```
+
+`fields` lists the keys that actually appear in the payload at that path; it is
+read back after rendering, never predicted. `scope_withheld_fields` names the
+declared fields hidden only because their `scope:` was not granted. `identifier`
+comes only from the policy's `identifier:` callable, so the receipt cannot leak
+another attribute.
+
+The policy only takes effect when `disclosure:` is passed. `represent` without
+it renders exactly as before, even if exposures declare `scope:`. Use
+`represent_with_receipt` for both the payload and the receipt; pass
+`receipt: Grape::Entity::Disclosure::Receipt.new` to `represent` if you prefer to
+read the receipt afterwards (that alone also opts in, with every scope
+unrestricted). A disclosure representation always returns plain `Hash`/`Array`
+data.
 
 #### Aliases
 

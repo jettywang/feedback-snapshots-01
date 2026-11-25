@@ -439,6 +439,8 @@ module Grape
     # @option options :only [Array] all the fields that should be returned
     # @option options :except [Array] all the fields that should not be returned
     def self.represent(objects, options = {})
+      return represent_with_disclosure(objects, options) if disclosure_requested?(options)
+
       @present_collection ||= nil
       if objects.respond_to?(:to_ary) && !@present_collection
         root_element = root_element(:collection_root)
@@ -452,6 +454,128 @@ module Grape
       root_element = options[:root] if options.key?(:root)
 
       root_element ? { root_element => inner } : inner
+    end
+
+    # Represents objects and returns both the public payload and the receipt
+    # written during that same pass.
+    #
+    # The payload is the same Hash +represent(..., serializable: true)+ would
+    # return. The receipt is finalized against that exact payload.
+    #
+    # @return [Disclosure::Result] +payload+ and +receipt+.
+    def self.represent_with_receipt(objects, options = {})
+      options = options.opts_hash if options.is_a?(Options)
+      disclosure = options.key?(:disclosure) ? options[:disclosure] : true
+      receipt = receipt_from(options, disclosure)
+      options = { serializable: true }.merge(options).merge(disclosure: disclosure, receipt: receipt)
+      payload = represent(objects, options)
+      receipt.close! unless receipt.closed?
+      Disclosure::Result.new(payload: payload, receipt: receipt)
+    end
+
+    def self.receipt_from(options, disclosure)
+      return options[:receipt] if options[:receipt].is_a?(Disclosure::Receipt)
+      return Disclosure::Receipt.new if options[:receipt] == true
+      return Disclosure::Receipt.new if disclosure.is_a?(Hash) && disclosure[:receipt]
+
+      Disclosure::Receipt.new
+    end
+
+    # True when the caller opted into per-object disclosure through
+    # +:disclosure+, asked for a receipt, or when these options already belong
+    # to a prepared disclosure representation.
+    def self.disclosure_requested?(options)
+      return true if options[:disclosure_context].is_a?(Disclosure::Context)
+      return true if options[:receipt].is_a?(Disclosure::Receipt)
+
+      options.key?(:disclosure) && !options[:disclosure].nil? && options[:disclosure] != false
+    end
+
+    class << self
+      # Builds the disclosure context once per representation so every entity
+      # in the tree shares the same receipt and policy instance.
+      def disclosure_context(options)
+        return options[:disclosure_context] if options[:disclosure_context].is_a?(Disclosure::Context)
+
+        Disclosure::Context.build(options[:disclosure], receipt: options[:receipt])
+      end
+
+      private
+
+      # Single rendering pass for scope-aware representations. Public output,
+      # parent conditions, child entity options and the receipt all derive from
+      # this one traversal. Group order and item order follow the actual input
+      # arrays.
+      def represent_with_disclosure(objects, options)
+        @present_collection ||= nil
+        top_level = options[:disclosure_occurrence].nil?
+        context = disclosure_context(options)
+        collection = objects.respond_to?(:to_ary) && !@present_collection
+        root_name = disclosure_root_name(collection, options)
+        root_occurrence = disclosure_root_occurrence(options, root_name, top_level)
+        base = disclosure_base_options(options, context, root_occurrence)
+        base = base.merge(disclosure_root: true) if top_level
+
+        inner =
+          if collection
+            objects.to_ary.each_with_index.map do |object, index|
+              occurrence = Disclosure::Occurrence.new(path: root_occurrence.path + [index], collection: true)
+              item_options = Disclosure.options_for(object, base, occurrence, context)
+              new(object, item_options.reverse_merge(collection: true)).presented
+            end
+          else
+            object = @present_collection ? { @collection_name => objects } : objects
+            entity_options = merged_child?(base) ? base : Disclosure.options_for(object, base, root_occurrence, context)
+            new(object, entity_options).presented
+          end
+
+        payload = root_name ? { root_name => inner } : inner
+        payload = Disclosure.normalize_output(payload)
+        context.receipt&.finalize!(payload) if top_level
+        payload
+      end
+
+      # A merged child keeps the enclosing occurrence and scope prepared by
+      # RepresentExposure; re-resolving here would replace its rollup buffer.
+      def merged_child?(options)
+        options[:disclosure_skip_entry] == true
+      end
+
+      def disclosure_root_name(collection, options)
+        return options[:root] if options.key?(:root)
+
+        root_element(collection ? :collection_root : :root)
+      end
+
+      # The output key that wraps this representation, if any. Nested
+      # representations append it to the parent occurrence so receipt paths keep
+      # pointing at the actual payload nodes.
+      def disclosure_root_occurrence(options, root_name, top_level)
+        parent = options[:disclosure_occurrence]
+        return Disclosure::Occurrence.from_path(root_name ? [root_name] : [], collection: false) if top_level
+
+        path = parent ? parent.path : []
+        path += [root_name] if root_name
+        Disclosure::Occurrence.from_path(path, collection: false)
+      end
+
+      def disclosure_base_options(options, context, occurrence)
+        base =
+          if options.is_a?(Options)
+            Options.new(options.opts_hash.reject { |key| %i[disclosure receipt].include?(key) })
+          else
+            options.reject { |key, _| %i[disclosure receipt].include?(key) }
+          end
+
+        # A disclosure representation is always a plain serializable Hash: the
+        # receipt is matched against the same public payload partners receive.
+        base.merge(
+          serializable: true,
+          disclosure_context: context,
+          disclosure_occurrence: occurrence,
+          disclosure_root: false
+        )
+      end
     end
 
     # This method returns the entity's root or collection root node, or its parent's
@@ -488,6 +612,7 @@ module Grape
       @object = object
       @options = options.is_a?(Options) ? options : Options.new(options)
       @delegator = Delegator.new(object)
+      @scope_withheld_fields = @options[:disclosure_rollup]
     end
 
     def root_exposures
@@ -518,8 +643,62 @@ module Grape
 
       opts = options.merge(runtime_options || {})
 
-      root_exposure.serializable_value(self, opts)
+      output = root_exposure.serializable_value(self, opts)
+      record_disclosure(output, opts)
+      output
     end
+
+    # The receipt attached to this representation, if the caller opted in.
+    def disclosure_receipt
+      options.disclosure_context&.receipt
+    end
+
+    # Effective scope of this entity occurrence. nil means unrestricted.
+    def disclosure_scope
+      options.disclosure_scope
+    end
+
+    # Records a field skipped solely because its +:scope+ was not granted.
+    # Called from the exposure check; conditions are never evaluated for these
+    # fields, so the receipt must not look at them either.
+    def record_scope_withheld(attribute)
+      @scope_withheld_fields << attribute if @scope_withheld_fields
+    end
+
+    # Appends this occurrence to the shared receipt exactly once, using the
+    # fields that actually made it into +output+. No condition, formatter or
+    # delegated reader is invoked again here.
+    def record_disclosure(output, opts)
+      return if @disclosure_recorded
+      # A merged child has no payload node of its own; its scope rejections
+      # were rolled into the enclosing occurrence already.
+      if opts[:disclosure_skip_entry]
+        @disclosure_recorded = true
+        return
+      end
+
+      context = opts.disclosure_context
+      receipt = context&.receipt
+      return unless receipt
+      return if receipt.closed?
+
+      occurrence = opts.disclosure_occurrence || Disclosure::Occurrence.root
+      receipt.record(
+        occurrence: occurrence,
+        field: occurrence.field,
+        entity_class: self.class,
+        mode: opts[:disclosure_mode],
+        granted_scope: opts[:disclosure_granted],
+        effective_scope: opts.disclosure_scope,
+        inherited: opts[:disclosure_inherited],
+        policy_applied: !opts[:disclosure_inherited],
+        identifier: context.identifier_for(object),
+        fields: Disclosure.rendered_fields(output),
+        scope_withheld_fields: @scope_withheld_fields
+      )
+      @disclosure_recorded = true
+    end
+    private :record_disclosure
 
     def exec_with_object(options, &block)
       if symbol_to_proc_wrapper?(block)
@@ -645,6 +824,7 @@ module Grape
       expose_nil
       override
       default
+      scope
     ].to_set.freeze
 
     # Merges the given options with current block options.
