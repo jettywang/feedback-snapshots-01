@@ -19,6 +19,7 @@ require "socket"
 require "monitor"
 require "net/protocol"
 require "time"
+require "ipaddr"
 begin
   require "openssl"
 rescue LoadError
@@ -33,6 +34,163 @@ module Net
   class FTPPermError < FTPError; end
   class FTPProtoError < FTPError; end
   class FTPConnectionError < FTPError; end
+
+  #
+  # A single permission for a passive data connection.  A grant permits data
+  # connections whose negotiated destination IP address falls within +range+
+  # (an IPAddr or any string accepted by IPAddr.new, including CIDR blocks).
+  #
+  # +expires_at+, when given, limits the grant to connections initiated before
+  # that time.  Expiry is evaluated at the moment a new data connection is
+  # chosen, so an expired grant never affects a connection that was already
+  # established.
+  #
+  class FTPDataConnectionGrant
+    # The IPAddr range that the negotiated data address must belong to.
+    attr_reader :range
+
+    # The optional Time at which the grant stops authorizing new connections.
+    attr_reader :expires_at
+
+    # An optional human-readable label used in audit records.
+    attr_reader :label
+
+    def initialize(range, expires_at: nil, label: nil)
+      @range = FTPDataConnectionGrant.coerce_ipaddr(range)
+      @expires_at = expires_at
+      @label = label
+    end
+
+    # Returns +true+ if +ip_address+ is covered by this grant and the grant
+    # has not expired as of +time+.
+    def permit?(ip_address, time = Time.now)
+      return false if expired?(time)
+      return @range.include?(FTPDataConnectionGrant.coerce_ipaddr(ip_address))
+    end
+
+    # Returns +true+ if the grant no longer authorizes new connections at
+    # +time+.  A grant without an expiry never expires.
+    def expired?(time = Time.now)
+      return false if @expires_at.nil?
+      return time >= @expires_at
+    end
+
+    def self.coerce_ipaddr(value)
+      return value if value.is_a?(IPAddr)
+      return IPAddr.new(value)
+    end
+  end
+
+  #
+  # A per-session scope that decides which passive data connection addresses a
+  # Net::FTP session is allowed to open.
+  #
+  # Two managed topologies are supported:
+  #
+  # - A service whose control and data connections are co-located: the address
+  #   negotiated in the PASV/EPSV reply equals the actual control connection
+  #   peer and is always allowed.
+  # - A service reached through a separately approved data proxy: its data
+  #   address differs from the control peer and must be covered by one of the
+  #   +grants+.
+  #
+  # Every evaluation is recorded on the scope (see FTPDataConnectionDecision)
+  # together with both the actual control peer and the address negotiated by
+  # the server, so the reason for allowing or refusing a candidate is auditable.
+  #
+  class FTPDataConnectionScope
+    # The FTPDataConnectionGrant entries that may approve a data proxy address.
+    attr_reader :grants
+
+    # The FTPDataConnectionDecision records produced for this scope.
+    attr_reader :decisions
+
+    def initialize(grants = [])
+      @grants = grants.map do |grant|
+        grant.is_a?(FTPDataConnectionGrant) ? grant : FTPDataConnectionGrant.new(grant)
+      end
+      @decisions = []
+    end
+
+    #
+    # Evaluates a candidate data connection without opening it.
+    #
+    # +control_peer+ is the IP address of the actual control connection peer,
+    # +negotiated_host+ is the address supplied by the PASV/EPSV reply,
+    # +selected_host+ is the address that would actually be connected to (it
+    # defaults to +negotiated_host+), and +port+ is the negotiated data port.
+    # Returns the recorded FTPDataConnectionDecision.
+    #
+    def evaluate(control_peer:, negotiated_host:, port:, selected_host: nil,
+                 command: nil, time: Time.now)
+      control_ip = FTPDataConnectionGrant.coerce_ipaddr(control_peer)
+      negotiated_ip = FTPDataConnectionGrant.coerce_ipaddr(negotiated_host)
+      selected_ip = FTPDataConnectionGrant.coerce_ipaddr(selected_host || negotiated_host)
+      matched_grant = nil
+      if control_ip == selected_ip
+        verdict = :co_located
+        reason = "data address matches control connection peer"
+      else
+        matched_grant = @grants.find do |grant|
+          grant.range.include?(selected_ip)
+        end
+        if matched_grant.nil?
+          verdict = :out_of_scope
+          reason = "data address is neither the control peer nor an approved data proxy"
+        elsif matched_grant.expired?(time)
+          verdict = :expired
+          reason = "the approving data proxy grant has expired"
+        else
+          verdict = :approved_grant
+          reason = "data address is covered by an approved data proxy grant"
+        end
+      end
+      decision = FTPDataConnectionDecision.new(
+        control_peer: control_ip.to_s,
+        negotiated_host: negotiated_ip.to_s,
+        selected_host: selected_ip.to_s,
+        port: port,
+        command: command,
+        verdict: verdict,
+        reason: reason,
+        grant: matched_grant,
+        evaluated_at: time
+      )
+      @decisions.push(decision)
+      return decision
+    end
+
+    # Returns +true+ if opening the candidate data connection is allowed.
+    def allow?(**arguments)
+      return evaluate(**arguments).allowed?
+    end
+  end
+
+  #
+  # The audit record of a single passive data connection decision.  It keeps
+  # the actual control connection peer, the address (and port) the server
+  # negotiated, the address actually selected for the data connection, the
+  # verdict, the human-readable reason, the matching grant (if any) and the
+  # time the decision was made.
+  #
+  class FTPDataConnectionDecision < Struct.new(:control_peer, :negotiated_host,
+                                              :selected_host, :port, :command,
+                                              :verdict, :reason, :grant,
+                                              :evaluated_at,
+                                              keyword_init: true)
+    ALLOWED_VERDICTS = %i[co_located approved_grant].freeze
+
+    # Returns +true+ when the candidate data connection may be opened.
+    def allowed?
+      return ALLOWED_VERDICTS.include?(verdict)
+    end
+
+    # Returns +true+ when the candidate was refused and no data socket is
+    # created.
+    def denied?
+      return !allowed?
+    end
+  end
   # :startdoc:
 
   #
@@ -89,7 +247,7 @@ module Net
     end
 
     # :stopdoc:
-    VERSION = "0.3.9"
+    VERSION = "0.4.0"
     FTP_PORT = 21
     CRLF = "\r\n"
     DEFAULT_BLOCKSIZE = BufferedIO::BUFSIZE
@@ -105,6 +263,11 @@ module Net
     # When +true+, use the IP address in PASV responses.  Otherwise, it uses
     # the same IP address for the control connection.  Default: +false+.
     attr_accessor :use_pasv_ip
+
+    # The per-session FTPDataConnectionScope that restricts the addresses a
+    # passive data connection may be opened to.  When +nil+ (the default), the
+    # negotiated address is used without an additional scope check.
+    attr_reader :data_connection_scope
 
     # When +true+, all traffic to and from the server is written
     # to +$stdout+.  Default: +false+.
@@ -166,6 +329,24 @@ module Net
       @@default_passive
     end
 
+    # Sets the per-session FTPDataConnectionScope.  Accepts an
+    # FTPDataConnectionScope, an array of grants (FTPDataConnectionGrant or
+    # ranges understood by IPAddr), or +nil+ to disable scope enforcement.
+    def data_connection_scope=(grants)
+      if grants.nil? || grants.is_a?(FTPDataConnectionScope)
+        @data_connection_scope = grants
+      else
+        @data_connection_scope = FTPDataConnectionScope.new(grants)
+      end
+    end
+
+    # The FTPDataConnectionDecision records produced while choosing passive
+    # data connection addresses for this session, or +nil+ when no scope is
+    # configured.
+    def data_connection_decisions
+      @data_connection_scope&.decisions
+    end
+
     #
     # A synonym for <tt>FTP.new</tt>, but with a mandatory host parameter.
     #
@@ -224,6 +405,12 @@ module Net
     # use_pasv_ip::  When +true+, use the IP address in PASV responses.
     #                Otherwise, it uses the same IP address for the control
     #                connection.  Default: +false+.
+    # data_connection_scope::  An FTPDataConnectionScope (or an array of
+    #                grants) restricting the addresses that passive data
+    #                connections may be opened to.  Co-located data
+    #                connections (same address as the control peer) are always
+    #                allowed; other addresses require an approved grant.
+    #                Default: +nil+.
     # debug_mode::  When +true+, all traffic to and from the server is
     #               written to +$stdout+.  Default: +false+.
     #
@@ -301,6 +488,7 @@ module Net
       @ssl_handshake_timeout = options[:ssl_handshake_timeout]
       @read_timeout = options[:read_timeout] || 60
       @use_pasv_ip = options[:use_pasv_ip] || false
+      self.data_connection_scope = options[:data_connection_scope]
       if host
         connect(host, options[:port] || FTP_PORT)
         if options[:username]
@@ -558,20 +746,25 @@ module Net
     private :makeport
 
     # sends the appropriate command to enable a passive connection
+    #
+    # Returns the chosen data host, the data port, and the address that the
+    # server actually negotiated in its PASV/EPSV reply.  The chosen host may
+    # differ from the negotiated host when #use_pasv_ip is false.
     def makepasv # :nodoc:
       if @bare_sock.remote_address.ipv4?
-        host, port = parse227(sendcmd("PASV"))
+        host, port, negotiated_host = parse227(sendcmd("PASV"))
       else
-        host, port = parse229(sendcmd("EPSV"))
+        host, port, negotiated_host = parse229(sendcmd("EPSV"))
       end
-      return host, port
+      return host, port, negotiated_host
     end
     private :makepasv
 
     # Constructs a connection for transferring data
     def transfercmd(cmd, rest_offset = nil) # :nodoc:
       if @passive
-        host, port = makepasv
+        host, port, negotiated_host = makepasv
+        enforce_data_connection_scope(host, port, negotiated_host, cmd)
         succeeded = false
         begin
           conn = open_socket(host, port)
@@ -623,6 +816,41 @@ module Net
       end
     end
     private :transfercmd
+
+    #
+    # Verifies that the chosen passive data connection address is permitted by
+    # the session's FTPDataConnectionScope before any socket is opened.
+    #
+    # +host+ is the address that would actually be connected to, +port+ the
+    # negotiated data port, +negotiated_host+ the address supplied by the
+    # PASV/EPSV reply, and +command+ the FTP command driving the transfer.
+    # Raises FTPConnectionError for a candidate outside the configured scope;
+    # in that case no data connection is created.
+    #
+    def enforce_data_connection_scope(host, port, negotiated_host, command)
+      scope = @data_connection_scope
+      return if scope.nil?
+      control_peer = @bare_sock.remote_address.ip_address
+      decision = scope.evaluate(
+        control_peer: control_peer,
+        negotiated_host: negotiated_host,
+        selected_host: host,
+        port: port,
+        command: command
+      )
+      debug_print(
+        "data connection scope: control=#{decision.control_peer} " \
+        "negotiated=#{decision.negotiated_host} " \
+        "selected=#{decision.selected_host}:#{decision.port} " \
+        "verdict=#{decision.verdict} (#{decision.reason})"
+      )
+      unless decision.allowed?
+        raise FTPConnectionError,
+              "passive data connection to #{host}:#{port} refused by " \
+              "data connection scope: #{decision.reason}"
+      end
+    end
+    private :enforce_data_connection_scope
 
     #
     # Logs in to the remote host.  The session must have been
@@ -1417,18 +1645,21 @@ module Net
     # handler for response code 227
     # (Entering Passive Mode (h1,h2,h3,h4,p1,p2))
     #
-    # Returns host and port.
+    # Returns the chosen host, the port, and the host negotiated in the reply.
+    # When #use_pasv_ip is false, the chosen host is the control connection
+    # peer while the negotiated host is taken from the reply.
     def parse227(resp) # :nodoc:
       if !resp.start_with?("227")
         raise FTPReplyError, resp
       end
       if m = /(?<host>\d+(?:,\d+){3}),(?<port>\d+,\d+)/.match(resp)
+        negotiated_host = parse_pasv_ipv4_host(m["host"])
         if @use_pasv_ip
-          host = parse_pasv_ipv4_host(m["host"])
+          host = negotiated_host
         else
           host = @bare_sock.remote_address.ip_address
         end
-        return host, parse_pasv_port(m["port"])
+        return host, parse_pasv_port(m["port"]), negotiated_host
       else
         raise FTPProtoError, resp
       end
@@ -1457,13 +1688,15 @@ module Net
     # handler for response code 229
     # (Extended Passive Mode Entered)
     #
-    # Returns host and port.
+    # Returns host, port, and the negotiated host.  EPSV replies carry only a
+    # port, so the data host is the control connection peer.
     def parse229(resp) # :nodoc:
       if !resp.start_with?("229")
         raise FTPReplyError, resp
       end
       if m = /\((?<d>[!-~])\k<d>\k<d>(?<port>\d+)\k<d>\)/.match(resp)
-        return @bare_sock.remote_address.ip_address, m["port"].to_i
+        host = @bare_sock.remote_address.ip_address
+        return host, m["port"].to_i, host
       else
         raise FTPProtoError, resp
       end

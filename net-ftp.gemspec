@@ -31,4 +31,5 @@ Gem::Specification.new do |spec|
 
   spec.add_dependency "net-protocol"
   spec.add_dependency "time"
+  spec.add_dependency "ipaddr"
 end
