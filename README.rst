@@ -101,6 +101,44 @@ of your dict keys.  To do this you can use either of these options:
     ...               jmespath.Options(dict_cls=collections.OrderedDict))
 
 
+Policy Observation
+------------------
+
+Policy review sometimes needs to distinguish a claim that is absent from a
+claim that is explicitly ``null`` or empty.  Ordinary JMESPath evaluation
+stays unchanged.  Use ``observe()`` when the evaluation should also return a
+structured trace:
+
+.. code:: python
+
+    >>> expression = jmespath.compile('claim || fallback[*]')
+    >>> observed = expression.observe(
+    ...     {'claim': None, 'fallback': ['read']})
+    >>> observed.value
+    ['read']
+    >>> observed.fallbacks[0].missing_judgment
+    'false_like'
+    >>> observed.fallbacks[0].left_origin.presence
+    'explicit_null'
+    >>> null_check = jmespath.observe('claim == `null`', {'claim': None})
+    >>> null_check.comparisons[0].missing_judgment
+    'equality_to_null'
+
+An absent field has origin ``presence='absent'``; an explicit JSON null has
+``presence='explicit_null'``.  Decision records identify the actual missing
+rule used by each operation:
+
+* comparisons use equality, typically ``equality_to_null``;
+* ``||`` and ``&&`` use JMESPath false-like semantics;
+* projections use the ``current is not None`` rule.
+
+Branches not evaluated because of short-circuiting have
+``status='not_executed'``.  ``ObservedResult`` is also a ``(value, trace)``
+tuple, so ``value, trace = expression.observe(data)`` works.  Pass
+``jmespath.Trace()`` as ``Options(trace=trace)`` when ``search()`` should keep
+returning the plain JMESPath value while collecting events.
+
+
 Custom Functions
 ~~~~~~~~~~~~~~~~
 

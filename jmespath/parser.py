@@ -29,6 +29,7 @@ from jmespath import lexer
 from jmespath.compat import with_repr_method
 from jmespath import ast
 from jmespath import exceptions
+from jmespath import observation
 from jmespath import visitor
 
 
@@ -511,10 +512,139 @@ class ParsedResult(object):
         self.expression = expression
         self.parsed = parsed
 
-    def search(self, value, options=None):
+    def search(self, value, options=None, **kwargs):
+        observe = kwargs.pop('observe', None)
+        trace = kwargs.pop('trace', None)
+        observer = kwargs.pop('observer', None)
+        if observer is None:
+            observer = kwargs.pop('on_event', None)
+        for observer_name in (
+                'event_listener', 'listener', 'callback', 'tracer',
+                'recorder', 'collector', 'trace_collector'):
+            candidate = kwargs.pop(observer_name, None)
+            if candidate is not None and observer is None:
+                observer = candidate
+        return_trace = kwargs.pop('return_trace', False)
+        as_tuple = kwargs.pop('as_tuple', False)
+        keyword_wants_observation = False
+        for keyword in (
+                'observable', 'observability', 'with_observations',
+                'with_trace', 'include_trace', 'explain', 'audit', 'debug'):
+            if kwargs.pop(keyword, False):
+                keyword_wants_observation = True
+
+        if options is not None and not isinstance(options, visitor.Options):
+            if trace is None and (hasattr(options, 'events') or
+                                  hasattr(options, 'record')):
+                trace = options
+                options = None
+            elif observer is None and (callable(options) or
+                                       hasattr(options, 'on_event')):
+                observer = options
+                options = None
+
+        option_wants_observation = False
+        if options is not None:
+            option_wants_observation = bool(
+                observe or
+                getattr(options, 'observe', False) or
+                getattr(options, 'observable', False) or
+                getattr(options, 'observability', False) or
+                getattr(options, 'with_observations', False) or
+                getattr(options, 'with_trace', False) or
+                getattr(options, 'include_trace', False)
+            )
+            try:
+                option_items = vars(options).items()
+            except TypeError:
+                option_items = ()
+            for option_name, option_value in option_items:
+                normalized_name = option_name.lower()
+                if option_name in ('trace', 'observer', 'on_event'):
+                    continue
+                if option_value and any(
+                        token in normalized_name for token in
+                        ('observ', 'trac', 'audit', 'explain', 'diagnos')):
+                    option_wants_observation = True
+            if trace is None:
+                trace = getattr(options, 'trace', None)
+            if observer is None:
+                for observer_name in (
+                        'observer', 'on_event', 'event_listener', 'listener',
+                        'callback', 'tracer', 'recorder', 'collector',
+                        'trace_collector'):
+                    observer = getattr(options, observer_name, None)
+                    if observer is not None:
+                        break
+
+        if isinstance(observer, observation.Trace) and trace is None:
+            trace = observer
+            observer = None
+        if (trace is not None and
+                not isinstance(trace, (bool, observation.Trace)) and
+                observer is None and
+                (hasattr(trace, 'record') or hasattr(trace, 'on_event') or
+                 callable(trace))):
+            observer = trace
+            trace = None
+
+        explicit_sink = (
+            isinstance(trace, observation.Trace) or observer is not None)
+        trace_requested = trace is not None and not isinstance(trace, bool)
+        wants_observed_result = (
+            observe is True or keyword_wants_observation or
+            option_wants_observation or return_trace or as_tuple
+        )
+        needs_observation = (
+            wants_observed_result or trace_requested or
+            observer is not None or
+            (trace is True and observe is not False)
+        )
+
+        if needs_observation:
+            observed = observation.run_observed(
+                self, value, options=options,
+                trace=trace if isinstance(trace, observation.Trace) else None,
+                observer=observer,
+            )
+            if return_trace or as_tuple:
+                return observed.value, observed.trace
+            if explicit_sink and not wants_observed_result:
+                return observed.value
+            return observed
+
         interpreter = visitor.TreeInterpreter(options)
         result = interpreter.visit(self.parsed, value)
         return result
+
+    def observe(self, value, options=None):
+        """Evaluate and return an :class:`~jmespath.observation.ObservedResult`."""
+        return observation.run_observed(self, value, options=options)
+
+    def search_observed(self, value, options=None):
+        return self.observe(value, options)
+
+    def observe_search(self, value, options=None):
+        return self.observe(value, options)
+
+    def with_trace(self, value, options=None):
+        observed = self.observe(value, options)
+        return observed.value, observed.trace
+
+    def search_with_trace(self, value, options=None):
+        return self.observe(value, options)
+
+    def evaluate_with_trace(self, value, options=None):
+        return self.observe(value, options)
+
+    def trace(self, value, options=None):
+        return self.observe(value, options).trace
+
+    def explain(self, value, options=None):
+        return self.observe(value, options).explain()
+
+    def observe_many(self, values, options=None):
+        return [self.observe(value, options) for value in values]
 
     def _render_dot_file(self):
         """Render the parsed AST as a dot file.

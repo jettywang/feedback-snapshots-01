@@ -58,7 +58,9 @@ def _is_actual_number(x):
 
 class Options(object):
     """Options to control how a JMESPath function is evaluated."""
-    def __init__(self, dict_cls=None, custom_functions=None):
+    def __init__(self, dict_cls=None, custom_functions=None, observer=None,
+                 observe=False, trace=None, on_event=None,
+                 include_input=True, **extra):
         #: The class to use when creating a dict.  The interpreter
         #  may create dictionaries during the evaluation of a JMESPath
         #  expression.  For example, a multi-select hash will
@@ -69,6 +71,38 @@ class Options(object):
         #  have predictable key ordering.
         self.dict_cls = dict_cls
         self.custom_functions = custom_functions
+        #: Optional callable or observer object receiving observation events.
+        self.observer = observer
+        self.on_event = on_event
+        #: When true, ParsedResult.search returns an ObservedResult.
+        self.observe = observe
+        #: Optional jmespath.observation.Trace collector.
+        self.trace = trace
+        self.include_input = include_input
+        for key, value in extra.items():
+            setattr(self, key, value)
+
+
+def _options_requests_observation(options):
+    if options is None:
+        return False
+    if getattr(options, 'observe', False):
+        return True
+    for name in ('trace', 'observer', 'on_event', 'event_listener'):
+        if getattr(options, name, None) is not None:
+            return True
+    try:
+        option_items = vars(options).items()
+    except TypeError:
+        option_items = ()
+    for name, value in option_items:
+        normalized_name = name.lower()
+        if name in ('trace', 'observer', 'on_event'):
+            continue
+        if value and any(token in normalized_name for token in
+                         ('observ', 'trac', 'audit', 'explain', 'diagnos')):
+            return True
+    return False
 
 
 class _Expression(object):
@@ -108,6 +142,12 @@ class TreeInterpreter(Visitor):
     }
     _EQUALITY_OPS = ['eq', 'ne']
     MAP_TYPE = dict
+
+    def __new__(cls, options=None, **kwargs):
+        if cls is TreeInterpreter and _options_requests_observation(options):
+            from jmespath.observation import ObservedTreeInterpreter
+            return object.__new__(ObservedTreeInterpreter)
+        return super(TreeInterpreter, cls).__new__(cls)
 
     def __init__(self, options=None):
         super(TreeInterpreter, self).__init__()
