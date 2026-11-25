@@ -60,6 +60,8 @@ class IndexPublisher(PublisherInterface):
 
             artifacts = [DEFAULT_BUILD_DIRECTORY]
 
+        artifacts = self._apply_release_approval(artifacts)
+
         repo = options["repo"] if "repo" in options else self.plugin_config.get("repo", "main")
         repos = self.get_repos()
         repo_config: dict[str, str] = repos[repo] if repo in repos else {"url": repo}
@@ -145,6 +147,42 @@ class IndexPublisher(PublisherInterface):
                 self.app.display_info(str(index.urls.project.child(project_name, version, "").to_iri()))
 
         credentials.write_updated_data()
+
+    def _apply_release_approval(self, artifacts: list) -> list:
+        """
+        Restrict the artifacts to those a release report marks as approved. Anything held back or
+        not covered by a report is left out so it cannot enter the release result; the local reason
+        is surfaced in the warning. When no report exists the inputs are returned unchanged.
+        """
+        from hatchling.builders.release import expand_artifacts, load_reports, select_release_artifacts
+
+        directories = []
+        for artifact in artifacts:
+            path = Path(artifact)
+            if not path.is_absolute():
+                path = self.root / path
+
+            directories.append(str(path if path.is_dir() else path.parent))
+
+        report = load_reports(directories)
+        if report is None:
+            return artifacts
+
+        expanded = expand_artifacts(artifacts, str(self.root))
+        approved, held_back, unknown = select_release_artifacts(expanded, report)
+
+        for entry in held_back:
+            self.app.display_warning(
+                f"Holding back `{entry.get('artifact')}` (target `{entry['target']}`): {entry.get('reason')}"
+            )
+
+        for path in unknown:
+            self.app.display_warning(f"Holding back `{Path(path).name}`: no release approval decision was recorded")
+
+        if not approved:
+            self.app.abort("No artifacts were approved for release")
+
+        return approved
 
 
 def recurse_artifacts(artifacts: list, root) -> Iterable[Path]:

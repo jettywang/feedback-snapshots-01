@@ -8,6 +8,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## Unreleased
 
+***Added:***
+
+- Add optional release approval through the `tool.hatch.build.release` table. Each named channel is a rule that approves or rejects a target based on the version actually recorded in the built artifact, so dynamic version sources keep working and a version declared by a build hook during the build cannot widen the approval. Every approval-enabled build writes an exportable `release-approval.json` report, rejected artifacts are moved to a local `release-rejected` directory, and decisions for targets sharing a build directory remain independent.
+
 ## [1.33.0](https://github.com/pypa/hatch/releases/tag/hatchling-v1.33.0) - 2026-10-27 ## {: #hatchling-v1.33.0 }
 
 ***Added:***

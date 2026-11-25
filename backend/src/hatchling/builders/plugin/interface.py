@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any, Generic, cast
 
 from hatchling.builders.config import BuilderConfig, BuilderConfigBound, env_var_enabled
 from hatchling.builders.constants import EXCLUDED_DIRECTORIES, EXCLUDED_FILES, BuildEnvVars
+from hatchling.builders.release import BUILD_DATA_VERSION_KEY, temporary_metadata_version
 from hatchling.builders.utils import get_relative_path, safe_walk
 from hatchling.plugin.manager import PluginManagerBound
 
@@ -127,6 +128,8 @@ class BuilderInterface(ABC, Generic[BuilderConfigBound, PluginManagerBound]):
         configured_build_hooks = self.get_build_hooks(directory)
         build_hooks = list(configured_build_hooks.values())
 
+        release_config = self.config.release_config
+
         if clean_only:
             clean = True
         elif clean is None:
@@ -137,6 +140,14 @@ class BuilderInterface(ABC, Generic[BuilderConfigBound, PluginManagerBound]):
 
             for build_hook in build_hooks:
                 build_hook.clean(versions)
+
+            if release_config is not None:
+                # A clean build starts a fresh decision for this target so that a stale entry from a
+                # previous build never influences which targets are release-eligible. Other targets
+                # sharing the directory keep their own entries.
+                from hatchling.builders.release import prune_report
+
+                prune_report(directory, self.metadata.core.raw_name, self.PLUGIN_NAME)
 
             if clean_only:
                 return
@@ -161,19 +172,80 @@ class BuilderInterface(ABC, Generic[BuilderConfigBound, PluginManagerBound]):
                 self.app.display_debug(f"Only ran build hooks for `{self.PLUGIN_NAME}` version `{version}`")
                 continue
 
-            # Build the artifact
+            # The version the target was prepared with. Approval is decided from the version that
+            # actually ends up in the artifact, so this is only used to detect a late change.
+            prepared_version = self.metadata.version
+
+            # Build the artifact, honoring any version a build hook declared for the metadata
             with self.config.set_build_data(build_data):
-                artifact = version_api[version](directory, **build_data)
+                with temporary_metadata_version(self.metadata, build_data.get(BUILD_DATA_VERSION_KEY)):
+                    # The cached project ID includes the version, so recompute it for this build
+                    self.__project_id = None
+                    artifact = version_api[version](directory, **build_data)
+                self.__project_id = None
 
             # Execute all `finalize` build hooks
             for build_hook in build_hooks:
                 build_hook.finalize(version, build_data, artifact)
+
+            if release_config is not None:
+                artifact = self.apply_release_approval(directory, artifact, prepared_version)
 
             if clean_hooks_after:
                 for build_hook in build_hooks:
                     build_hook.clean([version])
 
             yield artifact
+
+    def apply_release_approval(self, directory: str, artifact: str, prepared_version: str) -> str:
+        """
+        Decide the release status of ``artifact`` from the version recorded in its own metadata,
+        record it in the exportable report, and return where the artifact now lives. Rejected or
+        unreadable artifacts are moved to a local ``release-rejected`` directory so that only
+        approved targets remain release-eligible while the reason stays available for inspection.
+
+        Each target is evaluated independently; an unreadable artifact never aborts other targets.
+        """
+        from hatchling.builders.release import (
+            STATUS_APPROVED,
+            STATUS_INDETERMINATE,
+            decide_artifact,
+            finalize_artifact,
+        )
+
+        if not artifact.endswith((".whl", ".tar.gz")):
+            # Only distribution artifacts participate in release selection. Other build targets (for
+            # example binaries) keep their existing behavior and are never moved.
+            self.app.display_debug(
+                f"Skipping release approval for `{self.PLUGIN_NAME}` because "
+                f"`{os.path.basename(artifact)}` is not a distribution"
+            )
+            return artifact
+
+        decision = decide_artifact(
+            self.config.release_config,
+            self.PLUGIN_NAME,
+            artifact,
+            project=self.metadata.core.raw_name,
+            prepared_version=prepared_version,
+        )
+        artifact = finalize_artifact(directory, decision, artifact)
+
+        if decision.status == STATUS_APPROVED:
+            self.app.display_debug(
+                f"Target `{self.PLUGIN_NAME}` version `{decision.version}` approved by channel `{decision.channel}`"
+            )
+        elif decision.status == STATUS_INDETERMINATE:
+            self.app.display_warning(
+                f"Target `{self.PLUGIN_NAME}` could not be approved for release: {decision.reason}"
+            )
+        else:
+            self.app.display_warning(
+                f"Target `{self.PLUGIN_NAME}` version `{decision.version}` was not approved for release: "
+                f"{decision.reason}"
+            )
+
+        return artifact
 
     def recurse_included_files(self) -> Iterable[IncludedFile]:
         """

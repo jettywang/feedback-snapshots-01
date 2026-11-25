@@ -442,6 +442,12 @@ class BuilderConfig:
         return dev_mode_exact
 
     @cached_property
+    def release_config(self):
+        from hatchling.builders.release import load_release_config
+
+        return load_release_config(self.build_config, self.target_config)
+
+    @cached_property
     def versions(self) -> list[str]:
         # Used as an ordered set
         all_versions: dict[str, None] = {}

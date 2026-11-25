@@ -267,6 +267,52 @@ versions = [
 
 See the [wheel](../plugins/builder/wheel.md#versions) target for a real world example.
 
+## Release approval
+
+When a project publishes both stable and candidate releases, the channels may require different
+approval rules. Set `tool.hatch.build.release` to enable an optional release gate that decides
+whether a target may enter the release result:
+
+```toml config-example
+[tool.hatch.build.release.channels.stable]
+approved = true
+
+[tool.hatch.build.release.channels.candidate]
+approved = true
+allow-prerelease = true
+version = ">=2.0"
+```
+
+Each channel is a named rule. Only channels marked `approved = true` participate; the others are
+ignored. A build target is approved when its version matches at least one participating channel,
+evaluated in declaration order:
+
+- `allow-prerelease` (default `false`) permits pre-releases and development releases
+- `allow-local` (default `false`) permits versions with a local segment such as `1.0.0+gc0ffee`
+- `version` is an optional [specifier](dependency.md#version-specifiers) the version must match
+
+You may override the global table for a single target with
+`tool.hatch.build.targets.<TARGET_NAME>.release`.
+
+The decision is based on the version that is **actually recorded in the built artifact**, not on a
+configured or expected version. This means:
+
+- Dynamic [version sources](../version.md) keep working; the resolved version drives the decision.
+- If a build hook declares a different version at build time
+  (`build_data["declared_version"]`), the artifact is re-read and re-evaluated rather than trusting
+  the approval that was in effect before the build started.
+- Multiple targets and workspace members that share one build directory are evaluated
+  independently; one rejection never overwrites another target's decision.
+
+Every build that enables approval writes a `release-approval.json` report next to the artifacts.
+It records each target's resolved version, status, matching channel, the rules that were applied,
+and whether the version changed after the target was prepared. Approved artifacts stay in the build
+directory; rejected or unreadable artifacts are moved to a local `release-rejected` directory so
+that only approved targets remain release-eligible while the reason stays available for inspection.
+
+The [`publish`](../publish.md) command consults the report when present and only uploads artifacts
+marked approved.
+
 ## Build hooks
 
 A build hook defines code that will be executed at various stages of the build process and can be provided by any [build hook plugin](../plugins/build-hook/reference.md). There is one built-in build hook: [custom](../plugins/build-hook/custom.md).
