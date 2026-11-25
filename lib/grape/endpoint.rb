@@ -297,7 +297,9 @@ module Grape
     # +before_validation+ and +after_validation+ filters.
     def validate_and_execute(callbacks)
       run_filters callbacks, :before_validation if callbacks
+      as_sent = snapshot_params_if_subscribed
       run_validators(request:)
+      instrument_declared_params(as_sent)
       run_filters callbacks, :after_validation if callbacks
       execute
     end
@@ -340,6 +342,50 @@ module Grape
       return yield unless ActiveSupport::Notifications.notifier.listening?('endpoint_run_filters.grape')
 
       ActiveSupport::Notifications.instrument('endpoint_run_filters.grape', endpoint: self, filters:, type:, &)
+    end
+
+    # The params as the request sent them, copied before the validators run --
+    # nil when nothing subscribes to the audit event, so an unsubscribed request
+    # pays nothing. The copy keeps the builder's class at every depth and shares
+    # leaf values, which the validators never mutate in place.
+    def snapshot_params_if_subscribed
+      return unless ActiveSupport::Notifications.notifier.listening?('declared_params.grape')
+
+      deep_dup_params(params)
+    end
+
+    # Publish the externally-facing declared-param view with the provenance of
+    # every leaf. Read-only: the audit walks the params it is handed instead of
+    # writing them, and a default's provider is never called again -- the value
+    # it already produced is read from the validated params.
+    def instrument_declared_params(as_sent)
+      return if as_sent.nil?
+
+      audit = Grape::DeclaredParamsAudit.new(
+        as_sent:,
+        as_effective: params,
+        declared_params: inheritable_setting.route_declared_params,
+        renamed_params: inheritable_setting.route_renamed_params,
+        route_params: config.params
+      ).call
+
+      ActiveSupport::Notifications.instrument(
+        'declared_params.grape',
+        endpoint: self,
+        env:,
+        audit:
+      )
+    end
+
+    def deep_dup_params(value)
+      case value
+      when Hash
+        value.each_with_object(value.class.new) { |(key, element), copy| copy[key] = deep_dup_params(element) }
+      when Array
+        value.map { |element| deep_dup_params(element) }
+      else
+        value
+      end
     end
 
     def compile!
