@@ -52,6 +52,36 @@ or
 build_data['force_include']['/absolute/path/to/src/lib.so'] = 'src/lib.so'
 ```
 
+## Managed hooks and per-target approval
+
+When a single project produces artifacts for more than one build target (for example separate channels), a build hook can be marked as **managed** so that every membership change it makes through the build data is approved on a per-target basis.
+
+Set the `managed` option on the hook configuration, then declare the changes that are approved for that target under `approvals`. Three kinds of change are recognized for the membership fields (`artifacts`, `force_include`, `force_include_editable`, `shared_data`, `shared_scripts`, `extra_metadata`, and `sbom_files`):
+
+| Kind | Meaning |
+| --- | --- |
+| `add` | A new member or distribution path is introduced |
+| `relocate` | An existing source is mapped to a different distribution path |
+| `clean` | A member is removed from the build data |
+
+Each entry is a distribution path, optionally constrained by a `source`. Entries without a source match any source; when a `source` is given it is matched against the normalized source or, for files generated in temporary locations, its file name.
+
+```toml config-example
+[tool.hatch.build.targets.wheel.hooks.custom]
+managed = true
+
+[tool.hatch.build.targets.wheel.hooks.custom.approvals]
+add = ["channels/wheel/shared.txt", { path = "data/x.txt", source = "x.txt" }]
+relocate = [{ path = "moved/x.txt", source = "x.txt" }]
+clean = ["channels/wheel/shared.txt"]
+```
+
+Approval is evaluated independently for each target using that target's own configuration, so a mapping approved for one target can never enter another target's artifact. Hooks that are not managed continue to modify the build data freely. A managed hook attempting a change that was not approved raises an error, records the denied change, and aborts that target without mutating its build data.
+
+### Build receipts
+
+Every target that runs at least one managed hook produces a `BuildReceipt`, available on the builder as the `receipts` attribute. The receipt records, per hook and per build data field, each attempted operation together with whether it was applied or denied, and the final membership that entered the result. Its `status` is `success` or `failed` (with the error message), which makes it possible to tell which modifications actually made it into an artifact even when another target's post-processing fails. Targets are isolated: a failure in one target never removes members from an artifact already produced by another target.
+
 ::: hatchling.builders.hooks.plugin.interface.BuildHookInterface
     options:
       members:

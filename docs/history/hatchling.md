@@ -8,6 +8,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## Unreleased
 
+***Added:***
+
+- Build hooks can now be marked as `managed` to enforce per-target approval of the membership they add, relocate, or clean through the build data. Each target that runs a managed hook records a build receipt describing the applied and denied operations, and a failure in one target no longer affects artifacts produced by another target.
+
 ## [1.33.0](https://github.com/pypa/hatch/releases/tag/hatchling-v1.33.0) - 2026-10-27 ## {: #hatchling-v1.33.0 }
 
 ***Added:***

@@ -335,6 +335,22 @@ If you want to disable a build hook by default and control its use by [environme
 enable-by-default = false
 ```
 
+### Managed hooks
+
+When one project emits artifacts for more than one target (for example distinct channels), a hook can be made **managed** so that the membership it adds, relocates, or cleans through the [build data](../plugins/build-hook/reference.md#build-data) is approved separately for each target. Set `managed = true` on the hook and declare the approved changes under `approvals`, using the `add`, `relocate`, and `clean` buckets:
+
+```toml config-example
+[tool.hatch.build.targets.wheel.hooks.<HOOK_NAME>]
+managed = true
+
+[tool.hatch.build.targets.wheel.hooks.<HOOK_NAME>.approvals]
+add = ["channels/wheel/shared.txt"]
+relocate = [{ path = "relocated/wheel/shared.txt", source = "shared.txt" }]
+clean = ["channels/wheel/shared.txt"]
+```
+
+Approval is scoped to the target it is configured under, so a mapping allowed for one target is rejected for another. Unapproved changes raise an error and abort that target while leaving already-built artifacts of other targets intact. Each target records a build receipt describing the operations that were applied or denied; see the [build hook reference](../plugins/build-hook/reference.md#managed-hooks-and-per-target-approval) for details.
+
 ## Environment variables
 
 | Variable | Default | Description |

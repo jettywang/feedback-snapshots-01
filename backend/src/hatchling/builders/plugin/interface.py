@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import os
 import re
+import sys
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Any, Generic, cast
 
+from hatchling.builders.approval import ApprovalController, ApprovalPolicy, ManagedBuildData
 from hatchling.builders.config import BuilderConfig, BuilderConfigBound, env_var_enabled
 from hatchling.builders.constants import EXCLUDED_DIRECTORIES, EXCLUDED_FILES, BuildEnvVars
 from hatchling.builders.utils import get_relative_path, safe_walk
@@ -14,6 +16,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Generator, Iterable
 
     from hatchling.bridge.app import Application
+    from hatchling.builders.approval import BuildReceipt
     from hatchling.builders.hooks.plugin.interface import BuildHookInterface
     from hatchling.metadata.core import ProjectMetadata
 
@@ -87,6 +90,28 @@ class BuilderInterface(ABC, Generic[BuilderConfigBound, PluginManagerBound]):
         # Metadata
         self.__project_id: str | None = None
 
+        # Per-target records of managed hook approvals and the membership that resulted
+        self.__receipts: list[BuildReceipt] = []
+
+    @property
+    def receipts(self) -> list[BuildReceipt]:
+        return self.__receipts
+
+    def get_approval_policies(self) -> dict[str, ApprovalPolicy]:
+        policies: dict[str, ApprovalPolicy] = {}
+        for hook_name, hook_config in self.config.hook_config.items():
+            managed = hook_config.get("managed", False)
+            if not isinstance(managed, bool):
+                message = f"Option `managed` of build hook `{hook_name}` must be a boolean"
+                raise TypeError(message)
+
+            if not managed:
+                continue
+
+            policies[hook_name] = ApprovalPolicy.from_config(hook_config)
+
+        return policies
+
     def build(
         self,
         *,
@@ -153,25 +178,56 @@ class BuilderInterface(ABC, Generic[BuilderConfigBound, PluginManagerBound]):
             # Allow inspection of configured build hooks and the order in which they run
             build_data["build_hooks"] = tuple(configured_build_hooks)
 
+            approval_policies = self.get_approval_policies()
+            managed = bool(approval_policies)
+            controller = ApprovalController(self.PLUGIN_NAME, version, approval_policies) if managed else None
+            if controller is not None:
+                build_data = ManagedBuildData(build_data, controller)
+
+            receipt = controller.receipt if controller is not None else None
+            receipt_recorded = False
+
+            def record_receipt() -> None:
+                nonlocal receipt_recorded
+                if receipt is not None and not receipt_recorded:
+                    self.__receipts.append(receipt)
+                    receipt_recorded = True
+
             # Execute all `initialize` build hooks
-            for build_hook in build_hooks:
-                build_hook.initialize(version, build_data)
-
-            if hooks_only:
-                self.app.display_debug(f"Only ran build hooks for `{self.PLUGIN_NAME}` version `{version}`")
-                continue
-
-            # Build the artifact
-            with self.config.set_build_data(build_data):
-                artifact = version_api[version](directory, **build_data)
-
-            # Execute all `finalize` build hooks
-            for build_hook in build_hooks:
-                build_hook.finalize(version, build_data, artifact)
-
-            if clean_hooks_after:
+            try:
                 for build_hook in build_hooks:
-                    build_hook.clean([version])
+                    if controller is not None:
+                        controller.current_hook = build_hook.PLUGIN_NAME
+                    build_hook.initialize(version, build_data)
+
+                if hooks_only:
+                    self.app.display_debug(f"Only ran build hooks for `{self.PLUGIN_NAME}` version `{version}`")
+                    record_receipt()
+                    continue
+
+                # Build the artifact
+                with self.config.set_build_data(build_data):
+                    artifact = version_api[version](directory, **build_data)
+
+                # Execute all `finalize` build hooks
+                for build_hook in build_hooks:
+                    if controller is not None:
+                        controller.current_hook = build_hook.PLUGIN_NAME
+                    build_hook.finalize(version, build_data, artifact)
+
+                if clean_hooks_after:
+                    for build_hook in build_hooks:
+                        build_hook.clean([version])
+
+                if receipt is not None:
+                    receipt.result = {"artifact": artifact, "members": build_data.snapshot()}
+                record_receipt()
+            except BaseException:
+                if receipt is not None:
+                    receipt.result = {"members": build_data.snapshot()}
+                    receipt.mark_failed(sys.exc_info()[1] or RuntimeError("unknown build failure"))
+                record_receipt()
+                raise
 
             yield artifact
 

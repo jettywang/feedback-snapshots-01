@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import argparse
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from hatchling.builders.approval import BuildReceipt
 
 
 def build_impl(
@@ -61,6 +64,8 @@ def build_impl(
         os.environ[BuildEnvVars.NO_HOOKS] = "true"
 
     dynamic_dependencies: dict[str, None] = {}
+    failures: list[str] = []
+    target_receipts: list[BuildReceipt] = []
     for i, (target_name, versions) in enumerate(target_data.items()):
         # Separate targets with a blank line
         if not (clean_only or show_dynamic_deps) and i != 0:  # no cov
@@ -79,18 +84,51 @@ def build_impl(
 
             continue
 
-        for artifact in builder.build(
-            directory=directory,
-            versions=versions,
-            hooks_only=hooks_only,
-            clean=clean,
-            clean_hooks_after=clean_hooks_after,
-            clean_only=clean_only,
-        ):
+        artifacts = []
+        try:
+            artifacts = list(
+                builder.build(
+                    directory=directory,
+                    versions=versions,
+                    hooks_only=hooks_only,
+                    clean=clean,
+                    clean_hooks_after=clean_hooks_after,
+                    clean_only=clean_only,
+                )
+            )
+        except Exception as error:  # noqa: BLE001
+            # A failure in one target must not invalidate artifacts already produced by another target
+            app.display_error(f"Target `{target_name}` failed to build: {error}")
+            failures.append(target_name)
+
+        target_receipts.extend(builder.receipts)
+
+        for artifact in artifacts:
             if os.path.isfile(artifact) and artifact.startswith(root):
                 app.display_info(os.path.relpath(artifact, root))
             else:  # no cov
                 app.display_info(artifact)
+
+    for receipt in target_receipts:
+        app.display_info(
+            f"[receipt] target `{receipt.target}` ({receipt.version}) status `{receipt.status}`: "
+            f"{len(receipt.applied_operations)} applied, {len(receipt.denied_operations)} denied"
+        )
+        for operation in receipt.operations:
+            if operation.applied:
+                app.display_debug(
+                    f"  applied {operation.kind} `{operation.path}` via `{operation.field}` "
+                    f"by hook `{operation.hook}`",
+                    level=1,
+                )
+            else:
+                app.display_warning(
+                    f"  denied {operation.kind} `{operation.path}` via `{operation.field}` "
+                    f"by hook `{operation.hook}`"
+                )
+
+    if failures:
+        app.abort(f"Failed to build target(s): {', '.join(failures)}")
 
     if show_dynamic_deps:
         app.display(str(list(dynamic_dependencies)))
