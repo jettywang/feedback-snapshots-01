@@ -33,6 +33,7 @@ Authorization Code grant flow.
 
 from google.auth import _credentials_async as credentials
 from google.auth import _helpers
+from google.auth import _refresh_worker_async
 from google.auth import exceptions
 from google.oauth2 import _reauth_async as reauth
 from google.oauth2 import credentials as oauth2_credentials
@@ -46,6 +47,14 @@ class Credentials(oauth2_credentials.Credentials):
 
         credentials = credentials.with_quota_project('myproject-123)
     """
+
+    def __init__(self, *args, **kwargs):
+        super(Credentials, self).__init__(*args, **kwargs)
+        # Coalesces concurrent refreshes and keeps the shared refresh task
+        # independent of any individual waiter's cancellation.
+        self._refresh_worker_async = (
+            _refresh_worker_async.RefreshWorkerManager()
+        )
 
     @_helpers.copy_docstring(credentials.Credentials)
     async def refresh(self, request):
@@ -99,7 +108,7 @@ class Credentials(oauth2_credentials.Credentials):
     @_helpers.copy_docstring(credentials.Credentials)
     async def before_request(self, request, method, url, headers):
         if not self.valid:
-            await self.refresh(request)
+            await self._refresh_worker_async.refresh(self, request)
         self.apply(headers)
 
 

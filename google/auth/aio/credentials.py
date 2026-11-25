@@ -17,6 +17,7 @@
 
 
 from google.auth import _helpers
+from google.auth import _refresh_worker_async
 from google.auth import exceptions
 from google.auth._credentials_base import _BaseCredentials
 
@@ -42,6 +43,33 @@ class Credentials(_BaseCredentials):
 
     def __init__(self):
         super(Credentials, self).__init__()
+        self.expiry = None
+        # Coalesces concurrent refreshes and keeps the shared refresh task
+        # independent of any individual waiter's cancellation.
+        self._refresh_worker_async = (
+            _refresh_worker_async.RefreshWorkerManager()
+        )
+
+    @property
+    def expired(self):
+        """Checks if the credentials are expired.
+
+        Credentials without an :attr:`expiry` are assumed to never expire.
+        The expiration is checked early by :data:`REFRESH_THRESHOLD` to err on
+        the side of refreshing before the token actually stops working.
+        """
+        if self.expiry is None:
+            return False
+        skewed_expiry = self.expiry - _helpers.REFRESH_THRESHOLD
+        return _helpers.utcnow() >= skewed_expiry
+
+    @property
+    def valid(self):
+        """Checks if the credentials are ready to use.
+
+        Credentials are valid when they hold a token that has not expired.
+        """
+        return self.token is not None and not self.expired
 
     async def apply(self, headers, token=None):
         """Apply the token to the authentication header.
@@ -72,6 +100,10 @@ class Credentials(_BaseCredentials):
         Refreshes the credentials if necessary, then calls :meth:`apply` to
         apply the token to the authentication header.
 
+        Concurrent calls share a single in-flight refresh. A caller that is
+        cancelled while waiting raises :class:`asyncio.CancelledError` without
+        cancelling the shared refresh or affecting the other callers.
+
         Args:
             request (google.auth.aio.transport.Request): The object used to make
                 HTTP requests.
@@ -80,6 +112,8 @@ class Credentials(_BaseCredentials):
             url (str): The request's URI or the RPC service's URI.
             headers (Mapping): The request's headers.
         """
+        if not self.valid:
+            await self._refresh_worker_async.refresh(self, request)
         await self.apply(headers)
 
 

@@ -16,9 +16,9 @@
 """Interfaces for credentials."""
 
 import abc
-import inspect
 
 from google.auth import credentials
+from google.auth import _refresh_worker_async
 
 
 class Credentials(credentials.Credentials, metaclass=abc.ABCMeta):
@@ -41,11 +41,24 @@ class Credentials(credentials.Credentials, metaclass=abc.ABCMeta):
     with modifications such as :meth:`ScopedCredentials.with_scopes`.
     """
 
+    def __init__(self):
+        super(Credentials, self).__init__()
+        # Coalesces concurrent refreshes and keeps the shared refresh task
+        # independent of any individual waiter's cancellation.
+        self._refresh_worker_async = (
+            _refresh_worker_async.RefreshWorkerManager()
+        )
+
     async def before_request(self, request, method, url, headers):
         """Performs credential-specific before request logic.
 
         Refreshes the credentials if necessary, then calls :meth:`apply` to
         apply the token to the authentication header.
+
+        Concurrent calls share a single in-flight refresh. A caller that is
+        cancelled while waiting for that refresh raises
+        :class:`asyncio.CancelledError` without disturbing the shared refresh
+        or the other callers waiting on it.
 
         Args:
             request (google.auth.transport.Request): The object used to make
@@ -60,10 +73,7 @@ class Credentials(credentials.Credentials, metaclass=abc.ABCMeta):
         # the http request.)
 
         if not self.valid:
-            if inspect.iscoroutinefunction(self.refresh):
-                await self.refresh(request)
-            else:
-                self.refresh(request)
+            await self._refresh_worker_async.refresh(self, request)
         self.apply(headers)
 
 
