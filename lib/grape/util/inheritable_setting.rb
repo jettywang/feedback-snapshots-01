@@ -332,6 +332,21 @@ module Grape
         stack(CALLBACK_STORE_KEYS.fetch(callback_name), block)
       end
 
+      # Fine-grained authorization blocks registered by the +authorize+ DSL
+      # (see DSL::Authorization), outermost scope first. Each entry is the
+      # [name, block] pair the call was made with. The endpoint that actually
+      # serves a request evaluates them against itself (see Endpoint#run), so an
+      # authorizer declared on one handler never authorizes another that shares
+      # its visible path. Record them with #add_authorizer; the backing store is
+      # an internal detail.
+      def authorizers
+        stacked(:authorizers)
+      end
+
+      def add_authorizer(name, block)
+        stack(:authorizers, [name, block])
+      end
+
       # Response-shaping options recorded by +rescue_from+ (see
       # DSL::RescueOptions): every +rescue_from+ stacks one entry and the
       # nearest scope's latest registration wins on read; nil when

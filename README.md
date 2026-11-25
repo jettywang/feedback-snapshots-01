@@ -3923,6 +3923,40 @@ Use [Doorkeeper](https://github.com/doorkeeper-gem/doorkeeper), [warden-oauth2](
 
 You can access the controller params, headers, and helpers through the context with the `#context` method inside any auth middleware inherited from `Grape::Middleware::Auth::Base`.
 
+## Authorization
+
+Where authentication answers "who is calling", authorization answers "may this caller run this handler". Register an authorization block with `authorize`. It is evaluated in the context of the endpoint that serves the request, after routing has settled which handler answers, and before any `before` filter, validation or route block. Deny a request with `error!` (or by raising); return normally to allow it.
+
+```ruby
+class AccountAPI < Grape::API
+  http_basic { |user, password| User.authenticate(user, password) }
+
+  namespace :accounts do
+    authorize do
+      error!('Forbidden', 403) unless current_user.can?(:read_accounts)
+    end
+
+    get { accounts }
+  end
+end
+```
+
+An optional name labels the permission being checked. It is available inside the block as `authorization_name`, and every label guarding an endpoint is readable on the endpoint as `authorization_names`.
+
+```ruby
+authorize :read_accounts do
+  error!('Forbidden', 403) unless current_user.permissions.include?(authorization_name)
+end
+
+get '/accounts' do
+  { permissions: authorization_names }
+end
+```
+
+`authorize` is inheritable and stackable like a `before` filter: a block declared at the API level wraps every route, one inside a namespace wraps that namespace, and enclosing blocks still run, outermost first.
+
+The block belongs to the endpoint it is declared on and runs only when that endpoint actually handles the request. When several Grape APIs share one visible path — different versions, or a candidate that answers with `X-Cascade: pass` so another handler takes over — each runs its own authorizers. A permission granted on one handler never carries over to another handler on the same path.
+
 ## Describing and Inspecting an API
 
 Grape routes can be reflected at runtime. This can notably be useful for generating documentation.

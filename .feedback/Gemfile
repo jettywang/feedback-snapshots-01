@@ -1,4 +1,5 @@
 source "https://rubygems.org"
+gemspec path: "..", name: "grape"
 gem "activesupport", ">=8.0"
 gem "dry-configurable"
 gem "dry-types"

@@ -44,6 +44,18 @@ module Grape
     def_delegators :request, :params, :headers, :cookies
     def_delegator :cookies, :response_cookies
 
+    # The labels of every authorization block guarding this endpoint,
+    # outermost scope first. Two handlers can share one visible path (mounted
+    # APIs, route versions, X-Cascade candidates); the labels identify which
+    # permission set the handler that actually served the request ran.
+    def authorization_names
+      @state.inheritable_setting.authorizers.map(&:first)
+    end
+
+    # The label of the authorization block currently running (see
+    # {Grape::DSL::Authorization#authorize}), or nil outside one.
+    attr_reader :authorization_name
+
     # The API (a +Grape::API+ instance) this endpoint belongs to.
     def_delegator :config, :api
 
@@ -195,6 +207,7 @@ module Grape
         @request = Grape::Request.new(env, build_params_with: @state.build_params_with)
         callbacks = @state.callbacks
         begin
+          run_authorization
           run_filters callbacks, :before if callbacks
           @before_filter_passed = true
 
@@ -239,6 +252,25 @@ module Grape
       instrument_run_filters(filters, type) do
         filters.each { |filter| instance_eval(&filter) }
       end
+    end
+
+    # Runs the endpoint's own authorization blocks, outermost scope first. The
+    # router has already settled this endpoint as the handler by the time #run
+    # is entered, so these are the authorizers of the block that actually
+    # executes -- never those of a sibling route on the same path that
+    # cascaded, another version, or another mounted API. Each block is
+    # instance_exec'd the way route blocks are, with its label reachable as
+    # #authorization_name; denying means calling +error!+ or raising.
+    def run_authorization
+      authorizers = @state.inheritable_setting.authorizers
+      return if authorizers.empty?
+
+      authorizers.each do |name, block|
+        @authorization_name = name
+        instance_exec(&block)
+      end
+    ensure
+      @authorization_name = nil
     end
 
     def config
