@@ -22,6 +22,7 @@ from gitlab.mixins import (
     TodoMixin,
     UserAgentDetailMixin,
 )
+from gitlab.outcomes import UnconfirmedMutation
 from gitlab.types import RequiredOptional
 
 from .award_emojis import ProjectIssueAwardEmojiManager  # noqa: F401
@@ -300,7 +301,7 @@ class ProjectIssueLinkManager(
     # type error
     def create(  # type: ignore[override]
         self, data: dict[str, Any], **kwargs: Any
-    ) -> tuple[ProjectIssue, ProjectIssue]:
+    ) -> tuple[ProjectIssue, ProjectIssue] | UnconfirmedMutation:
         """Create a new object.
 
         Args:
@@ -317,6 +318,8 @@ class ProjectIssueLinkManager(
         """
         self._create_attrs.validate_attrs(data=data)
         server_data = self.gitlab.http_post(self.path, post_data=data, **kwargs)
+        if isinstance(server_data, UnconfirmedMutation):
+            return server_data
         if TYPE_CHECKING:
             assert isinstance(server_data, dict)
             assert self._parent is not None

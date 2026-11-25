@@ -122,13 +122,15 @@ class GitlabCLI:
         except Exception as e:  # pragma: no cover, cli.die is unit-tested
             cli.die("Cannot validate CI YAML", e)
 
-    def do_create(self) -> gitlab.base.RESTObject:
+    def do_create(self) -> gitlab.base.RESTObject | gitlab.UnconfirmedMutation:
         if TYPE_CHECKING:
             assert isinstance(self.mgr, gitlab.mixins.CreateMixin)
         try:
             result = self.mgr.create(self.args)
             if TYPE_CHECKING:
-                assert isinstance(result, gitlab.base.RESTObject)
+                assert isinstance(result, gitlab.base.RESTObject) or isinstance(
+                    result, gitlab.UnconfirmedMutation
+                )
         except Exception as e:  # pragma: no cover, cli.die is unit-tested
             cli.die("Impossible to create object", e)
         return result
@@ -181,11 +183,13 @@ class GitlabCLI:
             assert isinstance(self.cls._id_attr, str)
         id = self.args.pop(self.cls._id_attr)
         try:
-            self.mgr.delete(id, **self.args)
+            result = self.mgr.delete(id, **self.args)
+            if isinstance(result, gitlab.UnconfirmedMutation):
+                cli.die(f"Outcome of the delete request is unknown: {result}")
         except Exception as e:  # pragma: no cover, cli.die is unit-tested
             cli.die("Impossible to destroy object", e)
 
-    def do_update(self) -> dict[str, Any]:
+    def do_update(self) -> dict[str, Any] | gitlab.UnconfirmedMutation:
         if TYPE_CHECKING:
             assert isinstance(self.mgr, gitlab.mixins.UpdateMixin)
         if issubclass(self.mgr_cls, gitlab.mixins.GetWithoutIdMixin):
@@ -586,7 +590,9 @@ def run(
 
     printer: JSONPrinter | LegacyPrinter | YAMLPrinter = PRINTERS[output]()
 
-    if isinstance(data, dict):
+    if isinstance(data, gitlab.UnconfirmedMutation):
+        printer.display(data.describe(), verbose=True, obj=data.describe())
+    elif isinstance(data, dict):
         printer.display(data, verbose=True, obj=data)
     elif isinstance(data, list):
         printer.display_list(data, fields, verbose=verbose)

@@ -101,6 +101,17 @@ class Retry:
         self.obey_rate_limit = obey_rate_limit
         self.retry_transient_errors = retry_transient_errors
 
+    @staticmethod
+    def rejected_before_processing(status_code: int | None, reason: str = "") -> bool:
+        """Whether the server rejected the request without processing it.
+
+        Rate-limited requests and requests rejected because of a resource lock
+        are safe to send again, including for non-idempotent mutations.
+        """
+        if status_code == 429:
+            return True
+        return status_code == 409 and "Resource lock" in reason
+
     def _retryable_status_code(self, status_code: int | None, reason: str = "") -> bool:
         if status_code == 429 and self.obey_rate_limit:
             return True

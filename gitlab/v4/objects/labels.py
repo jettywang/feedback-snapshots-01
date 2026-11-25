@@ -14,6 +14,7 @@ from gitlab.mixins import (
     SubscribableMixin,
     UpdateMixin,
 )
+from gitlab.outcomes import UnconfirmedMutation
 from gitlab.types import RequiredOptional
 
 __all__ = ["GroupLabel", "GroupLabelManager", "ProjectLabel", "ProjectLabelManager"]
@@ -25,7 +26,7 @@ class GroupLabel(SubscribableMixin, SaveMixin, ObjectDeleteMixin, RESTObject):
 
     # Update without ID, but we need an ID to get from list.
     @exc.on_http_error(exc.GitlabUpdateError)
-    def save(self, **kwargs: Any) -> None:
+    def save(self, **kwargs: Any) -> UnconfirmedMutation | None:
         """Saves the changes made to the object to the server.
 
         The object is updated to match what the server returns.
@@ -41,7 +42,10 @@ class GroupLabel(SubscribableMixin, SaveMixin, ObjectDeleteMixin, RESTObject):
 
         # call the manager
         server_data = self.manager.update(None, updated_data, **kwargs)
+        if isinstance(server_data, UnconfirmedMutation):
+            return server_data
         self._update_attrs(server_data)
+        return None
 
 
 class GroupLabelManager(
@@ -65,7 +69,7 @@ class GroupLabelManager(
     # type error
     def update(  # type: ignore[override]
         self, name: str | None, new_data: dict[str, Any] | None = None, **kwargs: Any
-    ) -> dict[str, Any]:
+    ) -> dict[str, Any] | UnconfirmedMutation:
         """Update a Label on the server.
 
         Args:
@@ -86,7 +90,7 @@ class ProjectLabel(
 
     # Update without ID, but we need an ID to get from list.
     @exc.on_http_error(exc.GitlabUpdateError)
-    def save(self, **kwargs: Any) -> None:
+    def save(self, **kwargs: Any) -> UnconfirmedMutation | None:
         """Saves the changes made to the object to the server.
 
         The object is updated to match what the server returns.
@@ -102,7 +106,10 @@ class ProjectLabel(
 
         # call the manager
         server_data = self.manager.update(None, updated_data, **kwargs)
+        if isinstance(server_data, UnconfirmedMutation):
+            return server_data
         self._update_attrs(server_data)
+        return None
 
 
 class ProjectLabelManager(
@@ -126,7 +133,7 @@ class ProjectLabelManager(
     # type error
     def update(  # type: ignore[override]
         self, name: str | None, new_data: dict[str, Any] | None = None, **kwargs: Any
-    ) -> dict[str, Any]:
+    ) -> dict[str, Any] | UnconfirmedMutation:
         """Update a Label on the server.
 
         Args:

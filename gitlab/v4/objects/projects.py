@@ -26,6 +26,7 @@ from gitlab.mixins import (
     UpdateMixin,
     UploadMixin,
 )
+from gitlab.outcomes import UnconfirmedMutation
 from gitlab.types import RequiredOptional
 
 from .access_requests import ProjectAccessRequestManager  # noqa: F401
@@ -296,7 +297,9 @@ class Project(
 
     @cli.register_custom_action(cls_names="Project")
     @exc.on_http_error(exc.GitlabGetError)
-    def languages(self, **kwargs: Any) -> dict[str, Any] | requests.Response:
+    def languages(
+        self, **kwargs: Any
+    ) -> dict[str, Any] | requests.Response | UnconfirmedMutation:
         """Get languages used in the project with percentage value.
 
         Args:
@@ -439,7 +442,7 @@ class Project(
         variables: dict[str, Any] | None = None,
         inputs: dict[str, Any] | None = None,
         **kwargs: Any,
-    ) -> ProjectPipeline:
+    ) -> ProjectPipeline | UnconfirmedMutation:
         """Trigger a CI build.
 
         See https://gitlab.com/help/ci/triggers/README.md#trigger-a-build
@@ -465,6 +468,8 @@ class Project(
             "inputs": inputs,
         }
         attrs = self.manager.gitlab.http_post(path, post_data=post_data, **kwargs)
+        if isinstance(attrs, UnconfirmedMutation):
+            return attrs
         if TYPE_CHECKING:
             assert isinstance(attrs, dict)
         return ProjectPipeline(self.pipelines, attrs)
@@ -883,7 +888,7 @@ class ProjectManager(CRUDMixin[Project]):
         overwrite: bool = False,
         override_params: dict[str, Any] | None = None,
         **kwargs: Any,
-    ) -> dict[str, Any] | requests.Response:
+    ) -> dict[str, Any] | requests.Response | UnconfirmedMutation:
         """Import a project from an archive file.
 
         Args:
@@ -928,7 +933,7 @@ class ProjectManager(CRUDMixin[Project]):
         overwrite: bool = False,
         override_params: dict[str, Any] | None = None,
         **kwargs: Any,
-    ) -> dict[str, Any] | requests.Response:
+    ) -> dict[str, Any] | requests.Response | UnconfirmedMutation:
         """Import a project from an archive file stored on a remote URL.
 
         Args:
@@ -976,7 +981,7 @@ class ProjectManager(CRUDMixin[Project]):
         overwrite: bool = False,
         override_params: dict[str, Any] | None = None,
         **kwargs: Any,
-    ) -> dict[str, Any] | requests.Response:
+    ) -> dict[str, Any] | requests.Response | UnconfirmedMutation:
         """Import a project from an archive file stored on AWS S3.
 
         Args:
@@ -1032,7 +1037,7 @@ class ProjectManager(CRUDMixin[Project]):
         new_name: str | None = None,
         target_namespace: str | None = None,
         **kwargs: Any,
-    ) -> dict[str, Any] | requests.Response:
+    ) -> dict[str, Any] | requests.Response | UnconfirmedMutation:
         """Import a project from BitBucket Server to Gitlab (schedule the import)
 
         This method will return when an import operation has been safely queued,
@@ -1123,7 +1128,7 @@ class ProjectManager(CRUDMixin[Project]):
         github_hostname: str | None = None,
         optional_stages: dict[str, bool] | None = None,
         **kwargs: Any,
-    ) -> dict[str, Any] | requests.Response:
+    ) -> dict[str, Any] | requests.Response | UnconfirmedMutation:
         """Import a project from Github to Gitlab (schedule the import)
 
         This method will return when an import operation has been safely queued,
@@ -1220,7 +1225,9 @@ class ProjectForkManager(CreateMixin[ProjectFork], ListMixin[ProjectFork]):
     )
     _create_attrs = RequiredOptional(optional=("namespace",))
 
-    def create(self, data: dict[str, Any] | None = None, **kwargs: Any) -> ProjectFork:
+    def create(
+        self, data: dict[str, Any] | None = None, **kwargs: Any
+    ) -> ProjectFork | UnconfirmedMutation:
         """Creates a new object.
 
         Args:
@@ -1243,7 +1250,9 @@ class ProjectForkManager(CreateMixin[ProjectFork], ListMixin[ProjectFork]):
 class ProjectRemoteMirror(ObjectDeleteMixin, SaveMixin, RESTObject):
     @cli.register_custom_action(cls_names="ProjectRemoteMirror")
     @exc.on_http_error(exc.GitlabCreateError)
-    def sync(self, **kwargs: Any) -> dict[str, Any] | requests.Response:
+    def sync(
+        self, **kwargs: Any
+    ) -> dict[str, Any] | requests.Response | UnconfirmedMutation:
         """Force push mirror update.
 
         Args:
@@ -1285,7 +1294,9 @@ class ProjectPullMirrorManager(
     _update_attrs = RequiredOptional(optional=("url",))
 
     @exc.on_http_error(exc.GitlabCreateError)
-    def create(self, data: dict[str, Any], **kwargs: Any) -> ProjectPullMirror:
+    def create(
+        self, data: dict[str, Any], **kwargs: Any
+    ) -> ProjectPullMirror | UnconfirmedMutation:
         """Create a new object.
 
         Args:
@@ -1307,6 +1318,8 @@ class ProjectPullMirrorManager(
 
         server_data = self.gitlab.http_put(self.path, post_data=data, **kwargs)
 
+        if isinstance(server_data, UnconfirmedMutation):
+            return server_data
         if TYPE_CHECKING:
             assert not isinstance(server_data, requests.Response)
         return self._obj_cls(self, server_data)

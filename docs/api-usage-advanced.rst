@@ -193,6 +193,59 @@ parameter to that API invocation:
    gl = gitlab.Gitlab(url, token, api_version=4)
    gl.projects.import_github(ACCESS_TOKEN, 123456, "root", timeout=120.0)
 
+Conservative mutations
+----------------------
+
+Retrying a request that changes permissions can apply the change twice when the
+server accepted the first request but the connection failed before the response
+arrived. Set ``conservative_mutations=True`` to opt into a conservative policy
+for mutating requests (``POST``, ``PUT``, ``PATCH``, and ``DELETE``):
+
+* Successful calls are unchanged: they return the server data and update the
+  local object as before.
+* If the request may have reached the server but the outcome is unknown (a
+  timeout, a dropped connection, or a 5xx/52x response), python-gitlab does not
+  resend it. The call returns a ``gitlab.UnconfirmedMutation`` describing the
+  pending change instead.
+* Requests that the server rejected before processing (HTTP 429 rate limits and
+  HTTP 409 "Resource lock" conflicts) are still retried, because they were not
+  applied.
+* Read requests keep using the normal ``retry_transient_errors`` policy.
+
+.. code-block:: python
+
+   import gitlab
+
+   gl = gitlab.Gitlab(url, token, conservative_mutations=True)
+   member = gl.groups.get(1).members.get(7)
+   member.access_level = gitlab.const.MAINTAINER_ACCESS
+
+   result = member.save()
+   if isinstance(result, gitlab.UnconfirmedMutation):
+       # The change may or may not have been applied. Verify it with an
+       # independent read, a fresh lookup, or the server's audit log.
+       current = gl.groups.get(1).members.get(7)
+       print(result.describe())
+       print(current.access_level)
+   else:
+       print(result)  # normal server data, object already updated
+
+``UnconfirmedMutation`` exposes ``verb``, ``path``, ``attempts``, ``error``,
+``status == "pending_verification"``, and ``outcome == "unknown"``. While an
+outcome is pending the local object is left untouched, and no additional local
+state changes (for example a user's ``state`` attribute) are applied.
+
+The option can also be set per call and in configuration files:
+
+.. code-block:: python
+
+   gl.http_post("/projects/1/access_requests", conservative_mutations=True)
+
+.. code-block:: ini
+
+   [global]
+   conservative_mutations = true
+
 Typing
 ------
 

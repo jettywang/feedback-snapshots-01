@@ -5,6 +5,7 @@ from typing import Any
 from gitlab import exceptions as exc
 from gitlab.base import RESTObject
 from gitlab.mixins import CRUDMixin, ObjectDeleteMixin, SaveMixin
+from gitlab.outcomes import UnconfirmedMutation
 from gitlab.types import RequiredOptional
 
 __all__ = [
@@ -38,7 +39,9 @@ class GroupClusterManager(CRUDMixin[GroupCluster]):
     )
 
     @exc.on_http_error(exc.GitlabStopError)
-    def create(self, data: dict[str, Any] | None = None, **kwargs: Any) -> GroupCluster:
+    def create(
+        self, data: dict[str, Any] | None = None, **kwargs: Any
+    ) -> GroupCluster | UnconfirmedMutation:
         """Create a new object.
 
         Args:
@@ -84,7 +87,7 @@ class ProjectClusterManager(CRUDMixin[ProjectCluster]):
     @exc.on_http_error(exc.GitlabStopError)
     def create(
         self, data: dict[str, Any] | None = None, **kwargs: Any
-    ) -> ProjectCluster:
+    ) -> ProjectCluster | UnconfirmedMutation:
         """Create a new object.
 
         Args:

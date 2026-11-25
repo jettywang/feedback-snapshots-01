@@ -18,6 +18,7 @@ from gitlab.mixins import (
     ObjectDeleteMixin,
     SaveMixin,
 )
+from gitlab.outcomes import UnconfirmedMutation
 from gitlab.types import RequiredOptional
 
 from .access_requests import GroupAccessRequestManager  # noqa: F401
@@ -333,7 +334,7 @@ class GroupManager(CRUDMixin[Group]):
         name: str,
         parent_id: int | str | None = None,
         **kwargs: Any,
-    ) -> dict[str, Any] | requests.Response:
+    ) -> dict[str, Any] | requests.Response | UnconfirmedMutation:
         """Import a group from an archive file.
 
         Args:

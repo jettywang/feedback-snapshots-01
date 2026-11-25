@@ -146,6 +146,7 @@ def test_default_config(monkeypatch):
     assert cp.pagination is None
     assert cp.per_page is None
     assert cp.retry_transient_errors is False
+    assert cp.conservative_mutations is False
     assert cp.ssl_verify is True
     assert cp.timeout == 60
     assert cp.url is None
@@ -382,3 +383,35 @@ def test_config_retry_transient_errors_when_global_config_is_set(
         m.setattr(Path, "resolve", _mock_existent_file)
         cp = config.GitlabConfigParser()
     assert cp.retry_transient_errors == expected
+
+
+@mock.patch("builtins.open")
+@pytest.mark.parametrize(
+    "config_string,expected",
+    [
+        pytest.param(valid_config, False, id="default_value"),
+        pytest.param(
+            global_retry_transient_errors(True).replace(
+                "retry_transient_errors", "conservative_mutations"
+            ),
+            True,
+            id="global_config_true",
+        ),
+        pytest.param(
+            global_and_gitlab_retry_transient_errors(False, True).replace(
+                "retry_transient_errors", "conservative_mutations"
+            ),
+            True,
+            id="gitlab_overrides_global_true",
+        ),
+    ],
+)
+def test_config_conservative_mutations(m_open, monkeypatch, config_string, expected):
+    fd = io.StringIO(config_string)
+    fd.close = mock.Mock(return_value=None)
+    m_open.return_value = fd
+
+    with monkeypatch.context() as m:
+        m.setattr(Path, "resolve", _mock_existent_file)
+        cp = config.GitlabConfigParser()
+    assert cp.conservative_mutations == expected

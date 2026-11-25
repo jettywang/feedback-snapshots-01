@@ -5,6 +5,7 @@ from typing import Any
 from gitlab.base import RESTObject, TObjCls
 from gitlab.exceptions import GitlabInvitationError
 from gitlab.mixins import CRUDMixin, ObjectDeleteMixin, SaveMixin
+from gitlab.outcomes import UnconfirmedMutation
 from gitlab.types import ArrayAttribute, CommaSeparatedListAttribute, RequiredOptional
 
 __all__ = [
@@ -17,8 +18,13 @@ __all__ = [
 
 class InvitationMixin(CRUDMixin[TObjCls]):
     # pylint: disable=abstract-method
-    def create(self, data: dict[str, Any] | None = None, **kwargs: Any) -> TObjCls:
+    def create(
+        self, data: dict[str, Any] | None = None, **kwargs: Any
+    ) -> TObjCls | UnconfirmedMutation:
         invitation = super().create(data, **kwargs)
+
+        if isinstance(invitation, UnconfirmedMutation):
+            return invitation
 
         if invitation.status == "error":
             raise GitlabInvitationError(invitation.message)

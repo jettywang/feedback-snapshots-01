@@ -5,6 +5,7 @@ from typing import Any
 from gitlab import exceptions as exc
 from gitlab.base import RESTObject
 from gitlab.mixins import GetWithoutIdMixin, SaveMixin, UpdateMixin
+from gitlab.outcomes import UnconfirmedMutation
 from gitlab.types import RequiredOptional
 
 __all__ = ["ApplicationAppearance", "ApplicationAppearanceManager"]
@@ -41,7 +42,7 @@ class ApplicationAppearanceManager(
         id: str | int | None = None,
         new_data: dict[str, Any] | None = None,
         **kwargs: Any,
-    ) -> dict[str, Any]:
+    ) -> dict[str, Any] | UnconfirmedMutation:
         """Update an object on the server.
 
         Args:

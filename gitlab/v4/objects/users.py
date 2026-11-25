@@ -26,6 +26,7 @@ from gitlab.mixins import (
     SaveMixin,
     UpdateMixin,
 )
+from gitlab.outcomes import UnconfirmedMutation
 from gitlab.types import ArrayAttribute, RequiredOptional
 
 from .custom_attributes import UserCustomAttributeManager  # noqa: F401
@@ -215,7 +216,9 @@ class User(SaveMixin, ObjectDeleteMixin, RESTObject):
 
     @cli.register_custom_action(cls_names="User")
     @exc.on_http_error(exc.GitlabFollowError)
-    def follow(self, **kwargs: Any) -> dict[str, Any] | requests.Response:
+    def follow(
+        self, **kwargs: Any
+    ) -> dict[str, Any] | requests.Response | UnconfirmedMutation:
         """Follow the user.
 
         Args:
@@ -233,7 +236,9 @@ class User(SaveMixin, ObjectDeleteMixin, RESTObject):
 
     @cli.register_custom_action(cls_names="User")
     @exc.on_http_error(exc.GitlabUnfollowError)
-    def unfollow(self, **kwargs: Any) -> dict[str, Any] | requests.Response:
+    def unfollow(
+        self, **kwargs: Any
+    ) -> dict[str, Any] | requests.Response | UnconfirmedMutation:
         """Unfollow the user.
 
         Args:
@@ -276,7 +281,9 @@ class User(SaveMixin, ObjectDeleteMixin, RESTObject):
 
     @cli.register_custom_action(cls_names="User")
     @exc.on_http_error(exc.GitlabDeactivateError)
-    def deactivate(self, **kwargs: Any) -> dict[str, Any] | requests.Response:
+    def deactivate(
+        self, **kwargs: Any
+    ) -> dict[str, Any] | requests.Response | UnconfirmedMutation:
         """Deactivate the user.
 
         Args:
@@ -291,13 +298,17 @@ class User(SaveMixin, ObjectDeleteMixin, RESTObject):
         """
         path = f"/users/{self.encoded_id}/deactivate"
         server_data = self.manager.gitlab.http_post(path, **kwargs)
+        if isinstance(server_data, UnconfirmedMutation):
+            return server_data
         if server_data:
             self._attrs["state"] = "deactivated"
         return server_data
 
     @cli.register_custom_action(cls_names="User")
     @exc.on_http_error(exc.GitlabActivateError)
-    def activate(self, **kwargs: Any) -> dict[str, Any] | requests.Response:
+    def activate(
+        self, **kwargs: Any
+    ) -> dict[str, Any] | requests.Response | UnconfirmedMutation:
         """Activate the user.
 
         Args:
@@ -312,13 +323,17 @@ class User(SaveMixin, ObjectDeleteMixin, RESTObject):
         """
         path = f"/users/{self.encoded_id}/activate"
         server_data = self.manager.gitlab.http_post(path, **kwargs)
+        if isinstance(server_data, UnconfirmedMutation):
+            return server_data
         if server_data:
             self._attrs["state"] = "active"
         return server_data
 
     @cli.register_custom_action(cls_names="User")
     @exc.on_http_error(exc.GitlabUserApproveError)
-    def approve(self, **kwargs: Any) -> dict[str, Any] | requests.Response:
+    def approve(
+        self, **kwargs: Any
+    ) -> dict[str, Any] | requests.Response | UnconfirmedMutation:
         """Approve a user creation request.
 
         Args:
@@ -336,7 +351,9 @@ class User(SaveMixin, ObjectDeleteMixin, RESTObject):
 
     @cli.register_custom_action(cls_names="User")
     @exc.on_http_error(exc.GitlabUserRejectError)
-    def reject(self, **kwargs: Any) -> dict[str, Any] | requests.Response:
+    def reject(
+        self, **kwargs: Any
+    ) -> dict[str, Any] | requests.Response | UnconfirmedMutation:
         """Reject a user creation request.
 
         Args:
@@ -354,7 +371,9 @@ class User(SaveMixin, ObjectDeleteMixin, RESTObject):
 
     @cli.register_custom_action(cls_names="User")
     @exc.on_http_error(exc.GitlabBanError)
-    def ban(self, **kwargs: Any) -> dict[str, Any] | requests.Response:
+    def ban(
+        self, **kwargs: Any
+    ) -> dict[str, Any] | requests.Response | UnconfirmedMutation:
         """Ban the user.
 
         Args:
@@ -369,13 +388,17 @@ class User(SaveMixin, ObjectDeleteMixin, RESTObject):
         """
         path = f"/users/{self.encoded_id}/ban"
         server_data = self.manager.gitlab.http_post(path, **kwargs)
+        if isinstance(server_data, UnconfirmedMutation):
+            return server_data
         if server_data:
             self._attrs["state"] = "banned"
         return server_data
 
     @cli.register_custom_action(cls_names="User")
     @exc.on_http_error(exc.GitlabUnbanError)
-    def unban(self, **kwargs: Any) -> dict[str, Any] | requests.Response:
+    def unban(
+        self, **kwargs: Any
+    ) -> dict[str, Any] | requests.Response | UnconfirmedMutation:
         """Unban the user.
 
         Args:
@@ -390,6 +413,8 @@ class User(SaveMixin, ObjectDeleteMixin, RESTObject):
         """
         path = f"/users/{self.encoded_id}/unban"
         server_data = self.manager.gitlab.http_post(path, **kwargs)
+        if isinstance(server_data, UnconfirmedMutation):
+            return server_data
         if server_data:
             self._attrs["state"] = "active"
         return server_data

@@ -19,6 +19,7 @@ from gitlab.mixins import (
     SaveMixin,
     UpdateMixin,
 )
+from gitlab.outcomes import UnconfirmedMutation
 from gitlab.types import ArrayAttribute, RequiredOptional
 
 __all__ = [
@@ -66,7 +67,9 @@ class ProjectPipeline(RefreshMixin, ObjectDeleteMixin, RESTObject):
 
     @cli.register_custom_action(cls_names="ProjectPipeline")
     @exc.on_http_error(exc.GitlabPipelineCancelError)
-    def cancel(self, **kwargs: Any) -> dict[str, Any] | requests.Response:
+    def cancel(
+        self, **kwargs: Any
+    ) -> dict[str, Any] | requests.Response | UnconfirmedMutation:
         """Cancel the job.
 
         Args:
@@ -81,7 +84,9 @@ class ProjectPipeline(RefreshMixin, ObjectDeleteMixin, RESTObject):
 
     @cli.register_custom_action(cls_names="ProjectPipeline")
     @exc.on_http_error(exc.GitlabPipelineRetryError)
-    def retry(self, **kwargs: Any) -> dict[str, Any] | requests.Response:
+    def retry(
+        self, **kwargs: Any
+    ) -> dict[str, Any] | requests.Response | UnconfirmedMutation:
         """Retry the job.
 
         Args:
@@ -119,7 +124,7 @@ class ProjectPipelineManager(
 
     def create(
         self, data: dict[str, Any] | None = None, **kwargs: Any
-    ) -> ProjectPipeline:
+    ) -> ProjectPipeline | UnconfirmedMutation:
         """Creates a new object.
 
         Args:

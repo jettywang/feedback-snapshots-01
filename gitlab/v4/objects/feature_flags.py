@@ -10,6 +10,7 @@ from typing import Any
 from gitlab import types, utils
 from gitlab.base import RESTObject
 from gitlab.mixins import CRUDMixin, ObjectDeleteMixin, SaveMixin
+from gitlab.outcomes import UnconfirmedMutation
 from gitlab.types import RequiredOptional
 
 __all__ = ["ProjectFeatureFlag", "ProjectFeatureFlagManager"]
@@ -33,7 +34,7 @@ class ProjectFeatureFlag(SaveMixin, ObjectDeleteMixin, RESTObject):
             return obj_id
         return self.encoded_id
 
-    def save(self, **kwargs: Any) -> dict[str, Any] | None:
+    def save(self, **kwargs: Any) -> dict[str, Any] | UnconfirmedMutation | None:
         """Save the changes made to the object to the server.
 
         This is the standard method to use when updating a feature flag object
@@ -59,6 +60,8 @@ class ProjectFeatureFlag(SaveMixin, ObjectDeleteMixin, RESTObject):
 
         obj_id = self._get_save_url_id()
         server_data = self.manager.update(obj_id, updated_data, **kwargs)
+        if isinstance(server_data, UnconfirmedMutation):
+            return server_data
         self._update_attrs(server_data)
         return server_data
 
@@ -82,7 +85,7 @@ class ProjectFeatureFlagManager(CRUDMixin[ProjectFeatureFlag]):
         id: str | int | None = None,
         new_data: dict[str, Any] | None = None,
         **kwargs: Any,
-    ) -> dict[str, Any]:
+    ) -> dict[str, Any] | UnconfirmedMutation:
         """Update a Project Feature Flag.
 
         This is a lower-level method called by `ProjectFeatureFlag.save()` and

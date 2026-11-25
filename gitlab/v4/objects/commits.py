@@ -9,6 +9,7 @@ from gitlab import cli
 from gitlab import exceptions as exc
 from gitlab.base import RESTObject
 from gitlab.mixins import CreateMixin, ListMixin, RefreshMixin, RetrieveMixin
+from gitlab.outcomes import UnconfirmedMutation
 from gitlab.types import RequiredOptional
 
 from .discussions import ProjectCommitDiscussionManager  # noqa: F401
@@ -52,7 +53,7 @@ class ProjectCommit(RESTObject):
     @exc.on_http_error(exc.GitlabCherryPickError)
     def cherry_pick(
         self, branch: str, **kwargs: Any
-    ) -> dict[str, Any] | requests.Response:
+    ) -> dict[str, Any] | requests.Response | UnconfirmedMutation:
         """Cherry-pick a commit into a branch.
 
         Args:
@@ -112,7 +113,9 @@ class ProjectCommit(RESTObject):
 
     @cli.register_custom_action(cls_names="ProjectCommit", required=("branch",))
     @exc.on_http_error(exc.GitlabRevertError)
-    def revert(self, branch: str, **kwargs: Any) -> dict[str, Any] | requests.Response:
+    def revert(
+        self, branch: str, **kwargs: Any
+    ) -> dict[str, Any] | requests.Response | UnconfirmedMutation:
         """Revert a commit on a given branch.
 
         Args:
@@ -222,7 +225,7 @@ class ProjectCommitStatusManager(
     @exc.on_http_error(exc.GitlabCreateError)
     def create(
         self, data: dict[str, Any] | None = None, **kwargs: Any
-    ) -> ProjectCommitStatus:
+    ) -> ProjectCommitStatus | UnconfirmedMutation:
         """Create a new object.
 
         Args:

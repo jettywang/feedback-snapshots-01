@@ -26,6 +26,7 @@ from gitlab.mixins import (
     TimeTrackingMixin,
     TodoMixin,
 )
+from gitlab.outcomes import UnconfirmedMutation
 from gitlab.types import RequiredOptional
 
 from .award_emojis import ProjectMergeRequestAwardEmojiManager  # noqa: F401
@@ -354,7 +355,9 @@ class ProjectMergeRequest(
 
     @cli.register_custom_action(cls_names="ProjectMergeRequest")
     @exc.on_http_error(exc.GitlabMRRebaseError)
-    def rebase(self, **kwargs: Any) -> dict[str, Any] | requests.Response:
+    def rebase(
+        self, **kwargs: Any
+    ) -> dict[str, Any] | requests.Response | UnconfirmedMutation:
         """Attempt to rebase the source branch onto the target branch
 
         Args:
@@ -370,7 +373,9 @@ class ProjectMergeRequest(
 
     @cli.register_custom_action(cls_names="ProjectMergeRequest")
     @exc.on_http_error(exc.GitlabMRResetApprovalError)
-    def reset_approvals(self, **kwargs: Any) -> dict[str, Any] | requests.Response:
+    def reset_approvals(
+        self, **kwargs: Any
+    ) -> dict[str, Any] | requests.Response | UnconfirmedMutation:
         """Clear all approvals of the merge request.
 
         Args:

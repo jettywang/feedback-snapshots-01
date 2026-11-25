@@ -103,6 +103,7 @@ class GitlabConfigParser:
         self.pagination: str | None = None
         self.per_page: int | None = None
         self.retry_transient_errors: bool = False
+        self.conservative_mutations: bool = False
         self.ssl_verify: bool | str = True
         self.timeout: int = 60
         self.url: str | None = None
@@ -253,6 +254,19 @@ class GitlabConfigParser:
         try:
             self.retry_transient_errors = _config.getboolean(
                 self.gitlab_id, "retry_transient_errors"
+            )
+        except _CONFIG_PARSER_ERRORS:
+            pass
+
+        try:
+            self.conservative_mutations = _config.getboolean(
+                "global", "conservative_mutations"
+            )
+        except _CONFIG_PARSER_ERRORS:
+            pass
+        try:
+            self.conservative_mutations = _config.getboolean(
+                self.gitlab_id, "conservative_mutations"
             )
         except _CONFIG_PARSER_ERRORS:
             pass

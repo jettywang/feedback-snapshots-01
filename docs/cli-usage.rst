@@ -132,6 +132,13 @@ parameters. You can override the values in each GitLab server section.
    * - ``user_agent``
      - ``str``
      - A string defining a custom user agent to use when ``gitlab`` makes requests.
+   * - ``retry_transient_errors``
+     - ``True`` or ``False``
+     - Retry transient HTTP errors and request timeouts. Defaults to ``False``.
+   * - ``conservative_mutations``
+     - ``True`` or ``False``
+     - Do not retry mutating requests whose remote outcome is unknown. Defaults
+       to ``False``.
 
 You must define the ``url`` in each GitLab server section.
 

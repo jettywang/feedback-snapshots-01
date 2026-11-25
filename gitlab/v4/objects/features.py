@@ -11,6 +11,7 @@ from gitlab import exceptions as exc
 from gitlab import utils
 from gitlab.base import RESTObject
 from gitlab.mixins import DeleteMixin, ListMixin, ObjectDeleteMixin
+from gitlab.outcomes import UnconfirmedMutation
 
 __all__ = ["Feature", "FeatureManager"]
 
@@ -33,7 +34,7 @@ class FeatureManager(ListMixin[Feature], DeleteMixin[Feature]):
         group: str | None = None,
         project: str | None = None,
         **kwargs: Any,
-    ) -> Feature:
+    ) -> Feature | UnconfirmedMutation:
         """Create or update the object.
 
         Args:
@@ -63,6 +64,8 @@ class FeatureManager(ListMixin[Feature], DeleteMixin[Feature]):
         }
         data = utils.remove_none_from_dict(data)
         server_data = self.gitlab.http_post(path, post_data=data, **kwargs)
+        if isinstance(server_data, UnconfirmedMutation):
+            return server_data
         if TYPE_CHECKING:
             assert isinstance(server_data, dict)
         return self._obj_cls(self, server_data)

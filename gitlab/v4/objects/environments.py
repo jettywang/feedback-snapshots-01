@@ -15,6 +15,7 @@ from gitlab.mixins import (
     SaveMixin,
     UpdateMixin,
 )
+from gitlab.outcomes import UnconfirmedMutation
 from gitlab.types import ArrayAttribute, RequiredOptional
 
 __all__ = [
@@ -28,7 +29,9 @@ __all__ = [
 class ProjectEnvironment(SaveMixin, ObjectDeleteMixin, RESTObject):
     @cli.register_custom_action(cls_names="ProjectEnvironment")
     @exc.on_http_error(exc.GitlabStopError)
-    def stop(self, **kwargs: Any) -> dict[str, Any] | requests.Response:
+    def stop(
+        self, **kwargs: Any
+    ) -> dict[str, Any] | requests.Response | UnconfirmedMutation:
         """Stop the environment.
 
         Args:

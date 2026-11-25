@@ -9,6 +9,7 @@ from gitlab.base import RESTObject
 from gitlab.cli import register_custom_action
 from gitlab.exceptions import GitlabCiLintError
 from gitlab.mixins import CreateMixin, GetWithoutIdMixin
+from gitlab.outcomes import UnconfirmedMutation
 from gitlab.types import RequiredOptional
 
 __all__ = ["CiLint", "CiLintManager", "ProjectCiLint", "ProjectCiLintManager"]
@@ -35,6 +36,8 @@ class CiLintManager(CreateMixin[CiLint]):
 
         This is a custom python-gitlab method to wrap lint endpoints."""
         result = self.create(*args, **kwargs)
+        if isinstance(result, UnconfirmedMutation):
+            raise GitlabCiLintError(str(result))
 
         if result.status != "valid":
             message = ",\n".join(result.errors)
@@ -73,6 +76,8 @@ class ProjectCiLintManager(
 
         This is a custom python-gitlab method to wrap lint endpoints."""
         result = self.create(*args, **kwargs)
+        if isinstance(result, UnconfirmedMutation):
+            raise GitlabCiLintError(str(result))
 
         if not result.valid:
             message = ",\n".join(result.errors)

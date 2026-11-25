@@ -14,6 +14,7 @@ import gitlab.config
 import gitlab.const
 import gitlab.exceptions
 from gitlab import _backends, utils
+from gitlab.outcomes import UnconfirmedMutation
 
 try:
     import gql
@@ -63,6 +64,10 @@ class Gitlab:
             or 52x responses, or after a request timeout. Defaults to False.
         keep_base_url: keep user-provided base URL for pagination if it
             differs from response headers
+        conservative_mutations: Whether mutating requests (POST, PUT, PATCH,
+            DELETE) should stop retrying when the remote outcome is unknown
+            and return an :class:`~gitlab.outcomes.UnconfirmedMutation`
+            instead. Defaults to False.
 
     Keyword Args:
         requests.Session session: HTTP Requests Session
@@ -86,6 +91,7 @@ class Gitlab:
         user_agent: str = gitlab.const.USER_AGENT,
         retry_transient_errors: bool = False,
         keep_base_url: bool = False,
+        conservative_mutations: bool = False,
         **kwargs: Any,
     ) -> None:
         self._api_version = str(api_version)
@@ -96,6 +102,7 @@ class Gitlab:
         #: Timeout to use for requests to gitlab server
         self.timeout = timeout
         self.retry_transient_errors = retry_transient_errors
+        self.conservative_mutations = conservative_mutations
         self.keep_base_url = keep_base_url
         #: Headers that will be used in request to GitLab
         self.headers = {"User-Agent": user_agent}
@@ -295,6 +302,7 @@ class Gitlab:
             order_by=config.order_by,
             user_agent=config.user_agent,
             retry_transient_errors=config.retry_transient_errors,
+            conservative_mutations=config.conservative_mutations,
             keep_base_url=config.keep_base_url,
             **kwargs,
         )
@@ -352,6 +360,7 @@ class Gitlab:
             pagination=options.get("pagination") or config.pagination,
             order_by=options.get("order_by") or config.order_by,
             user_agent=options.get("user_agent") or config.user_agent,
+            conservative_mutations=config.conservative_mutations,
         )
 
     @staticmethod
@@ -422,7 +431,7 @@ class Gitlab:
     @gitlab.exceptions.on_http_error(gitlab.exceptions.GitlabMarkdownError)
     def markdown(
         self, text: str, gfm: bool = False, project: str | None = None, **kwargs: Any
-    ) -> str:
+    ) -> str | UnconfirmedMutation:
         """Render an arbitrary Markdown document.
 
         Args:
@@ -442,6 +451,8 @@ class Gitlab:
         if project is not None:
             post_data["project"] = project
         data = self.http_post("/markdown", post_data=post_data, **kwargs)
+        if isinstance(data, UnconfirmedMutation):
+            return data
         if TYPE_CHECKING:
             assert not isinstance(data, requests.Response)
             assert isinstance(data["html"], str)
@@ -467,7 +478,9 @@ class Gitlab:
         return {}
 
     @gitlab.exceptions.on_http_error(gitlab.exceptions.GitlabLicenseError)
-    def set_license(self, license: str, **kwargs: Any) -> dict[str, Any]:
+    def set_license(
+        self, license: str, **kwargs: Any
+    ) -> dict[str, Any] | UnconfirmedMutation:
         """Add a new license.
 
         Args:
@@ -483,6 +496,8 @@ class Gitlab:
         """
         data = {"license": license}
         result = self.http_post("/license", post_data=data, **kwargs)
+        if isinstance(result, UnconfirmedMutation):
+            return result
         if TYPE_CHECKING:
             assert not isinstance(result, requests.Response)
         return result
@@ -645,10 +660,11 @@ class Gitlab:
         timeout: float | None = None,
         obey_rate_limit: bool = True,
         retry_transient_errors: bool | None = None,
+        conservative_mutations: bool | None = None,
         max_retries: int = 10,
         extra_headers: dict[str, Any] | None = None,
         **kwargs: Any,
-    ) -> requests.Response:
+    ) -> requests.Response | UnconfirmedMutation:
         """Make an HTTP request to the Gitlab server.
 
         Args:
@@ -666,13 +682,20 @@ class Gitlab:
                                     responses. Defaults to True.
             retry_transient_errors: Whether to retry after 500, 502, 503, 504
                 or 52x responses, or after a request timeout. Defaults to False.
+            conservative_mutations: Whether mutating requests (POST, PUT,
+                PATCH, DELETE) should stop retrying once the remote outcome is
+                unknown and return an
+                :class:`~gitlab.outcomes.UnconfirmedMutation` instead. Defaults
+                to the client setting.
             max_retries: Max retries after 429 or transient errors,
                                set to -1 to retry forever. Defaults to 10.
             extra_headers: Add and override HTTP headers for the request.
             **kwargs: Extra options to send to the server (e.g. sudo)
 
         Returns:
-            A requests result object.
+            A requests result object, or an
+            :class:`~gitlab.outcomes.UnconfirmedMutation` for a mutating
+            request whose remote outcome could not be determined.
 
         Raises:
             GitlabHttpError: When the return code is not 2xx
@@ -710,6 +733,15 @@ class Gitlab:
             timeout = opts_timeout
         if retry_transient_errors is None:
             retry_transient_errors = self.retry_transient_errors
+        if conservative_mutations is None:
+            conservative_mutations = self.conservative_mutations
+
+        verb_lower = verb.lower()
+        # A mutating request may have reached the server even when the
+        # connection fails. When the conservative flow is enabled we must not
+        # resend it: the outcome is unknown and the caller decides how to
+        # verify it.
+        guard_mutation = conservative_mutations and verb_lower not in ("get", "head")
 
         # We need to deal with json vs. data when uploading files
         send_data = self._backend.prepare_send_data(files, post_data, raw)
@@ -724,7 +756,9 @@ class Gitlab:
             retry_transient_errors=retry_transient_errors,
         )
 
+        attempts = 0
         while True:
+            attempts += 1
             try:
                 result = self._backend.http_request(
                     method=verb,
@@ -741,7 +775,17 @@ class Gitlab:
                 requests.ConnectionError,
                 requests.exceptions.ChunkedEncodingError,
                 requests.exceptions.Timeout,
-            ):
+            ) as error:
+                if guard_mutation:
+                    # The request may have reached the server before the
+                    # connection failed, so the remote outcome is unknown.
+                    # Never resend it: surface the pending state instead.
+                    return UnconfirmedMutation(
+                        verb=verb_lower,
+                        path=path,
+                        error=str(error) or type(error).__name__,
+                        attempts=attempts,
+                    )
                 if retry.handle_retry():
                     continue
                 raise
@@ -751,7 +795,27 @@ class Gitlab:
             if 200 <= result.status_code < 300:
                 return result.response
 
-            if retry.handle_retry_on_status(
+            if guard_mutation:
+                # Requests rejected before processing (rate limits, resource
+                # locks) can safely be sent again according to the retry
+                # policy. Any other transient failure may already have been
+                # applied, so report it as unknown instead of risking a
+                # duplicate permission change.
+                if utils.Retry.rejected_before_processing(
+                    result.status_code, result.reason
+                ):
+                    if retry.handle_retry_on_status(
+                        result.status_code, result.headers, result.reason
+                    ):
+                        continue
+                elif result.status_code in gitlab.const.RETRYABLE_TRANSIENT_ERROR_CODES:
+                    return UnconfirmedMutation(
+                        verb=verb_lower,
+                        path=path,
+                        error=f"HTTP {result.status_code} {result.reason}",
+                        attempts=attempts,
+                    )
+            elif retry.handle_retry_on_status(
                 result.status_code, result.headers, result.reason
             ):
                 continue
@@ -809,6 +873,8 @@ class Gitlab:
         result = self.http_request(
             "get", path, query_data=query_data, streamed=streamed, **kwargs
         )
+        if TYPE_CHECKING:
+            assert not isinstance(result, UnconfirmedMutation)
         content_type = utils.get_content_type(result.headers.get("Content-Type"))
 
         if content_type == "application/json" and not streamed and not raw:
@@ -843,6 +909,8 @@ class Gitlab:
 
         query_data = query_data or {}
         result = self.http_request("head", path, query_data=query_data, **kwargs)
+        if TYPE_CHECKING:
+            assert isinstance(result, requests.Response)
         return result.headers
 
     def http_list(
@@ -963,7 +1031,7 @@ class Gitlab:
         raw: bool = False,
         files: dict[str, Any] | None = None,
         **kwargs: Any,
-    ) -> dict[str, Any] | requests.Response:
+    ) -> dict[str, Any] | requests.Response | UnconfirmedMutation:
         """Make a POST request to the Gitlab server.
 
         Args:
@@ -996,6 +1064,8 @@ class Gitlab:
             raw=raw,
             **kwargs,
         )
+        if isinstance(result, UnconfirmedMutation):
+            return result
         content_type = utils.get_content_type(result.headers.get("Content-Type"))
 
         try:
@@ -1018,7 +1088,7 @@ class Gitlab:
         raw: bool = False,
         files: dict[str, Any] | None = None,
         **kwargs: Any,
-    ) -> dict[str, Any] | requests.Response:
+    ) -> dict[str, Any] | requests.Response | UnconfirmedMutation:
         """Make a PUT request to the Gitlab server.
 
         Args:
@@ -1050,6 +1120,8 @@ class Gitlab:
             raw=raw,
             **kwargs,
         )
+        if isinstance(result, UnconfirmedMutation):
+            return result
         if result.status_code in gitlab.const.NO_JSON_RESPONSE_CODES:
             return result
         try:
@@ -1070,7 +1142,7 @@ class Gitlab:
         post_data: dict[str, Any] | bytes | None = None,
         raw: bool = False,
         **kwargs: Any,
-    ) -> dict[str, Any] | requests.Response:
+    ) -> dict[str, Any] | requests.Response | UnconfirmedMutation:
         """Make a PATCH request to the Gitlab server.
 
         Args:
@@ -1095,6 +1167,8 @@ class Gitlab:
         result = self.http_request(
             "patch", path, query_data=query_data, post_data=post_data, raw=raw, **kwargs
         )
+        if isinstance(result, UnconfirmedMutation):
+            return result
         if result.status_code in gitlab.const.NO_JSON_RESPONSE_CODES:
             return result
         try:
@@ -1107,7 +1181,9 @@ class Gitlab:
                 error_message="Failed to parse the server message"
             ) from e
 
-    def http_delete(self, path: str, **kwargs: Any) -> requests.Response:
+    def http_delete(
+        self, path: str, **kwargs: Any
+    ) -> requests.Response | UnconfirmedMutation:
         """Make a DELETE request to the Gitlab server.
 
         Args:
@@ -1176,6 +1252,8 @@ class GitlabList:
     ) -> None:
         query_data = query_data or {}
         result = self._gl.http_request("get", url, query_data=query_data, **kwargs)
+        if TYPE_CHECKING:
+            assert isinstance(result, requests.Response)
         try:
             next_url = result.links["next"]["url"]
         except KeyError:

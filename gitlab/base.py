@@ -220,6 +220,13 @@ class RESTObject:
             self.__dict__[attr] = manager
 
     def _update_attrs(self, new_attrs: dict[str, Any]) -> None:
+        # A conservative mutation can return an outcome object instead of the
+        # server data. In that case the remote state is unknown, so the local
+        # object must not pretend it was updated.
+        from gitlab.outcomes import UnconfirmedMutation
+
+        if isinstance(new_attrs, UnconfirmedMutation):
+            return
         self.__dict__["_updated_attrs"] = {}
         self.__dict__["_attrs"] = new_attrs
 

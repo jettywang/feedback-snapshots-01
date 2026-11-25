@@ -14,6 +14,7 @@ from gitlab.mixins import (
     ObjectDeleteMixin,
     SaveMixin,
 )
+from gitlab.outcomes import UnconfirmedMutation
 from gitlab.types import RequiredOptional
 
 __all__ = ["DeployKey", "DeployKeyManager", "ProjectKey", "ProjectKeyManager"]
@@ -51,7 +52,9 @@ class ProjectKeyManager(CRUDMixin[ProjectKey]):
         help="Enable a deploy key for the project",
     )
     @exc.on_http_error(exc.GitlabProjectDeployKeyError)
-    def enable(self, key_id: int, **kwargs: Any) -> dict[str, Any] | requests.Response:
+    def enable(
+        self, key_id: int, **kwargs: Any
+    ) -> dict[str, Any] | requests.Response | UnconfirmedMutation:
         """Enable a deploy key for a project.
 
         Args:

@@ -14,6 +14,7 @@ import gitlab
 from gitlab import cli
 from gitlab import exceptions as exc
 from gitlab import types, utils
+from gitlab.outcomes import UnconfirmedMutation
 
 if TYPE_CHECKING:
     # When running mypy we use these as the base classes
@@ -31,7 +32,7 @@ class RepositoryMixin(_RestObjectBase):
     @exc.on_http_error(exc.GitlabUpdateError)
     def update_submodule(
         self, submodule: str, branch: str, commit_sha: str, **kwargs: Any
-    ) -> dict[str, Any] | requests.Response:
+    ) -> dict[str, Any] | requests.Response | UnconfirmedMutation:
         """Update a project submodule
 
         Args:

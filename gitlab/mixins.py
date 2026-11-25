@@ -3,7 +3,7 @@ from __future__ import annotations
 import enum
 from collections.abc import Iterator
 from types import ModuleType
-from typing import Any, Callable, Literal, overload, TYPE_CHECKING
+from typing import Any, Callable, cast, Literal, overload, TYPE_CHECKING
 
 import requests
 
@@ -11,6 +11,7 @@ import gitlab
 from gitlab import base, cli
 from gitlab import exceptions as exc
 from gitlab import utils
+from gitlab.outcomes import UnconfirmedMutation
 
 __all__ = [
     "GetMixin",
@@ -229,7 +230,9 @@ class RetrieveMixin(ListMixin[base.TObjCls], GetMixin[base.TObjCls]): ...
 
 class CreateMixin(base.RESTManager[base.TObjCls]):
     @exc.on_http_error(exc.GitlabCreateError)
-    def create(self, data: dict[str, Any] | None = None, **kwargs: Any) -> base.TObjCls:
+    def create(
+        self, data: dict[str, Any] | None = None, **kwargs: Any
+    ) -> base.TObjCls | UnconfirmedMutation:
         """Create a new object.
 
         Args:
@@ -239,7 +242,10 @@ class CreateMixin(base.RESTManager[base.TObjCls]):
 
         Returns:
             A new instance of the managed object class built with
-                the data sent by the server
+                the data sent by the server, or an
+                :class:`~gitlab.outcomes.UnconfirmedMutation` when the
+                conservative mutation flow is enabled and the outcome is
+                unknown
 
         Raises:
             GitlabAuthenticationError: If authentication is not correct
@@ -256,6 +262,8 @@ class CreateMixin(base.RESTManager[base.TObjCls]):
         # Handle specific URL for creation
         path = kwargs.pop("path", self.path)
         server_data = self.gitlab.http_post(path, post_data=data, files=files, **kwargs)
+        if isinstance(server_data, UnconfirmedMutation):
+            return server_data
         if TYPE_CHECKING:
             assert not isinstance(server_data, requests.Response)
         return self._obj_cls(self, server_data)
@@ -272,7 +280,9 @@ class UpdateMixin(base.RESTManager[base.TObjCls]):
     # Update mixins attrs for easier implementation
     _update_method: UpdateMethod = UpdateMethod.PUT
 
-    def _get_update_method(self) -> Callable[..., dict[str, Any] | requests.Response]:
+    def _get_update_method(
+        self,
+    ) -> Callable[..., dict[str, Any] | requests.Response | UnconfirmedMutation]:
         """Return the HTTP method to use.
 
         Returns:
@@ -285,7 +295,10 @@ class UpdateMixin(base.RESTManager[base.TObjCls]):
             http_method = self.gitlab.http_patch  # type: ignore[assignment]
         else:
             http_method = self.gitlab.http_put
-        return http_method
+        return cast(
+            "Callable[..., dict[str, Any] | requests.Response | UnconfirmedMutation]",
+            http_method,
+        )
 
     @exc.on_http_error(exc.GitlabUpdateError)
     def update(
@@ -293,7 +306,7 @@ class UpdateMixin(base.RESTManager[base.TObjCls]):
         id: str | int | None = None,
         new_data: dict[str, Any] | None = None,
         **kwargs: Any,
-    ) -> dict[str, Any]:
+    ) -> dict[str, Any] | UnconfirmedMutation:
         """Update an object on the server.
 
         Args:
@@ -302,7 +315,9 @@ class UpdateMixin(base.RESTManager[base.TObjCls]):
             **kwargs: Extra options to send to the server (e.g. sudo)
 
         Returns:
-            The new object data (*not* a RESTObject)
+            The new object data (*not* a RESTObject), or an
+            :class:`~gitlab.outcomes.UnconfirmedMutation` when the
+            conservative mutation flow is enabled and the outcome is unknown
 
         Raises:
             GitlabAuthenticationError: If authentication is not correct
@@ -325,6 +340,8 @@ class UpdateMixin(base.RESTManager[base.TObjCls]):
 
         http_method = self._get_update_method()
         result = http_method(path, post_data=new_data, files=files, **kwargs)
+        if isinstance(result, UnconfirmedMutation):
+            return result
         if TYPE_CHECKING:
             assert not isinstance(result, requests.Response)
         return result
@@ -332,7 +349,9 @@ class UpdateMixin(base.RESTManager[base.TObjCls]):
 
 class SetMixin(base.RESTManager[base.TObjCls]):
     @exc.on_http_error(exc.GitlabSetError)
-    def set(self, key: str, value: str, **kwargs: Any) -> base.TObjCls:
+    def set(
+        self, key: str, value: str, **kwargs: Any
+    ) -> base.TObjCls | UnconfirmedMutation:
         """Create or update the object.
 
         Args:
@@ -350,6 +369,8 @@ class SetMixin(base.RESTManager[base.TObjCls]):
         path = f"{self.path}/{utils.EncodedId(key)}"
         data = {"value": value}
         server_data = self.gitlab.http_put(path, post_data=data, **kwargs)
+        if isinstance(server_data, UnconfirmedMutation):
+            return server_data
         if TYPE_CHECKING:
             assert not isinstance(server_data, requests.Response)
         return self._obj_cls(self, server_data)
@@ -357,12 +378,19 @@ class SetMixin(base.RESTManager[base.TObjCls]):
 
 class DeleteMixin(base.RESTManager[base.TObjCls]):
     @exc.on_http_error(exc.GitlabDeleteError)
-    def delete(self, id: str | int | None = None, **kwargs: Any) -> None:
+    def delete(
+        self, id: str | int | None = None, **kwargs: Any
+    ) -> UnconfirmedMutation | None:
         """Delete an object on the server.
 
         Args:
             id: ID of the object to delete
             **kwargs: Extra options to send to the server (e.g. sudo)
+
+        Returns:
+            ``None`` on success, or an
+            :class:`~gitlab.outcomes.UnconfirmedMutation` when the
+            conservative mutation flow is enabled and the outcome is unknown
 
         Raises:
             GitlabAuthenticationError: If authentication is not correct
@@ -373,7 +401,10 @@ class DeleteMixin(base.RESTManager[base.TObjCls]):
         else:
             path = f"{self.path}/{utils.EncodedId(id)}"
 
-        self.gitlab.http_delete(path, **kwargs)
+        result = self.gitlab.http_delete(path, **kwargs)
+        if isinstance(result, UnconfirmedMutation):
+            return result
+        return None
 
 
 class CRUDMixin(
@@ -413,16 +444,22 @@ class SaveMixin(_RestObjectBase):
 
         return updated_data
 
-    def save(self, **kwargs: Any) -> dict[str, Any] | None:
+    def save(self, **kwargs: Any) -> dict[str, Any] | UnconfirmedMutation | None:
         """Save the changes made to the object to the server.
 
-        The object is updated to match what the server returns.
+        The object is updated to match what the server returns. When the
+        conservative mutation flow is enabled and the remote outcome is
+        unknown, the local object is left untouched and an
+        :class:`~gitlab.outcomes.UnconfirmedMutation` is returned so the
+        caller can decide how to verify the change.
 
         Args:
             **kwargs: Extra options to send to the server (e.g. sudo)
 
         Returns:
-            The new object data (*not* a RESTObject)
+            The new object data (*not* a RESTObject), or an
+            :class:`~gitlab.outcomes.UnconfirmedMutation` when the outcome is
+            unknown
 
         Raise:
             GitlabAuthenticationError: If authentication is not correct
@@ -438,6 +475,8 @@ class SaveMixin(_RestObjectBase):
         if TYPE_CHECKING:
             assert isinstance(self.manager, UpdateMixin)
         server_data = self.manager.update(obj_id, updated_data, **kwargs)
+        if isinstance(server_data, UnconfirmedMutation):
+            return server_data
         self._update_attrs(server_data)
         return server_data
 
@@ -452,11 +491,16 @@ class ObjectDeleteMixin(_RestObjectBase):
     _updated_attrs: dict[str, Any]
     manager: base.RESTManager[Any]
 
-    def delete(self, **kwargs: Any) -> None:
+    def delete(self, **kwargs: Any) -> UnconfirmedMutation | None:
         """Delete the object from the server.
 
         Args:
             **kwargs: Extra options to send to the server (e.g. sudo)
+
+        Returns:
+            ``None`` on success, or an
+            :class:`~gitlab.outcomes.UnconfirmedMutation` when the
+            conservative mutation flow is enabled and the outcome is unknown
 
         Raises:
             GitlabAuthenticationError: If authentication is not correct
@@ -465,7 +509,7 @@ class ObjectDeleteMixin(_RestObjectBase):
         if TYPE_CHECKING:
             assert isinstance(self.manager, DeleteMixin)
             assert self.encoded_id is not None
-        self.manager.delete(self.encoded_id, **kwargs)
+        return self.manager.delete(self.encoded_id, **kwargs)
 
 
 class UserAgentDetailMixin(_RestObjectBase):
@@ -510,7 +554,7 @@ class AccessRequestMixin(_RestObjectBase):
     @exc.on_http_error(exc.GitlabUpdateError)
     def approve(
         self, access_level: int = gitlab.const.DEVELOPER_ACCESS, **kwargs: Any
-    ) -> None:
+    ) -> UnconfirmedMutation | None:
         """Approve an access request.
 
         Args:
@@ -525,9 +569,12 @@ class AccessRequestMixin(_RestObjectBase):
         path = f"{self.manager.path}/{self.encoded_id}/approve"
         data = {"access_level": access_level}
         server_data = self.manager.gitlab.http_put(path, post_data=data, **kwargs)
+        if isinstance(server_data, UnconfirmedMutation):
+            return server_data
         if TYPE_CHECKING:
             assert not isinstance(server_data, requests.Response)
         self._update_attrs(server_data)
+        return None
 
 
 class DownloadMixin(_RestObjectBase):
@@ -627,7 +674,7 @@ class RotateMixin(base.RESTManager[base.TObjCls]):
     @exc.on_http_error(exc.GitlabRotateError)
     def rotate(
         self, id: str | int, expires_at: str | None = None, **kwargs: Any
-    ) -> dict[str, Any]:
+    ) -> dict[str, Any] | UnconfirmedMutation:
         """Rotate an access token.
 
         Args:
@@ -644,6 +691,8 @@ class RotateMixin(base.RESTManager[base.TObjCls]):
             data = {"expires_at": expires_at}
 
         server_data = self.gitlab.http_post(path, post_data=data, **kwargs)
+        if isinstance(server_data, UnconfirmedMutation):
+            return server_data
         if TYPE_CHECKING:
             assert not isinstance(server_data, requests.Response)
         return server_data
@@ -668,7 +717,9 @@ class ObjectRotateMixin(_RestObjectBase):
         optional=("expires_at",),
     )
     @exc.on_http_error(exc.GitlabRotateError)
-    def rotate(self, *, self_rotate: bool = False, **kwargs: Any) -> dict[str, Any]:
+    def rotate(
+        self, *, self_rotate: bool = False, **kwargs: Any
+    ) -> dict[str, Any] | UnconfirmedMutation:
         """Rotate the current access token object.
 
         Args:
@@ -684,6 +735,8 @@ class ObjectRotateMixin(_RestObjectBase):
             assert self.encoded_id is not None
         token_id = "self" if self_rotate else self.encoded_id
         server_data = self.manager.rotate(token_id, **kwargs)
+        if isinstance(server_data, UnconfirmedMutation):
+            return server_data
         self._update_attrs(server_data)
         return server_data
 
@@ -700,7 +753,7 @@ class SubscribableMixin(_RestObjectBase):
         cls_names=("ProjectIssue", "ProjectMergeRequest", "ProjectLabel", "GroupLabel")
     )
     @exc.on_http_error(exc.GitlabSubscribeError)
-    def subscribe(self, **kwargs: Any) -> None:
+    def subscribe(self, **kwargs: Any) -> UnconfirmedMutation | None:
         """Subscribe to the object notifications.
 
         Args:
@@ -712,15 +765,18 @@ class SubscribableMixin(_RestObjectBase):
         """
         path = f"{self.manager.path}/{self.encoded_id}/subscribe"
         server_data = self.manager.gitlab.http_post(path, **kwargs)
+        if isinstance(server_data, UnconfirmedMutation):
+            return server_data
         if TYPE_CHECKING:
             assert not isinstance(server_data, requests.Response)
         self._update_attrs(server_data)
+        return None
 
     @cli.register_custom_action(
         cls_names=("ProjectIssue", "ProjectMergeRequest", "ProjectLabel", "GroupLabel")
     )
     @exc.on_http_error(exc.GitlabUnsubscribeError)
-    def unsubscribe(self, **kwargs: Any) -> None:
+    def unsubscribe(self, **kwargs: Any) -> UnconfirmedMutation | None:
         """Unsubscribe from the object notifications.
 
         Args:
@@ -732,9 +788,12 @@ class SubscribableMixin(_RestObjectBase):
         """
         path = f"{self.manager.path}/{self.encoded_id}/unsubscribe"
         server_data = self.manager.gitlab.http_post(path, **kwargs)
+        if isinstance(server_data, UnconfirmedMutation):
+            return server_data
         if TYPE_CHECKING:
             assert not isinstance(server_data, requests.Response)
         self._update_attrs(server_data)
+        return None
 
 
 class TodoMixin(_RestObjectBase):
@@ -799,7 +858,9 @@ class TimeTrackingMixin(_RestObjectBase):
         cls_names=("ProjectIssue", "ProjectMergeRequest"), required=("duration",)
     )
     @exc.on_http_error(exc.GitlabTimeTrackingError)
-    def time_estimate(self, duration: str, **kwargs: Any) -> dict[str, Any]:
+    def time_estimate(
+        self, duration: str, **kwargs: Any
+    ) -> dict[str, Any] | UnconfirmedMutation:
         """Set an estimated time of work for the object.
 
         Args:
@@ -819,7 +880,9 @@ class TimeTrackingMixin(_RestObjectBase):
 
     @cli.register_custom_action(cls_names=("ProjectIssue", "ProjectMergeRequest"))
     @exc.on_http_error(exc.GitlabTimeTrackingError)
-    def reset_time_estimate(self, **kwargs: Any) -> dict[str, Any]:
+    def reset_time_estimate(
+        self, **kwargs: Any
+    ) -> dict[str, Any] | UnconfirmedMutation:
         """Resets estimated time for the object to 0 seconds.
 
         Args:
@@ -839,7 +902,9 @@ class TimeTrackingMixin(_RestObjectBase):
         cls_names=("ProjectIssue", "ProjectMergeRequest"), required=("duration",)
     )
     @exc.on_http_error(exc.GitlabTimeTrackingError)
-    def add_spent_time(self, duration: str, **kwargs: Any) -> dict[str, Any]:
+    def add_spent_time(
+        self, duration: str, **kwargs: Any
+    ) -> dict[str, Any] | UnconfirmedMutation:
         """Add time spent working on the object.
 
         Args:
@@ -859,7 +924,7 @@ class TimeTrackingMixin(_RestObjectBase):
 
     @cli.register_custom_action(cls_names=("ProjectIssue", "ProjectMergeRequest"))
     @exc.on_http_error(exc.GitlabTimeTrackingError)
-    def reset_spent_time(self, **kwargs: Any) -> dict[str, Any]:
+    def reset_spent_time(self, **kwargs: Any) -> dict[str, Any] | UnconfirmedMutation:
         """Resets the time spent working on the object.
 
         Args:
@@ -950,7 +1015,9 @@ class PromoteMixin(_RestObjectBase):
     _update_method: UpdateMethod = UpdateMethod.PUT
     manager: base.RESTManager[Any]
 
-    def _get_update_method(self) -> Callable[..., dict[str, Any] | requests.Response]:
+    def _get_update_method(
+        self,
+    ) -> Callable[..., dict[str, Any] | requests.Response | UnconfirmedMutation]:
         """Return the HTTP method to use.
 
         Returns:
@@ -960,10 +1027,13 @@ class PromoteMixin(_RestObjectBase):
             http_method = self.manager.gitlab.http_post
         else:
             http_method = self.manager.gitlab.http_put
-        return http_method
+        return cast(
+            "Callable[..., dict[str, Any] | requests.Response | UnconfirmedMutation]",
+            http_method,
+        )
 
     @exc.on_http_error(exc.GitlabPromoteError)
-    def promote(self, **kwargs: Any) -> dict[str, Any]:
+    def promote(self, **kwargs: Any) -> dict[str, Any] | UnconfirmedMutation:
         """Promote the item.
 
         Args:
@@ -981,6 +1051,8 @@ class PromoteMixin(_RestObjectBase):
         path = f"{self.manager.path}/{self.encoded_id}/promote"
         http_method = self._get_update_method()
         result = http_method(path, **kwargs)
+        if isinstance(result, UnconfirmedMutation):
+            return result
         if TYPE_CHECKING:
             assert not isinstance(result, requests.Response)
         return result

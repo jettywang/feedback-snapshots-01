@@ -16,6 +16,7 @@ from gitlab.mixins import (
     SaveMixin,
     UpdateMixin,
 )
+from gitlab.outcomes import UnconfirmedMutation
 from gitlab.types import RequiredOptional
 
 __all__ = ["ProjectFile", "ProjectFileManager"]
@@ -184,7 +185,9 @@ class ProjectFileManager(
         ),
     )
     @exc.on_http_error(exc.GitlabCreateError)
-    def create(self, data: dict[str, Any] | None = None, **kwargs: Any) -> ProjectFile:
+    def create(
+        self, data: dict[str, Any] | None = None, **kwargs: Any
+    ) -> ProjectFile | UnconfirmedMutation:
         """Create a new object.
 
         Args:
@@ -208,6 +211,8 @@ class ProjectFileManager(
         file_path = utils.EncodedId(new_data.pop("file_path"))
         path = f"{self.path}/{file_path}"
         server_data = self.gitlab.http_post(path, post_data=new_data, **kwargs)
+        if isinstance(server_data, UnconfirmedMutation):
+            return server_data
         if TYPE_CHECKING:
             assert isinstance(server_data, dict)
         return self._obj_cls(self, server_data)

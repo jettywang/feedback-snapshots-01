@@ -15,6 +15,7 @@ from gitlab.mixins import (
     UpdateMethod,
     UpdateMixin,
 )
+from gitlab.outcomes import UnconfirmedMutation
 from gitlab.types import RequiredOptional
 
 __all__ = [
@@ -124,7 +125,7 @@ class ProjectMergeRequestApprovalManager(
         *,
         approver_usernames: list[str] | None = None,
         **kwargs: Any,
-    ) -> RESTObject:
+    ) -> RESTObject | UnconfirmedMutation:
         """Change MR-level allowed approvers and approver groups.
 
         Args:
@@ -161,7 +162,9 @@ class ProjectMergeRequestApprovalManager(
                 ar.approvals_required = data["approvals_required"]
                 ar.group_ids = data["group_ids"]
                 ar.usernames = data["usernames"]
-                ar.save()
+                saved = ar.save()
+                if isinstance(saved, UnconfirmedMutation):
+                    return saved
                 return ar
         # if there was no rule matching the rule name, create a new one
         return approval_rules.create(data=data, **kwargs)

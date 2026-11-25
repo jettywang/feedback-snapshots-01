@@ -443,3 +443,18 @@ def test_custom_session(default_config):
     )
 
     assert test_gitlab.session == custom_session
+
+
+def test_gitlab_from_config_conservative_mutations(tmp_path):
+    config_path = tmp_path / "python-gitlab.cfg"
+    config_path.write_text("""[global]
+default = one
+conservative_mutations = true
+
+[one]
+url = http://one.url
+private_token = ABCDEF
+""")
+    gl = gitlab.Gitlab.from_config("one", [str(config_path)])
+    assert gl.conservative_mutations is True
+    assert gl.retry_transient_errors is False

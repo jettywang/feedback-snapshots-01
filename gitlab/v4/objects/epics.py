@@ -14,6 +14,7 @@ from gitlab.mixins import (
     SaveMixin,
     UpdateMixin,
 )
+from gitlab.outcomes import UnconfirmedMutation
 from gitlab.types import RequiredOptional
 
 from .events import GroupEpicResourceLabelEventManager  # noqa: F401
@@ -88,7 +89,7 @@ class GroupEpicIssueManager(
     @exc.on_http_error(exc.GitlabCreateError)
     def create(
         self, data: dict[str, Any] | None = None, **kwargs: Any
-    ) -> GroupEpicIssue:
+    ) -> GroupEpicIssue | UnconfirmedMutation:
         """Create a new object.
 
         Args:
@@ -109,6 +110,8 @@ class GroupEpicIssueManager(
         self._create_attrs.validate_attrs(data=data)
         path = f"{self.path}/{data.pop('issue_id')}"
         server_data = self.gitlab.http_post(path, **kwargs)
+        if isinstance(server_data, UnconfirmedMutation):
+            return server_data
         if TYPE_CHECKING:
             assert isinstance(server_data, dict)
         # The epic_issue_id attribute doesn't exist when creating the resource,
