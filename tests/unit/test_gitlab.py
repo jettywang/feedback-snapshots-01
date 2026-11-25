@@ -1,7 +1,6 @@
 import copy
 import logging
 import pickle
-from http.client import HTTPConnection
 
 import pytest
 import requests
@@ -90,11 +89,34 @@ def test_gitlab_as_context_manager():
 
 
 def test_gitlab_enable_debug(gl):
+    logger = logging.getLogger("requests.packages.urllib3")
+    level = logger.level
+    propagate = logger.propagate
+
     gl.enable_debug()
 
-    logger = logging.getLogger("requests.packages.urllib3")
-    assert logger.level == logging.DEBUG
-    assert HTTPConnection.debuglevel == 1
+    assert gl.diagnostics is not None
+    # Configuration is owned by the instance, not by process-wide loggers.
+    assert logger.level == level
+    assert logger.propagate == propagate
+
+    gl.disable_debug()
+    assert gl.diagnostics is None
+
+
+def test_gitlab_enable_debug_is_per_instance(gl):
+    other = gitlab.Gitlab("http://localhost", private_token="private_token")
+
+    gl.enable_debug()
+    other_events = []
+    other.enable_debug(mode="shared", sink=other_events.append)
+    gl.disable_debug()
+
+    try:
+        assert gl.diagnostics is None
+        assert other.diagnostics is not None
+    finally:
+        other.disable_debug()
 
 
 @responses.activate

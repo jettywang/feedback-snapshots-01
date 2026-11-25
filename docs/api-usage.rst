@@ -52,8 +52,8 @@ To connect to GitLab.com or another GitLab instance, create a ``gitlab.Gitlab`` 
 
    # Enable "debug" mode. This can be useful when trying to determine what
    # information is being sent back and forth to the GitLab server.
-   # Note: this will cause credentials and other potentially sensitive
-   # information to be printed to the terminal.
+   # Debug configuration belongs to this instance only: credentials are
+   # masked by default and other clients in the same process are unaffected.
    gl.enable_debug()
 
 You can also use configuration files to create ``gitlab.Gitlab`` objects:
@@ -435,8 +435,11 @@ then ``save`` the object (using ``sudo``):
 Logging
 =======
 
-To enable debug logging from the underlying ``requests`` and ``http.client`` calls,
-you can use ``enable_debug()`` on your ``Gitlab`` instance. For example:
+To enable diagnostic logging from the client and the underlying ``urllib3``
+connection layer, call ``enable_debug()`` on a ``Gitlab`` instance. The
+configuration is attached to that instance: calling it, changing it, or calling
+``disable_debug()`` never changes the output of another client in the same
+process.
 
 .. code-block:: python
 
@@ -446,12 +449,69 @@ you can use ``enable_debug()`` on your ``Gitlab`` instance. For example:
    gl = gitlab.Gitlab(private_token=os.getenv("GITLAB_TOKEN"))
    gl.enable_debug()
 
-By default, python-gitlab will mask the token used for authentication in logging output.
-If you'd like to debug credentials sent to the API, you can disable masking explicitly:
+Without a ``sink`` argument, records are written as one JSON object per line to
+stderr through a logger private to the instance. To collect records yourself,
+pass a callable:
+
+.. code-block:: python
+
+   records = []
+   gl.enable_debug(sink=records.append)
+
+Every record carries a ``client_id`` and a ``request_id``. Retries reuse the
+``request_id`` and increment ``attempt``; redirects add ``redirect_count`` and
+the source/target URLs; streamed responses report ``stream_start``,
+``stream_end`` (with ``chunks_received``/``bytes_received``/``complete``), and
+``upstream_request_id`` when GitLab returns ``X-Request-Id`` or
+``X-Gitlab-Meta``. Retries also record ``transport_error``/``retry`` events
+with ``retry_reason`` and ``wait_seconds``; redirects can be followed via
+``redirect_count``, ``redirected_from``, and ``redirected_to``.
+Connection-layer records (``event="transport"``) are attributed to the request
+that produced them, including while a streamed response is being read.
+
+Internal and shared modes
+~~~~~~~~~~~~~~~~~~~~~~~~~
+
+``enable_debug()`` defaults to ``mode="internal"``, which emits complete records,
+including request/response headers and bodies. Values matching the client's
+configured token are masked by default. If you need the raw credentials while
+debugging locally, disable masking explicitly:
 
 .. code-block:: python
 
    gl.enable_debug(mask_credentials=False)
+
+Use ``mode="shared"`` when records leave the process. Shared records contain
+only correlation, status, and transport clues: ``request_id``,
+``upstream_request_id``, method, path, attempt/status, timing, retry/redirect
+metadata, stream completion, and ``urllib3`` transport messages. Bodies,
+arbitrary request/response headers, exception messages, and business objects
+are dropped. Values are redacted at the sink boundary, including
+credential-shaped query parameters and header values.
+
+.. code-block:: python
+
+   gl.enable_debug(mode="shared", sink=shared_collector.append)
+
+   # Approve an extra field explicitly when your receiver supports it.
+   gl.enable_debug(
+       mode="shared",
+       sink=shared_collector.append,
+       approved_fields={"response_body"},
+   )
+
+Redaction only applies to what is delivered to the sink. Responses, exceptions,
+and objects returned by the API remain fully usable by the calling code.
+
+.. code-block:: python
+
+   gl.enable_debug(mode="shared", sink=shared_collector.append)
+   issue = gl.issues.get(1)  # `issue` still has all of its attributes
+
+Call ``disable_debug()`` to stop emitting; closing the client with ``with
+gitlab.Gitlab(...) as gl:`` does this automatically. Transport capture can be
+turned off with ``capture_transport=False`` if you only want client-level
+records.
 
 .. _object_attributes:
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import re
+from collections.abc import Callable, Iterable
 from typing import Any, BinaryIO, cast, TYPE_CHECKING
 from urllib import parse
 
@@ -12,6 +13,7 @@ import requests
 import gitlab
 import gitlab.config
 import gitlab.const
+import gitlab.diagnostics
 import gitlab.exceptions
 from gitlab import _backends, utils
 
@@ -91,6 +93,8 @@ class Gitlab:
         self._api_version = str(api_version)
         self._server_version: str | None = None
         self._server_revision: str | None = None
+        self._client_id = gitlab.diagnostics.new_client_id()
+        self._diagnostics: gitlab.diagnostics.DebugSession | None = None
         self._base_url = utils.get_base_url(url)
         self._url = f"{self._base_url}/api/v{api_version}"
         #: Timeout to use for requests to gitlab server
@@ -220,15 +224,20 @@ class Gitlab:
         return self
 
     def __exit__(self, *args: Any) -> None:
+        self.disable_debug()
         self.session.close()
 
     def __getstate__(self) -> dict[str, Any]:
         state = self.__dict__.copy()
         state.pop("_objects")
+        state.pop("_diagnostics", None)
         return state
 
     def __setstate__(self, state: dict[str, Any]) -> None:
         self.__dict__.update(state)
+        self._diagnostics = None
+        if "_client_id" not in state:
+            self._client_id = gitlab.diagnostics.new_client_id()
         # We only support v4 API at this time
         if self._api_version not in ("4",):
             raise ModuleNotFoundError(
@@ -523,38 +532,77 @@ class Gitlab:
                 self.http_username, self.http_password
             )
 
-    def enable_debug(self, mask_credentials: bool = True) -> None:
-        import logging
-        from http import client
+    def enable_debug(
+        self,
+        mask_credentials: bool = True,
+        *,
+        mode: str = "internal",
+        sink: Callable[[dict[str, Any]], None] | None = None,
+        approved_fields: Iterable[str] | None = None,
+        capture_transport: bool = True,
+    ) -> None:
+        """Enable per-instance diagnostic logging.
 
-        client.HTTPConnection.debuglevel = 1
-        logging.basicConfig()
-        logger = logging.getLogger()
-        logger.setLevel(logging.DEBUG)
+        Unlike a global logging setup, the configuration belongs to this
+        ``Gitlab`` instance only.  Enabling, reconfiguring, or disabling one
+        client never changes the output of another client in the same process.
 
-        httpclient_log = logging.getLogger("http.client")
-        httpclient_log.propagate = True
-        httpclient_log.setLevel(logging.DEBUG)
+        Args:
+            mask_credentials: Mask credential values in emitted records. When
+                ``False``, the internal sink receives them verbatim.
+            mode: ``"internal"`` emits complete records. ``"shared"`` emits only
+                :data:`gitlab.diagnostics.APPROVED_SHARED_FIELDS`, redacted for
+                the shared receiver.
+            sink: Callable receiving an event mapping. Defaults to writing JSON
+                records to stderr through a logger private to this instance.
+            approved_fields: Additional field names that a shared sink may
+                receive. Has no effect in internal mode.
+            capture_transport: Capture records from the ``urllib3`` connection
+                layer and attribute them to the active request.
 
-        requests_log = logging.getLogger("requests.packages.urllib3")
-        requests_log.setLevel(logging.DEBUG)
-        requests_log.propagate = True
+        Raises:
+            ValueError: If ``mode`` is not ``"internal"`` or ``"shared"``.
+        """
+        self.disable_debug()
+        diagnostics = gitlab.diagnostics.DebugSession(
+            client_id=self._client_id,
+            mode=mode,
+            sink=sink,
+            approved_fields=approved_fields,
+            mask_credentials=mask_credentials,
+            capture_transport=capture_transport,
+        )
+        diagnostics.update_credentials(*self._credential_values())
+        self._diagnostics = diagnostics
 
-        # shadow http.client prints to log()
-        # https://stackoverflow.com/a/16337639
-        def print_as_log(*args: Any) -> None:
-            httpclient_log.log(logging.DEBUG, " ".join(args))
+    def disable_debug(self) -> None:
+        """Disable diagnostics for this instance and restore its previous state.
 
-        setattr(client, "print", print_as_log)
-
-        if not mask_credentials:
+        Other instances keep their own sinks and settings untouched.
+        """
+        diagnostics = self._diagnostics
+        if diagnostics is None:
             return
+        self._diagnostics = None
+        diagnostics.close()
 
-        token = self.private_token or self.oauth_token or self.job_token
-        handler = logging.StreamHandler()
-        handler.setFormatter(utils.MaskingFormatter(masked=token))
-        logger.handlers.clear()
-        logger.addHandler(handler)
+    def _credential_values(self) -> tuple[str | None, ...]:
+        auth = self._auth
+        values: list[str | None] = [
+            self.private_token,
+            self.oauth_token,
+            self.job_token,
+            self.http_password,
+        ]
+        token = getattr(auth, "token", None)
+        if token:
+            values.append(str(token))
+        return tuple(values)
+
+    @property
+    def diagnostics(self) -> gitlab.diagnostics.DebugSession | None:
+        """The active diagnostics session, if :meth:`enable_debug` was called."""
+        return self._diagnostics
 
     def _get_session_opts(self) -> dict[str, Any]:
         return {
@@ -724,59 +772,219 @@ class Gitlab:
             retry_transient_errors=retry_transient_errors,
         )
 
-        while True:
-            try:
-                result = self._backend.http_request(
-                    method=verb,
-                    url=url,
-                    json=send_data.json,
-                    data=send_data.data,
-                    params=params,
-                    timeout=timeout,
-                    verify=verify,
-                    stream=streamed,
-                    **opts,
-                )
-            except (
-                requests.ConnectionError,
-                requests.exceptions.ChunkedEncodingError,
-                requests.exceptions.Timeout,
-            ):
-                if retry.handle_retry():
+        diagnostics = self._diagnostics
+        context: gitlab.diagnostics.RequestContext | None = None
+        token: gitlab.diagnostics.Token | None = None
+        if diagnostics is not None:
+            max_attempts = -1 if max_retries == -1 else max_retries + 1
+            context = diagnostics.new_request(
+                method=verb,
+                path=path,
+                url=url,
+                streamed=streamed,
+                max_attempts=max_attempts,
+            )
+            token = diagnostics.activate(context)
+            diagnostics.emit(
+                "request_start",
+                context=context,
+                status_code=None,
+                streamed=streamed,
+                url=url,
+                query_keys=sorted(params),
+                request_headers=dict(opts.get("headers", {})),
+                request_body=send_data.json,
+            )
+        try:
+            while True:
+                try:
+                    result = self._backend.http_request(
+                        method=verb,
+                        url=url,
+                        json=send_data.json,
+                        data=send_data.data,
+                        params=params,
+                        timeout=timeout,
+                        verify=verify,
+                        stream=streamed,
+                        **opts,
+                    )
+                except (
+                    requests.ConnectionError,
+                    requests.exceptions.ChunkedEncodingError,
+                    requests.exceptions.Timeout,
+                ) as exc:
+                    if diagnostics is not None and context is not None:
+                        diagnostics.emit(
+                            "transport_error",
+                            context=context,
+                            error_type=type(exc).__name__,
+                            error_message=str(exc),
+                            outcome="error",
+                        )
+                    if retry.handle_retry():
+                        self._report_retry(diagnostics, context, retry, "transport")
+                        continue
+                    if diagnostics is not None and context is not None:
+                        diagnostics.emit(
+                            "request_end",
+                            context=context,
+                            duration_ms=context.elapsed_ms(),
+                            error_type=type(exc).__name__,
+                            error_message=str(exc),
+                            outcome="error",
+                        )
+                    raise
+
+                response = result.response
+                if diagnostics is not None and context is not None:
+                    self._report_redirects(diagnostics, context, response)
+                    self._report_response(diagnostics, context, result)
+
+                try:
+                    self._check_redirects(response)
+                except gitlab.exceptions.RedirectError as exc:
+                    if diagnostics is not None and context is not None:
+                        diagnostics.emit(
+                            "request_end",
+                            context=context,
+                            status_code=response.status_code,
+                            reason=response.reason,
+                            duration_ms=context.elapsed_ms(),
+                            error_type=type(exc).__name__,
+                            error_message=exc.error_message,
+                            outcome="error",
+                        )
+                    raise
+
+                if 200 <= result.status_code < 300:
+                    if diagnostics is not None and context is not None:
+                        gitlab.diagnostics.instrument_response(
+                            response, diagnostics, context, streamed=streamed
+                        )
+                        diagnostics.emit(
+                            "request_end",
+                            context=context,
+                            status_code=result.status_code,
+                            reason=result.reason,
+                            duration_ms=context.elapsed_ms(),
+                            outcome="success",
+                        )
+                    return response
+
+                if retry.handle_retry_on_status(
+                    result.status_code, result.headers, result.reason
+                ):
+                    self._report_retry(diagnostics, context, retry, "status")
                     continue
-                raise
 
-            self._check_redirects(result.response)
+                error_message = result.content
+                try:
+                    error_json = result.json()
+                    for k in ("message", "error"):
+                        if k in error_json:
+                            error_message = error_json[k]
+                except (KeyError, ValueError, TypeError):
+                    pass
 
-            if 200 <= result.status_code < 300:
-                return result.response
+                if diagnostics is not None and context is not None:
+                    diagnostics.emit(
+                        "request_end",
+                        context=context,
+                        status_code=result.status_code,
+                        reason=result.reason,
+                        duration_ms=context.elapsed_ms(),
+                        error_message=error_message,
+                        response_body=result.content,
+                        outcome="error",
+                    )
 
-            if retry.handle_retry_on_status(
-                result.status_code, result.headers, result.reason
-            ):
-                continue
+                if result.status_code == 401:
+                    raise gitlab.exceptions.GitlabAuthenticationError(
+                        response_code=result.status_code,
+                        error_message=error_message,
+                        response_body=result.content,
+                    )
 
-            error_message = result.content
-            try:
-                error_json = result.json()
-                for k in ("message", "error"):
-                    if k in error_json:
-                        error_message = error_json[k]
-            except (KeyError, ValueError, TypeError):
-                pass
-
-            if result.status_code == 401:
-                raise gitlab.exceptions.GitlabAuthenticationError(
+                raise gitlab.exceptions.GitlabHttpError(
                     response_code=result.status_code,
                     error_message=error_message,
                     response_body=result.content,
                 )
+        finally:
+            if diagnostics is not None and token is not None:
+                diagnostics.deactivate(token)
 
-            raise gitlab.exceptions.GitlabHttpError(
-                response_code=result.status_code,
-                error_message=error_message,
-                response_body=result.content,
+    @staticmethod
+    def _report_retry(
+        diagnostics: gitlab.diagnostics.DebugSession | None,
+        context: gitlab.diagnostics.RequestContext | None,
+        retry: utils.Retry,
+        reason: str,
+    ) -> None:
+        if diagnostics is None or context is None:
+            return
+        diagnostics.emit(
+            "retry",
+            context=context,
+            retry_reason=reason,
+            wait_seconds=retry.last_wait,
+        )
+        context.attempt += 1
+        context.note_attempt()
+
+    @staticmethod
+    def _report_redirects(
+        diagnostics: gitlab.diagnostics.DebugSession,
+        context: gitlab.diagnostics.RequestContext,
+        response: requests.Response,
+    ) -> None:
+        for hop in response.history:
+            target = hop.headers.get("location")
+            if not target:
+                continue
+            source = hop.url
+            context.redirect(source, target)
+            diagnostics.emit(
+                "redirect",
+                context=context,
+                status_code=hop.status_code,
+                redirected_from=source,
+                redirected_to=target,
+                hop=context.redirect_count,
             )
+
+    @staticmethod
+    def _report_response(
+        diagnostics: gitlab.diagnostics.DebugSession,
+        context: gitlab.diagnostics.RequestContext,
+        result: Any,
+    ) -> None:
+        correlation = gitlab.diagnostics.response_correlation_id(result.headers)
+        if correlation:
+            context.upstream_request_id = correlation
+        content_length = result.headers.get("Content-Length")
+        if content_length is None and not context.streamed:
+            content_length = len(result.content)
+        if content_length is not None:
+            try:
+                content_length = int(content_length)
+            except (TypeError, ValueError):
+                content_length = None
+        fields: dict[str, Any] = {
+            "status_code": result.status_code,
+            "reason": result.reason,
+            "duration_ms": context.elapsed_ms(),
+            "content_length": content_length,
+            "response_headers": dict(result.headers),
+        }
+        request = getattr(result.response, "request", None)
+        if request is not None:
+            fields["request_headers"] = dict(request.headers)
+            fields["request_url"] = request.url
+        if not context.streamed:
+            fields["response_body"] = result.content
+        diagnostics.emit("response", context=context, **fields)
 
     def http_get(
         self,

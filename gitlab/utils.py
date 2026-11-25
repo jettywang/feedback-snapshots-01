@@ -100,6 +100,9 @@ class Retry:
         self.max_retries = max_retries
         self.obey_rate_limit = obey_rate_limit
         self.retry_transient_errors = retry_transient_errors
+        # Wall-clock seconds slept before the latest retry. Exposed for
+        # diagnostics; ``None`` until the first retry decision.
+        self.last_wait: float | None = None
 
     def _retryable_status_code(self, status_code: int | None, reason: str = "") -> bool:
         if status_code == 429 and self.obey_rate_limit:
@@ -134,6 +137,7 @@ class Retry:
                 wait_time = int(headers["Retry-After"])
             elif "RateLimit-Reset" in headers:
                 wait_time = max(0, int(headers["RateLimit-Reset"]) - time.time())
+            self.last_wait = wait_time
             self.cur_retries += 1
             time.sleep(wait_time)
             return True
@@ -145,6 +149,7 @@ class Retry:
             self.max_retries == -1 or self.cur_retries < self.max_retries
         ):
             wait_time = 2**self.cur_retries * 0.1
+            self.last_wait = wait_time
             self.cur_retries += 1
             time.sleep(wait_time)
             return True
