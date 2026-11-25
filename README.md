@@ -240,6 +240,65 @@ Provide lambda to solve collisions:
 expose :status, merge: ->(key, old_val, new_val) { old_val + new_val if old_val && new_val }
 ```
 
+##### Safe Merges With Provenance
+
+When several entities contribute fields under the same alias, a plain merge
+cannot tell which declaration a winning value came from. Use `merge: :safe`
+together with a per-exposure `:source` label and an entity-level allowlist.
+Permission is decided from the declared **source**, not the output field name,
+so an untrusted exposure cannot overwrite a field merely by reusing its name.
+
+```ruby
+class CatalogCard < Grape::Entity
+  expose :handle, as: :display_name, source: :catalog
+  expose :tier,  as: :level,        source: :catalog
+end
+
+class PartnerCard < Grape::Entity
+  expose :nick, as: :display_name, source: :partner
+  expose :rank, as: :level,        source: :partner, override: true
+end
+
+class CardPresenter < Grape::Entity
+  authorize_merge_sources :catalog, :partner
+
+  expose :card do
+    expose :catalog, merge: :safe, using: CatalogCard
+    expose :partner, merge: :safe, using: PartnerCard
+  end
+end
+```
+
+Each output field ends up in one of three states, available on the
+representing instance via `merge_report`:
+
+- **merged** – every authorized source agrees on the value (e.g. `display_name`).
+- **replaced** – an authorized exposure declaring `override: true` wins
+  (e.g. `level` becomes the partner's value); the replaced evidence is retained.
+- **conflict** – authorized values disagree without an override, or only
+  unauthorized sources contributed. The field is withheld from the output but
+  all evidence (sources, values, authorization) is kept on the report for review.
+
+```ruby
+presenter = CardPresenter.new(data)
+presenter.serializable_hash
+
+presenter.merge_report.entries.each do |entry|
+  entry.field      # :display_name, :level, ...
+  entry.status     # :merged | :replaced | :conflict
+  entry.value      # the value backed by the winning authorized source
+  entry.sources    # Grape::Entity::MergeSource for every contribution
+end
+
+presenter.merge_report.conflicts? # true when any field is still pending
+```
+
+Sources absent from `authorize_merge_sources` are unauthorized: their values
+never replace an authorized field, and fields only they provide are reported as
+`:unauthorized_source` conflicts instead of being emitted. The legacy
+`merge: true` and lambda forms keep their original behavior and produce no
+report.
+
 #### Runtime Exposure
 
 Use a block or a `Proc` to evaluate exposure at runtime. The supplied block or

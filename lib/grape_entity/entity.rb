@@ -41,7 +41,7 @@ module Grape
   #     end
   #   end
   class Entity
-    attr_reader :object, :delegator, :options
+    attr_reader :object, :delegator, :options, :merge_report
 
     # The Entity DSL allows you to mix entity functionality into
     # your existing classes.
@@ -104,6 +104,22 @@ module Grape
 
       attr_writer :root_exposure, :formatters
 
+      # Data source labels allowed to contribute values to safe merges
+      # (`merge: :safe`). Authorization is granted per declared source, so
+      # trusting a name never trusts an unrelated exposure that happens to
+      # emit the same field name.
+      def authorized_merge_sources
+        @authorized_merge_sources ||= []
+      end
+
+      # Declare the data sources whose values may win a safe merge.
+      # Sources are only ever added; a source cannot be revoked by a subclass.
+      def authorize_merge_sources(*labels)
+        @authorized_merge_sources = authorized_merge_sources.dup
+        labels.flatten.each { |label| @authorized_merge_sources.push(label) unless @authorized_merge_sources.include?(label) }
+        @authorized_merge_sources
+      end
+
       # Returns all formatters that are registered for this and it's ancestors
       # @return [Hash] of formatters
       def formatters
@@ -140,6 +156,7 @@ module Grape
     def self.inherited(subclass)
       subclass.root_exposure = root_exposure.dup
       subclass.formatters = formatters.dup
+      subclass.authorize_merge_sources(authorized_merge_sources)
 
       super
     end
@@ -188,7 +205,13 @@ module Grape
     #   block to the expose call to achieve the same effect.
     # @option options :documentation Define documenation for an exposed
     #   field, typically the value is a hash with two fields, type and desc.
-    # @option options :merge This option allows you to merge an exposed field to the root
+    # @option options :merge This option allows you to merge an exposed field to the root.
+    #   Pass :safe to merge only values traceable to a source declared with
+    #   :source and authorized through .authorize_merge_sources. Safe merges
+    #   record provenance and conflicts on the entity's #merge_report.
+    # @option options :source Declares the data source label of an exposure.
+    #   Used together with `merge: :safe` to authorize the value by its source
+    #   rather than by the output field name.
     #
     # rubocop:disable-next Layout/LineLength
     def self.expose(*args, &block)
@@ -488,6 +511,7 @@ module Grape
       @object = object
       @options = options.is_a?(Options) ? options : Options.new(options)
       @delegator = Delegator.new(object)
+      @merge_report = MergeReport.new
     end
 
     def root_exposures
@@ -642,6 +666,9 @@ module Grape
       if_extras
       unless_extras
       merge
+      source
+      collect_provenance
+      provenance_path
       expose_nil
       override
       default

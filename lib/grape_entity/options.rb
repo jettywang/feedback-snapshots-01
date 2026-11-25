@@ -85,11 +85,11 @@ module Grape
       def with_attr_path(part)
         return yield unless part
 
-        stack = (opts_hash[:attr_path] ||= [])
-        stack.push part
-        result = yield
-        stack.pop
-        result
+        previous_path = opts_hash[:attr_path]
+        opts_hash[:attr_path] = Array(previous_path) + [part]
+        yield
+      ensure
+        opts_hash[:attr_path] = previous_path
       end
 
       private
@@ -100,7 +100,7 @@ module Grape
             root: nil,
             only: only_fields(key),
             except: except_fields(key),
-            attr_path: opts_hash[:attr_path]
+            attr_path: Array(opts_hash[:attr_path]).dup
           )
         )
       end
