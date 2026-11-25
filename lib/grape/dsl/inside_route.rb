@@ -110,6 +110,33 @@ module Grape
         end
       end
 
+      # Answers with a {Grape::Report}: the rendered report as an attachment
+      # when +download+ is allowed, otherwise the inline summary the request
+      # may still browse. Both answers share the format the request negotiated,
+      # which fixes their Content-Type, Content-Disposition and filename.
+      #
+      # The attachment is streamed, so its source is opened only as Rack reads
+      # the body and closed when the body finishes, is abandoned or errors.
+      #
+      # @example
+      #   get :report do
+      #     serve_report report, download: current_user.can_download?
+      #   end
+      #
+      # @param report [Grape::Report] the report to answer with.
+      # @param download [Boolean] whether the request is allowed the attachment.
+      # @return [Integer] the response status.
+      def serve_report(report, download:)
+        status, headers, body = report.answer(env[Grape::Env::API_FORMAT], download:)
+        header.merge!(headers)
+        if download
+          stream(Grape::ServeStream::StreamResponse.new(body))
+        else
+          self.body(body.first)
+        end
+        status(status)
+      end
+
       # Allows you to explicitly return no content.
       #
       # @example
@@ -164,7 +191,7 @@ module Grape
 
         return @stream if value.nil?
 
-        @stream = Grape::ServeStream::StreamResponse.new(stream_body(value))
+        @stream = value.is_a?(Grape::ServeStream::StreamResponse) ? value : Grape::ServeStream::StreamResponse.new(stream_body(value))
       end
 
       # Returns route information for the current request.

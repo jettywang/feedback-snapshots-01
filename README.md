@@ -3882,6 +3882,33 @@ class API < Grape::API
 end
 ```
 
+### Serving a Report as a Summary or an Attachment
+
+One report can answer two ways: a browsable inline summary, and the rendered report as an approved download. `Grape::Report` is the shared convention that keeps the two answers consistent — the attachment filename, the body and the public `Content-Type` and `Content-Disposition` metadata are all derived from the format the request finally negotiated. A request that is not allowed to download still gets the summary the request permits.
+
+```ruby
+class API < Grape::API
+  content_type :json, 'application/json'
+  content_type :txt, 'text/plain'
+  default_format :json
+
+  get '/report' do
+    report = Grape::Report.new(
+      'quarterly-report',
+      # Opened only when Rack reads the attachment body, never for a summary.
+      source: -> { ReportExport.open(current_report) },
+      # Called with the negotiated format for the inline summary.
+      summary: ->(format) { current_report.summary(as: format) },
+      media_types: { json: 'application/json', txt: 'text/plain' }
+    )
+
+    serve_report report, download: current_user.can_download_reports?
+  end
+end
+```
+
+`serve_report` streams the attachment through a `Grape::ServeStream::SourceBody`, so the source is opened lazily and always closed: when the body is read fully, when the client stops after the first chunk, or when the body is closed before being read. A format the API does not declare answers `406 Not Acceptable` through Grape's normal negotiation, before any source is opened.
+
 ## Authentication
 
 ### Basic Auth

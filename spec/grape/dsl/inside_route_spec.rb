@@ -302,6 +302,24 @@ describe Grape::DSL::InsideRoute do
           expect { subject.stream non_stream_object }.to raise_error(ArgumentError, /:each/)
         end
       end
+
+      context 'as an already wrapped stream response' do
+        let(:stream_object) { instance_double(Enumerator, each: nil) }
+        let(:stream_response) { Grape::ServeStream::StreamResponse.new(stream_object) }
+
+        before do
+          subject.header Rack::CACHE_CONTROL, 'cache'
+          subject.stream stream_response
+        end
+
+        it 'keeps the response as given without wrapping it again' do
+          expect(subject.stream).to be stream_response
+        end
+
+        it 'still applies the streaming headers' do
+          expect(subject.header).to match(Rack::CACHE_CONTROL => 'no-cache')
+        end
+      end
     end
 
     it 'returns default' do
