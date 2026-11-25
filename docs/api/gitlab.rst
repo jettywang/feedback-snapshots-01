@@ -71,6 +71,14 @@ gitlab.exceptions module
     :undoc-members:
     :show-inheritance:
 
+gitlab.forensics module
+-----------------------
+
+.. automodule:: gitlab.forensics
+    :members:
+    :undoc-members:
+    :show-inheritance:
+
 gitlab.mixins module
 --------------------
 
