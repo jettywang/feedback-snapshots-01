@@ -4,12 +4,47 @@ import json
 from functools import cache
 from typing import TYPE_CHECKING, Any, Literal
 
+from hatch.project.frontend.report import (  # noqa: F401
+    BuildDiagnostic,
+    BuildFailureReport,
+    FailureReport,
+    RedactionPolicy,
+    ShareableFailureReport,
+    build_failure_bundle,
+    call_identifiers_match,
+    load_diagnostic,
+    load_report,
+    write_failure_bundle,
+)
 from hatch.utils.fs import Path
 from hatch.utils.runner import ExecutionContext
 
 if TYPE_CHECKING:
     from hatch.env.plugin.interface import EnvironmentInterface
     from hatch.project.core import Project
+
+
+def _publish_failure_report(output_context: Any, directory: Path) -> None:
+    """Copy the redacted report out of the temporary fs context on failure.
+
+    Never raises: reporting must not mask the original build exception/exit.
+    Only the shareable (redacted) artifact is published; the raw controlled
+    diagnostic stays in the local/cache location owned by the runner.
+    """
+    import shutil
+
+    try:
+        output_context.sync_local()
+        source = output_context.local_path
+        directory.ensure_dir_exists() if hasattr(directory, "ensure_dir_exists") else directory.mkdir(
+            parents=True, exist_ok=True
+        )
+        for name in ("failure-report.json", "failure-report.md"):
+            candidate = source / name
+            if candidate.is_file():
+                shutil.copy2(candidate, directory / name)
+    except Exception:  # noqa: BLE001 - best-effort rescue
+        pass
 
 
 class BuildFrontend:
@@ -40,7 +75,11 @@ class BuildFrontend:
 
             context = ExecutionContext(self.__env)
             context.add_shell_command(["python", "-u", script_context.env_path])
-            self.__env.app.execute_context(context)
+            try:
+                self.__env.app.execute_context(context)
+            except BaseException:
+                _publish_failure_report(output_context, directory)
+                raise
             output_context.sync_local()
 
             output_path = output_context.local_path / "output.json"
@@ -64,7 +103,11 @@ class BuildFrontend:
 
             context = ExecutionContext(self.__env)
             context.add_shell_command(["python", "-u", script_context.env_path])
-            self.__env.app.execute_context(context)
+            try:
+                self.__env.app.execute_context(context)
+            except BaseException:
+                _publish_failure_report(output_context, directory)
+                raise
             output_context.sync_local()
 
             output_path = output_context.local_path / "output.json"
@@ -220,19 +263,32 @@ class StandardBuildFrontendScripts(BuildFrontendScripts):
         output_dir: str,
         hook: str,
         kwargs: dict[str, Any],
+        call_id: str | None = None,
+        secret_env_names: list[str] | tuple[str, ...] | set[str] | None = None,
+        secret_values: list[str] | tuple[str, ...] | set[str] | None = None,
+        redaction_replacement: str | None = None,
     ) -> str:
-        return self.inject_data(
-            runner_script(),
-            {
-                "project_root": project_root,
-                "output_dir": output_dir,
-                "hook": hook,
-                "kwargs": kwargs,
-                "backend": self._project.metadata.build.build_backend,
-                "backend_path": self._env.pathsep.join(self._project.metadata.build.backend_path),
-                "hook_caller_script": hook_caller_script(),
-            },
-        )
+        runner_data: dict[str, Any] = {
+            "project_root": project_root,
+            "output_dir": output_dir,
+            "hook": hook,
+            "kwargs": kwargs,
+            "backend": self._project.metadata.build.build_backend,
+            "backend_path": self._env.pathsep.join(self._project.metadata.build.backend_path),
+            "hook_caller_script": hook_caller_script(),
+        }
+        # Reporting options are optional: standalone/older callers simply get a
+        # runtime-generated call id and the default redaction policy.
+        if call_id is not None:
+            runner_data["call_id"] = call_id
+        if secret_env_names is not None:
+            runner_data["secret_env_names"] = list(secret_env_names)
+        if secret_values is not None:
+            runner_data["secret_values"] = list(secret_values)
+        if redaction_replacement is not None:
+            runner_data["redaction_replacement"] = redaction_replacement
+
+        return self.inject_data(runner_script(), runner_data)
 
     def get_requires(
         self,
@@ -240,36 +296,45 @@ class StandardBuildFrontendScripts(BuildFrontendScripts):
         project_root: str,
         output_dir: str,
         build: Literal["sdist", "wheel", "editable"],
+        **report_options: Any,
     ) -> str:
         return self.get_runner_script(
             project_root=project_root,
             output_dir=output_dir,
             hook=f"get_requires_for_build_{build}",
             kwargs={"config_settings": None},
+            **report_options,
         )
 
-    def prepare_metadata(self, *, output_dir: str, project_root: str, editable: bool = False) -> str:
+    def prepare_metadata(
+        self, *, output_dir: str, project_root: str, editable: bool = False, **report_options: Any
+    ) -> str:
         return self.get_runner_script(
             project_root=project_root,
             output_dir=output_dir,
             hook="prepare_metadata_for_build_editable" if editable else "prepare_metadata_for_build_wheel",
             kwargs={"work_dir": "metadata_directory", "config_settings": None, "_allow_fallback": True},
+            **report_options,
         )
 
-    def build_wheel(self, *, output_dir: str, project_root: str, editable: bool = False) -> str:
+    def build_wheel(
+        self, *, output_dir: str, project_root: str, editable: bool = False, **report_options: Any
+    ) -> str:
         return self.get_runner_script(
             project_root=project_root,
             output_dir=output_dir,
             hook="build_editable" if editable else "build_wheel",
             kwargs={"work_dir": "wheel_directory", "config_settings": None, "metadata_directory": None},
+            **report_options,
         )
 
-    def build_sdist(self, *, output_dir: str, project_root: str) -> str:
+    def build_sdist(self, *, output_dir: str, project_root: str, **report_options: Any) -> str:
         return self.get_runner_script(
             project_root=project_root,
             output_dir=output_dir,
             hook="build_sdist",
             kwargs={"work_dir": "sdist_directory", "config_settings": None},
+            **report_options,
         )
 
 
