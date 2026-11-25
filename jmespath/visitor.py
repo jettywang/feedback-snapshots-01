@@ -1,6 +1,7 @@
 import operator
 
 from jmespath import functions
+from jmespath import policy as policy_module
 from jmespath.compat import string_type
 from numbers import Number
 
@@ -58,7 +59,8 @@ def _is_actual_number(x):
 
 class Options(object):
     """Options to control how a JMESPath function is evaluated."""
-    def __init__(self, dict_cls=None, custom_functions=None):
+    def __init__(self, dict_cls=None, custom_functions=None,
+                 function_policy=None):
         #: The class to use when creating a dict.  The interpreter
         #  may create dictionaries during the evaluation of a JMESPath
         #  expression.  For example, a multi-select hash will
@@ -69,6 +71,10 @@ class Options(object):
         #  have predictable key ordering.
         self.dict_cls = dict_cls
         self.custom_functions = custom_functions
+        #: A :class:`jmespath.FunctionPolicy` (or an iterable of allowed
+        #  extension names) that limits which custom functions this caller
+        #  may invoke.  Built-in functions are always available.
+        self.function_policy = policy_module.coerce_policy(function_policy)
 
 
 class _Expression(object):
@@ -77,7 +83,14 @@ class _Expression(object):
         self.interpreter = interpreter
 
     def visit(self, node, *args, **kwargs):
-        return self.interpreter.visit(node, *args, **kwargs)
+        # A deferred &expr runs later, but still belongs to the same caller
+        # and therefore to the same policy snapshot as its search.
+        interpreter = self.interpreter
+        interpreter._expref_depth += 1
+        try:
+            return interpreter.visit(node, *args, **kwargs)
+        finally:
+            interpreter._expref_depth -= 1
 
 
 class Visitor(object):
@@ -121,6 +134,16 @@ class TreeInterpreter(Visitor):
             self._functions = self._options.custom_functions
         else:
             self._functions = functions.Functions()
+        # Built-in functions are part of the language and are never gated.
+        # Everything else in the registry is an extension owned by the
+        # caller's policy.
+        self._builtin_function_table = functions.Functions.FUNCTION_TABLE
+        self._function_policy = options.function_policy
+        self._policy_snapshot = (
+            self._function_policy.snapshot()
+            if self._function_policy is not None else None)
+        self._function_path = []
+        self._expref_depth = 0
 
     def default_visit(self, node, *args, **kwargs):
         raise NotImplementedError(node['type'])
@@ -164,11 +187,44 @@ class TreeInterpreter(Visitor):
         return _Expression(node['children'][0], self)
 
     def visit_function_expression(self, node, value):
-        resolved_args = []
-        for child in node['children']:
-            current = self.visit(child, value)
-            resolved_args.append(current)
-        return self._functions.call_function(node['value'], resolved_args)
+        function_name = node['value']
+        # Authorize before resolving any arguments.  A denied outer call
+        # must not run argument expressions, even when one of those
+        # expressions would invoke a different, allowed extension.
+        self._authorize_function(function_name)
+        self._function_path.append(function_name)
+        try:
+            resolved_args = []
+            for child in node['children']:
+                current = self.visit(child, value)
+                resolved_args.append(current)
+            return self._functions.call_function(
+                function_name, resolved_args)
+        finally:
+            self._function_path.pop()
+
+    def _authorize_function(self, function_name):
+        snapshot = self._policy_snapshot
+        if snapshot is None:
+            return
+        spec = self._functions.FUNCTION_TABLE.get(function_name)
+        if spec is None:
+            # Unknown names are still reported by call_function().
+            return
+        builtin = self._builtin_function_table.get(function_name)
+        if builtin is not None and (
+                builtin['function'] == spec['function']):
+            # The built-in implementation; only an override registered by
+            # a custom Functions subclass is an extension.
+            return
+        if snapshot.is_allowed(function_name):
+            return
+        checkpoint = (
+            'expression_reference' if self._expref_depth else
+            'function_entry')
+        raise policy_module.FunctionPermissionError(
+            function_name, self._function_path + [function_name],
+            checkpoint)
 
     def visit_filter_projection(self, node, value):
         base = self.visit(node['children'][0], value)

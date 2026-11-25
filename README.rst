@@ -174,6 +174,45 @@ Below are a few examples:
             options=options)
     )
 
+Restricting extension functions
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+A service can decide which extension functions a caller is allowed to use
+by supplying a ``jmespath.FunctionPolicy`` through ``jmespath.Options``.
+Built-in JMESPath functions are never restricted.  Because the policy is
+passed at search time, different callers can reuse the same compiled
+expression while having different capabilities:
+
+.. code:: python
+
+    import jmespath
+
+    parsed = jmespath.compile('my_add(`1`, `2`)')
+
+    reader = jmespath.Options(
+        custom_functions=CustomFunctions(),
+        function_policy=jmespath.FunctionPolicy(allowed=['my_add']))
+    parsed.search({}, options=reader)   # 3
+
+    guest = jmespath.Options(
+        custom_functions=CustomFunctions(),
+        function_policy=jmespath.FunctionPolicy(allowed=['unique_letters']))
+    parsed.search({}, options=guest)    # raises FunctionPermissionError
+
+A policy is checked before the interpreter evaluates any of the function's
+arguments.  A denied outer call therefore does not run an argument
+expression, even if that expression would call an allowed extension.  The
+exception's ``path`` names the chain of functions up to the denial, such as
+``('my_add', 'unique_letters')`` for a denied nested call.  Deferred
+expression references (``&expr``) are checked against the same policy.
+
+A plain iterable of function names is also accepted as
+``function_policy``.  Policies default to denying unlisted extension
+functions; use ``FunctionPolicy(default_allowed=True)`` to invert that.
+Allow or deny capabilities between searches with ``policy.allow(name)``
+and ``policy.deny(name)``; a running search keeps the snapshot it started
+with.
+
 Again, if you come up with useful functions that you think make
 sense in the JMESPath language (and make sense to implement in all
 JMESPath libraries, not just python), please let us know at

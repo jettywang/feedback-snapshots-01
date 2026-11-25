@@ -1,7 +1,10 @@
 Next Release (TBD)
 ==================
 
-* No changes yet.
+* Add per-caller ``FunctionPolicy`` support through
+  ``jmespath.Options(function_policy=...)``.  Extension functions are
+  authorized before their arguments are evaluated, and expression
+  references run under the same caller policy.
 
 
 1.1.0
