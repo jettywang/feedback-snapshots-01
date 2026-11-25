@@ -310,6 +310,35 @@ describe Grape::DSL::InsideRoute do
     end
   end
 
+  describe '#jsonl' do
+    it 'returns a StreamResponse wrapping a JsonlBody' do
+      response = subject.jsonl([{ id: 1 }], fields: %i[id])
+
+      expect(response).to be_a(Grape::ServeStream::StreamResponse)
+      expect(response.stream).to be_a(Grape::ServeStream::JsonlBody)
+    end
+
+    it 'drops the length headers a stream cannot keep' do
+      subject.header Rack::CONTENT_LENGTH, 123
+      subject.header Rack::TRANSFER_ENCODING, 'base64'
+
+      subject.jsonl([{ id: 1 }], fields: %i[id])
+
+      expect(subject.header).to match(Rack::CACHE_CONTROL => 'no-cache')
+    end
+
+    it 'publishes the ledger on the request env' do
+      subject.env[Grape::Env::JSONL_LEDGER] = nil
+      response = subject.jsonl([{ id: 1 }])
+
+      expect(subject.env[Grape::Env::JSONL_LEDGER]).to be(response.stream.ledger)
+    end
+
+    it 'requires records that respond to :each' do
+      expect { subject.jsonl(Object.new) }.to raise_error(ArgumentError, /:each/)
+    end
+  end
+
   describe '#route' do
     before do
       subject.env[Grape::Env::GRAPE_ROUTING_ARGS] = {}

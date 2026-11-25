@@ -3565,6 +3565,38 @@ get :export do
 end
 ```
 
+To settle the disclosed fields before the first line is sent, answer with `jsonl` instead of returning the enumerator. The representation is frozen when the route block returns: `fields:` names the columns, `:first` locks the first record's columns, and `represent:` takes a callable that answers the projected record itself.
+
+```ruby
+get :export do
+  jsonl User.find_each, fields: %i[id name], version: 'v1'
+end
+```
+
+Every line is rendered through that frozen representation, so a record or policy that changes while Rack reads the body cannot widen a line already promised, nor take a field away from one that was. `rows, fields: :first` is the default: the first record's columns decide what all the rest may disclose.
+
+Pass a `Grape::ServeStream::Policy` as `policy:` to freeze the authorization the response was approved under, and `policy_source:` with a callable answering the live policy to re-check it before every line. A revision change stops the stream at the first line beyond the approved revision; a record the policy denies is never rendered.
+
+```ruby
+get :export do
+  jsonl rows,
+        fields: %i[id name],
+        policy: policy_snapshot,
+        policy_source: -> { current_policy }
+end
+```
+
+A stream that stops early raises `Grape::ServeStream::StreamAborted` out of the body, because the status and headers are already on the wire. The exception, and the request env, carry the ledger of what actually happened:
+
+```ruby
+body = Grape::ServeStream::JsonlBody.new(...)
+Grape::ServeStream::Ledger.from(env) # => the ledger once the response is over
+```
+
+The ledger records the representation revision the response was approved under, one entry per line handed to Rack (index, revision, bytes, source checkpoint), the terminal state (`:complete`, `:aborted`, `:failed`, `:closed_unread`), why it stopped (`:policy_changed`, `:denied`, `:format_error`, `:source_error`, `:consumer_closed`, `:consumer_error`), the failure class, message and the first source location outside Grape's stream machinery, who closed the body and who read and closed the source. `#to_h` is a detached Hash safe to log or hand to an audit sink. The same record is emitted on the `jsonl_stream.grape` `ActiveSupport::Notifications` event when the response settles.
+
+A source may save the checkpoint of its own read by answering `checkpoint`, and release itself with `close`; the stream reads it once and closes it once, whether the body was read fully, abandoned after the first line or closed unread.
+
 The status and headers of a streamed response are sent before its first line is rendered, so an exception raised while it streams is past `rescue_from`: the response just ends early.
 
 A request body of `application/jsonl` is parsed into an Array of its lines' values, skipping blank lines. Like a JSON body that is an Array, it is available in `env['api.request.body']` and is not merged into `params`. To validate the lines as params, wrap them in a Hash with a parser of your own.

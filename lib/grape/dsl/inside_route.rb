@@ -72,6 +72,51 @@ module Grape
         body format(REDIRECT_MESSAGES.fetch(code), url:)
       end
 
+      # Answer with a JSON Lines body whose disclosure is settled before the
+      # first line is sent.
+      #
+      # The fields are frozen when the route block returns: a record or a policy
+      # changed while the body streams cannot widen a line that was already
+      # promised. The body keeps a ledger of what it delivered, the terminal
+      # state it reached, why it stopped and who closed it; the ledger is also
+      # available on the request env as +env['grape.jsonl_ledger']+.
+      #
+      # @param records [Enumerable] the records to stream.
+      # @param fields [Array<Symbol>, :first, nil] the disclosed fields. +:first+
+      #   locks the fields of the first record; +nil+ serves records unchanged.
+      # @param represent [#call, nil] a callable answering the projected record
+      #   itself, instead of +fields+.
+      # @param version [String, Symbol, nil] the representation revision, so a
+      #   delivered line can be traced to the disclosure it was approved under.
+      # @param name [String, Symbol, nil] a label for the representation.
+      # @param policy [Grape::ServeStream::Policy, nil] the authorization the
+      #   response was approved under. A revision change or a denied record
+      #   stops the stream.
+      # @param policy_source [#call, nil] a callable answering the live policy,
+      #   re-read before every line so a change mid-stream is detected.
+      # @param source [#checkpoint, #close, nil] the data source, when it can
+      #   save the checkpoint of its own read and release itself.
+      # @return [Grape::ServeStream::StreamResponse]
+      #
+      # @example
+      #   get :export do
+      #     jsonl rows, fields: %i[id name], policy: policy_snapshot, policy_source: -> { current_policy }
+      #   end
+      def jsonl(records, fields: Grape::ServeStream::Representation::FIRST, represent: nil, version: nil,
+                name: nil, policy: nil, policy_source: nil, source: nil)
+        raise ArgumentError, 'records must respond to :each' unless records.respond_to?(:each)
+
+        representation = Grape::ServeStream::Representation.new(fields:, represent:, version:, name:)
+        body = Grape::ServeStream::JsonlBody.new(
+          records, representation:, policy:, policy_source:, env:, source:
+        )
+
+        header Rack::CONTENT_LENGTH, nil
+        header Rack::TRANSFER_ENCODING, nil
+        header Rack::CACHE_CONTROL, 'no-cache'
+        @stream = Grape::ServeStream::StreamResponse.new(body)
+      end
+
       # Set or retrieve the HTTP status code.
       #
       # @param status [Integer] The HTTP Status Code to return for this request.
