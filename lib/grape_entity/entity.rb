@@ -140,8 +140,111 @@ module Grape
     def self.inherited(subclass)
       subclass.root_exposure = root_exposure.dup
       subclass.formatters = formatters.dup
+      subclass.publication_declaration = publication_declaration.dup
+      subclass.publication_ledger = Publication::Ledger.new
 
       super
+    end
+
+    # -- Opt-in publication contract ---------------------------------------
+    #
+    # Entities behave exactly as before unless `publication` is declared or
+    # `publish` is called. The declaration and the ledger are per class.
+
+    def self.publication_ledger
+      @publication_ledger ||= Publication::Ledger.new
+    end
+
+    def self.publication_ledger=(ledger)
+      @publication_ledger = ledger
+    end
+
+    def self.publication_declaration
+      @publication_declaration ||= Publication::Declaration.new
+    end
+
+    def self.publication_declaration=(declaration)
+      @publication_declaration = declaration
+    end
+
+    # Declares the publication contract for this entity. Without a block it
+    # returns the current declaration.
+    def self.publication(&block)
+      declaration = publication_declaration
+      declaration.instance_eval(&block) if block
+      declaration
+    end
+
+    # Publishes one object and returns a Publication::Result. No representation
+    # reaches review unless the result is deliverable.
+    def self.publish(object, options = {})
+      new(object, options).publish
+    end
+
+    # Publishes a collection. `on_member_failure` selects how member failures
+    # are handled:
+    #
+    # * :degrade (default) - optional failures degrade per object; a mandatory
+    #   failure rejects only that object and the batch is reported as :partial.
+    # * :abort_batch - the first mandatory failure terminates the whole batch;
+    #   no member representation is delivered.
+    def self.publish_batch(objects, options = {})
+      options = options.dup
+      policy = options.delete(:on_member_failure) || :degrade
+      unless %i[degrade abort_batch].include?(policy)
+        raise ArgumentError, "Unknown member failure policy: #{policy.inspect}"
+      end
+
+      members = objects.to_ary.each_with_index.map do |object, index|
+        result = new(object, options.reverse_merge(collection: true)).publish
+        annotate_member(result, index)
+      end
+
+      aborted = policy == :abort_batch && members.any?(&:rejected?)
+      members = members.map { |member| mark_undelivered(member) } if aborted
+      events = [Publication::Event.new(member_event_code(members, policy, aborted))]
+      Publication::BatchResult.new(members: members, events: events, policy: policy, aborted: aborted)
+    end
+
+    # Tags a member result with its position in the batch so review events can
+    # be traced to the offending object without exposing object values.
+    def self.annotate_member(member, index)
+      events = member.events.map do |event|
+        Publication::Event.new(event.code, field: event.field, mandatory: event.mandatory, object_key: index)
+      end
+      Publication::Result.new(
+        representation: member.representation,
+        events: events,
+        errors: member.errors,
+        retained: member.retained,
+        key: member.key,
+        deliverable: member.deliverable?,
+        reason: member.deliverable? ? nil : member.error_code
+      )
+    end
+
+    # A batch-wide abort means even members that formatted cleanly are not
+    # submitted for review as part of this batch.
+    def self.mark_undelivered(member)
+      Publication::Result.new(
+        representation: nil,
+        events: member.events,
+        errors: member.errors,
+        retained: member.retained,
+        key: member.key,
+        deliverable: false,
+        reason: Publication::Codes::BATCH_ABORTED
+      )
+    end
+
+    def self.member_event_code(members, _policy, aborted)
+      return Publication::Codes::BATCH_ABORTED if aborted
+      return Publication::Codes::BATCH_PARTIAL if members.any?(&:rejected?)
+      return Publication::Codes::BATCH_DEGRADED if members.any? do |member|
+        member.deliverable? && member.event_codes.include?(Publication::Codes::OPTIONAL_FIELD_DEGRADED)
+      end
+
+      Publication::Codes::BATCH_COMPLETE
     end
 
     # This method is the primary means by which you will declare what attributes
@@ -218,6 +321,23 @@ module Grape
       args.each { |attribute| build_exposure_for_attribute(attribute, @nesting_stack, options, block) }
     end
 
+    # Registers the public path of an `expose mandatory: true` declaration so
+    # the publication contract protects it without repeating the list. The
+    # path follows nested exposures, e.g. `expose :meta do expose :code,
+    # mandatory: true end` registers [:meta, :code].
+    def self.register_mandatory_exposure(exposure, nesting_stack, options)
+      key = options[:as] || exposure.attribute
+      key = key.to_sym if key.respond_to?(:to_sym)
+      return if key.respond_to?(:call)
+
+      prefix = nesting_stack.map do |parent|
+        parent_key = parent.as_option || parent.attribute
+        parent_key.respond_to?(:to_sym) ? parent_key.to_sym : parent_key
+      end
+      path = prefix + [key]
+      publication_declaration.register_mandatory_key(path.size == 1 ? key : path)
+    end
+
     def self.build_exposure_for_attribute(attribute, nesting_stack, options, block)
       exposure_list = nesting_stack.empty? ? root_exposures : nesting_stack.last.nested_exposures
 
@@ -226,6 +346,7 @@ module Grape
       exposure_list.delete_by(attribute) if exposure.override?
 
       exposure_list << exposure
+      register_mandatory_exposure(exposure, nesting_stack, options) if options[:mandatory]
 
       # Nested exposures are given in a block with no parameters.
       return unless exposure.nesting?
@@ -443,15 +564,33 @@ module Grape
       if objects.respond_to?(:to_ary) && !@present_collection
         root_element = root_element(:collection_root)
         inner = objects.to_ary.map { |object| new(object, options.reverse_merge(collection: true)).presented }
+        inner = filter_omitted(inner) if Publication.session?
       else
         objects = { @collection_name => objects } if @present_collection
         root_element = root_element(:root)
         inner = new(objects, options).presented
       end
 
+      inner = filter_omitted(inner) if Publication.session?
+
       root_element = options[:root] if options.key?(:root)
 
       root_element ? { root_element => inner } : inner
+    end
+
+    # Removes fields intentionally omitted by publication degradation. Only
+    # reached while a publication session is active.
+    def self.filter_omitted(value)
+      case value
+      when Array
+        value.map { |item| filter_omitted(item) }.reject { |item| Publication.omitted?(item) }
+      when Hash
+        value.each_with_object({}) do |(key, item), output|
+          output[key] = filter_omitted(item) unless Publication.omitted?(item)
+        end
+      else
+        value
+      end
     end
 
     # This method returns the entity's root or collection root node, or its parent's
@@ -463,6 +602,36 @@ module Grape
       elsif superclass.respond_to? :root_element
         superclass.root_element(root_type)
       end
+    end
+
+    # Publishes this entity under its class's publication contract.
+    #
+    # The call returns a Publication::Result. Check `deliverable?` before using
+    # `representation`; rejected results only reveal a previously retained
+    # representation through `retained` / `review_representation`.
+    def publish
+      Publication::Executor.new(self).publish
+    end
+
+    # Stable key used by the ledger to retain the last approved representation.
+    # Callers can pass `publication_key:` in the publish options when object
+    # identity is only known to the caller; otherwise the represented object's
+    # identity is used.
+    def publication_key
+      explicit = options[:publication_key]
+      return [self.class.name, explicit].freeze unless explicit.nil?
+
+      [self.class.name, object.object_id].freeze
+    end
+
+    def retained_representation
+      self.class.publication_ledger.fetch(publication_key)
+    end
+
+    def retain_representation(representation)
+      return unless self.class.publication_declaration.retain?
+
+      self.class.publication_ledger.store(publication_key, representation)
     end
 
     def presented
@@ -645,6 +814,7 @@ module Grape
       expose_nil
       override
       default
+      mandatory
     ].to_set.freeze
 
     # Merges the given options with current block options.

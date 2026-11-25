@@ -7,6 +7,10 @@
 
 #### Features
 
+* Add an opt-in publication contract for review-grade output: mandatory and
+  allowlisted fields, optional-field degradation (`:omit`, `:null`, `:abort`),
+  retained last-good representations, and per-object versus batch-wide failure
+  reporting.
 * Your contribution here.
 
 

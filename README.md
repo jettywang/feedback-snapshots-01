@@ -24,6 +24,7 @@
       - [Aliases](#aliases)
       - [Format Before Exposing](#format-before-exposing)
       - [Expose Nil](#expose-nil)
+      - [Publication Contract](#publication-contract)
       - [Default Value](#default-value)
       - [Documentation](#documentation)
     - [Options Hash](#options-hash)
@@ -497,6 +498,78 @@ module  Entities
   end
 end
 ```
+
+#### Publication Contract
+
+When an API uses Entity output as security-review evidence, callers need to
+know whether an object was represented completely. An optional publication
+contract marks mandatory fields, limits the approved fields, and decides how an
+optional field degrades when its formatter fails.
+
+```ruby
+module Entities
+  class Finding < Grape::Entity
+    publication do
+      mandatory :id
+      allow :id, :severity, :details
+      on_optional_failure :omit # :omit, :null or :abort
+    end
+
+    expose :id
+    expose :severity, format_with: :severity_label
+    expose :details
+  end
+end
+```
+
+`publish` formats a candidate and then commits it. Formatting and committing are
+separate phases, so a formatter that fails never leaks a half-built hash:
+
+```ruby
+result = Entities::Finding.publish(finding, publication_key: finding.id)
+
+result.deliverable?         # => true when every mandatory and allowed field is satisfied
+result.representation       # => the approved hash, or nil when rejected
+result.outcome              # => :published or :optional_field_degraded
+result.retained             # => the last approved hash, if one was kept
+```
+
+`expose :id, mandatory: true` is shorthand for listing the field in
+`publication.mandatory`. `on_optional_failure` controls a failed optional
+field: `:omit` removes the field, `:null` keeps it with a `nil` value, and
+`:abort` rejects the object.
+
+A rejected object never exposes the candidate hash built during the failed
+attempt. It falls back to the last approved representation stored under the
+same `publication_key`, which is what reviewers should use:
+
+```ruby
+failed = Entities::Finding.publish(broken_finding, publication_key: broken_finding.id)
+failed.deliverable?          # => false
+failed.review_representation # => the retained hash, or nil
+failed.error_code            # => :mandatory_field_missing
+failed.errors.first.message  # => "mandatory_field_missing (id)"
+failed.errors.first.internal_reason # => the original exception
+```
+
+The public error message only contains a stable code and the field path. The
+original exception remains reachable through `internal_reason` / `cause`.
+
+Batches distinguish a per-object degradation from a batch-wide termination:
+
+```ruby
+degraded = Entities::Finding.publish_batch(findings, on_member_failure: :degrade)
+degraded.partial?   # => true when a member was rejected but the batch continued
+degraded.aborted?   # => false
+
+aborted = Entities::Finding.publish_batch(findings, on_member_failure: :abort_batch)
+aborted.aborted?    # => true when a mandatory failure stopped the whole batch
+aborted.deliverable? # => false, no member content is submitted
+```
+
+With `:degrade`, a mandatory failure rejects only the affected object and the
+batch reports `:batch_partial`. With `:abort_batch`, the first mandatory failure
+terminates the batch and no member representation is delivered.
 
 #### Default Value
 

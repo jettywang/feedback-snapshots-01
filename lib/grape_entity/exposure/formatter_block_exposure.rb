@@ -18,6 +18,10 @@ module Grape
           super && @format_with == other.format_with
         end
 
+        def formatter?
+          true
+        end
+
         def value(entity, _options)
           entity.exec_with_attribute(attribute, &@format_with)
         end

@@ -14,6 +14,9 @@ module Grape
           end
 
           def add(exposure, result)
+            return if Grape::Entity::Publication.omitted?(result)
+            return if suppressed?(exposure)
+
             # Save a result array in collections' array if it should be merged
             if result.is_a?(Array) && exposure.for_merge
               @output_collection << result
@@ -38,6 +41,16 @@ module Grape
           end
 
           private
+
+          # A field whose formatting failed is removed from the candidate hash.
+          # The publication commit phase decides if that omission is allowed.
+          def suppressed?(exposure)
+            session = Grape::Entity::Publication.current_session
+            return false unless session
+
+            path = Array(@entity.options[:attr_path]).map(&:to_sym)
+            session.suppress?(path) || session.excluded_for?(path)
+          end
 
           # If output_collection contains at least one element we have to represent the output as a collection
           def output

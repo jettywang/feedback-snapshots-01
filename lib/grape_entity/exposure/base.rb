@@ -70,7 +70,16 @@ module Grape
         end
 
         def serializable_value(entity, options)
+          if Publication.session?
+            Publication.wrap(self, options) { compute_serializable_value(entity, options) }
+          else
+            compute_serializable_value(entity, options)
+          end
+        end
+
+        def compute_serializable_value(entity, options)
           partial_output = valid_value(entity, options)
+          return Publication::OMITTED if Publication.omitted?(partial_output)
 
           if partial_output.respond_to?(:serializable_hash)
             partial_output.serializable_hash
@@ -90,6 +99,12 @@ module Grape
 
           output = value(entity, options)
           output.blank? && !@default_value.nil? ? @default_value : output
+        end
+
+        # Formatter exposures can distinguish their failures from ordinary
+        # exposure failures for review event classification.
+        def formatter?
+          false
         end
 
         def should_return_key?(options)
@@ -118,6 +133,11 @@ module Grape
 
         def key(entity = nil)
           @key.respond_to?(:call) ? entity.exec_with_object(@options, &@key) : @key
+        end
+
+        # Declared alias, if any, without evaluating a proc alias.
+        def as_option
+          @options[:as]
         end
 
         def with_attr_path(entity, options, &block)
