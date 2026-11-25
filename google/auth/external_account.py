@@ -40,8 +40,15 @@ from google.auth import _constants
 from google.auth import _helpers
 from google.auth import credentials
 from google.auth import exceptions
+from google.auth import external_account_policy
 from google.auth import impersonated_credentials
 from google.auth import metrics
+from google.auth.external_account_policy import (
+    ExchangeApproval,
+    ExchangeGrant,
+    ExchangePolicy,
+    IdentityExchangePolicy,
+)
 from google.oauth2 import sts
 from google.oauth2 import utils
 
@@ -55,6 +62,15 @@ _STS_REQUESTED_TOKEN_TYPE = "urn:ietf:params:oauth:token-type:access_token"
 _CLOUD_RESOURCE_MANAGER = "https://cloudresourcemanager.googleapis.com/v1/projects/"
 # Default Google sts token url.
 _DEFAULT_TOKEN_URL = "https://sts.{universe_domain}/v1/token"
+
+__all__ = [
+    "Credentials",
+    "ExchangeApproval",
+    "ExchangeGrant",
+    "ExchangePolicy",
+    "IdentityExchangePolicy",
+    "SupplierContext",
+]
 
 
 @dataclass
@@ -118,6 +134,11 @@ class Credentials(
         workforce_pool_user_project=None,
         universe_domain=credentials.DEFAULT_UNIVERSE_DOMAIN,
         trust_boundary=None,
+        exchange_policy=None,
+        exchange_recorder=None,
+        exchange_source=None,
+        policy=None,
+        recorder=None,
     ):
         """Instantiates an external account credentials object.
 
@@ -177,6 +198,14 @@ class Credentials(
         self._default_scopes = default_scopes
         self._workforce_pool_user_project = workforce_pool_user_project
         self._trust_boundary = trust_boundary
+        self._exchange_policy = (
+            exchange_policy if exchange_policy is not None else policy
+        )
+        self._exchange_recorder = (
+            exchange_recorder if exchange_recorder is not None else recorder
+        )
+        self._exchange_source = exchange_source
+        self._exchange_session = None
 
         if self._client_id:
             self._client_auth = utils.ClientAuthentication(
@@ -349,6 +378,9 @@ class Credentials(
         scoped = self.__class__(**kwargs)
         scoped._cred_file_path = self._cred_file_path
         scoped._metrics_options = self._metrics_options
+        scoped._exchange_policy = self._exchange_policy
+        scoped._exchange_recorder = self._exchange_recorder
+        scoped._exchange_source = self._exchange_source
         return scoped
 
     @abc.abstractmethod
@@ -432,7 +464,38 @@ class Credentials(
             # Otherwise, refresh the trust boundary for the external account.
             self._refresh_trust_boundary(request)
 
+    def _begin_exchange_session(self):
+        if self._exchange_session is not None:
+            return self._exchange_session
+        if self._exchange_policy is None and self._exchange_recorder is None:
+            return None
+        self._exchange_session = (
+            external_account_policy.ExchangeSession.from_credentials(
+                self, self._exchange_recorder
+            )
+        )
+        return self._exchange_session
+
     def _perform_refresh_token(self, request, cert_fingerprint=None):
+        owns_session = self._exchange_session is None
+        session = self._begin_exchange_session()
+        try:
+            self._perform_authorized_refresh_token(
+                request,
+                cert_fingerprint=cert_fingerprint,
+                session=session,
+                emit_credential_update=owns_session,
+            )
+        finally:
+            self._exchange_session = None
+
+    def _perform_authorized_refresh_token(
+        self,
+        request,
+        cert_fingerprint=None,
+        session=None,
+        emit_credential_update=True,
+    ):
         scopes = self._scopes if self._scopes is not None else self._default_scopes
 
         # Inject client certificate into request.
@@ -445,9 +508,16 @@ class Credentials(
             self._impersonated_credentials = self._initialize_impersonated_credentials()
 
         if self._impersonated_credentials:
+            if session is not None:
+                self._impersonated_credentials._exchange_session = session
+                self._impersonated_credentials._source_credentials._exchange_session = (
+                    session
+                )
             self._impersonated_credentials.refresh(request)
             self.token = self._impersonated_credentials.token
             self.expiry = self._impersonated_credentials.expiry
+            if session is not None:
+                session.credential_updated()
         else:
             now = _helpers.utcnow()
             additional_options = {}
@@ -464,10 +534,16 @@ class Credentials(
                     self._metrics_options
                 )
             }
+            if session is not None:
+                session.before_evidence()
+            subject_token = self.retrieve_subject_token(request)
+            if session is not None:
+                session.evidence_completed()
+                session.before_exchange()
             response_data = self._sts_client.exchange_token(
                 request=request,
                 grant_type=_STS_GRANT_TYPE,
-                subject_token=self.retrieve_subject_token(request),
+                subject_token=subject_token,
                 subject_token_type=self._subject_token_type,
                 audience=self._audience,
                 scopes=scopes,
@@ -475,6 +551,8 @@ class Credentials(
                 additional_options=additional_options if additional_options else None,
                 additional_headers=additional_headers,
             )
+            if session is not None:
+                session.exchange_completed()
             self.token = response_data.get("access_token")
             expires_in = response_data.get("expires_in")
             # Some services do not respect the OAUTH2.0 RFC and send expires_in as a
@@ -485,6 +563,8 @@ class Credentials(
             lifetime = datetime.timedelta(seconds=expires_in)
 
             self.expiry = now + lifetime
+            if session is not None and emit_credential_update:
+                session.credential_updated()
 
     def _build_trust_boundary_lookup_url(self):
         """Builds and returns the URL for the trust boundary lookup API."""
@@ -525,6 +605,9 @@ class Credentials(
         new_cred = self.__class__(**kwargs)
         new_cred._cred_file_path = self._cred_file_path
         new_cred._metrics_options = self._metrics_options
+        new_cred._exchange_policy = self._exchange_policy
+        new_cred._exchange_recorder = self._exchange_recorder
+        new_cred._exchange_source = self._exchange_source
         return new_cred
 
     @_helpers.copy_docstring(credentials.CredentialsWithQuotaProject)
@@ -581,6 +664,9 @@ class Credentials(
         )
         source_credentials = self.__class__(**kwargs)
         source_credentials._metrics_options = self._metrics_options
+        source_credentials._exchange_policy = self._exchange_policy
+        source_credentials._exchange_recorder = self._exchange_recorder
+        source_credentials._exchange_source = self._exchange_source
 
         # Determine target_principal.
         target_principal = self.service_account_email

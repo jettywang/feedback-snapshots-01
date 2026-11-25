@@ -35,11 +35,11 @@ from google.auth import _exponential_backoff
 from google.auth import _helpers
 from google.auth import credentials
 from google.auth import exceptions
+from google.auth import external_account_policy
 from google.auth import iam
 from google.auth import jwt
 from google.auth import metrics
 from google.oauth2 import _client
-
 
 _REFRESH_ERROR = "Unable to acquire impersonated credentials"
 
@@ -205,6 +205,10 @@ class Credentials(
         quota_project_id=None,
         iam_endpoint_override=None,
         trust_boundary=None,
+        exchange_policy=None,
+        exchange_recorder=None,
+        policy=None,
+        recorder=None,
     ):
         """
         Args:
@@ -268,6 +272,13 @@ class Credentials(
         self._iam_endpoint_override = iam_endpoint_override
         self._cred_file_path = None
         self._trust_boundary = trust_boundary
+        self._exchange_policy = (
+            exchange_policy if exchange_policy is not None else policy
+        )
+        self._exchange_recorder = (
+            exchange_recorder if exchange_recorder is not None else recorder
+        )
+        self._exchange_session = None
 
     def _metric_header_for_usage(self):
         return metrics.CRED_TYPE_SA_IMPERSONATE
@@ -280,6 +291,22 @@ class Credentials(
             request (google.auth.transport.requests.Request): Request object
                 to use for refreshing credentials.
         """
+        if self._exchange_session is None and (
+            self._exchange_policy is not None
+            or self._exchange_recorder is not None
+            or getattr(self._source_credentials, "_exchange_policy", None) is not None
+        ):
+            self._exchange_session = (
+                external_account_policy.ExchangeSession.from_impersonated_credentials(
+                    self
+                )
+            )
+
+        exchange_session = self._exchange_session
+        if exchange_session is not None and hasattr(
+            self._source_credentials, "_exchange_session"
+        ):
+            self._source_credentials._exchange_session = exchange_session
 
         # Refresh our source credentials if it is not valid.
         if (
@@ -301,6 +328,9 @@ class Credentials(
 
         # Apply the source credentials authentication info.
         self._source_credentials.apply(headers)
+
+        if exchange_session is not None:
+            exchange_session.before_delegation()
 
         #  If a subject is specified a domain-wide delegation auth-flow is initiated
         #  to impersonate as the provided subject (user).
@@ -332,6 +362,9 @@ class Credentials(
             self.token, self.expiry, _ = _client.jwt_grant(
                 request, _GOOGLE_OAUTH2_TOKEN_ENDPOINT, assertion
             )
+            if exchange_session is not None:
+                exchange_session.delegation_completed()
+                exchange_session.credential_updated()
 
             return
 
@@ -343,6 +376,9 @@ class Credentials(
             universe_domain=self.universe_domain,
             iam_endpoint_override=self._iam_endpoint_override,
         )
+        if exchange_session is not None:
+            exchange_session.delegation_completed()
+            exchange_session.credential_updated()
 
     def _build_trust_boundary_lookup_url(self):
         """Builds and returns the URL for the trust boundary lookup API.
@@ -436,6 +472,8 @@ class Credentials(
             quota_project_id=self._quota_project_id,
             iam_endpoint_override=self._iam_endpoint_override,
             trust_boundary=self._trust_boundary,
+            exchange_policy=self._exchange_policy,
+            exchange_recorder=self._exchange_recorder,
         )
         cred._cred_file_path = self._cred_file_path
         return cred
