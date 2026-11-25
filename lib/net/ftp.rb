@@ -19,6 +19,8 @@ require "socket"
 require "monitor"
 require "net/protocol"
 require "time"
+require "digest"
+require "json"
 begin
   require "openssl"
 rescue LoadError
@@ -33,6 +35,19 @@ module Net
   class FTPPermError < FTPError; end
   class FTPProtoError < FTPError; end
   class FTPConnectionError < FTPError; end
+
+  # Raised when a resumable transfer cannot safely reuse the locally saved
+  # prefix because the remote file cannot be proven to be the same version
+  # (or is provably a different one).  The prefix is kept as a pending
+  # candidate rather than being appended to or archived.
+  class FTPResumeVersionError < FTPError
+    attr_reader :receipt
+
+    def initialize(message, receipt)
+      super(message)
+      @receipt = receipt
+    end
+  end
   # :startdoc:
 
   #
@@ -663,7 +678,7 @@ module Net
     # chunks of +blocksize+ characters. Note that +cmd+ is a server command
     # (such as "RETR myfile").
     #
-    def retrbinary(cmd, blocksize, rest_offset = nil) # :yield: data
+    def retrbinary(cmd, blocksize, rest_offset = nil, receipt: nil) # :yield: data
       synchronize do
         with_binary(true) do
           begin
@@ -671,6 +686,7 @@ module Net
             while data = conn.read(blocksize)
               yield(data)
             end
+            receipt&.mark_data_end!
             conn.shutdown(Socket::SHUT_WR) rescue nil
             conn.read_timeout = 1
             conn.read rescue nil
@@ -678,6 +694,7 @@ module Net
             conn.close if conn
           end
           voidresp
+          receipt&.mark_confirmed!(@last_response_code, @last_response)
         end
       end
     end
@@ -785,8 +802,21 @@ module Net
     # If a block is supplied, it is passed the retrieved data in +blocksize+
     # chunks.
     #
+    # When +receipt+ is a Net::FTP::TransferReceipt, the transfer is performed
+    # as a safe, resumable, staged download.  Data is written to a staging
+    # file (localfile with a ".part" suffix) and only moved to +localfile+
+    # once the control connection confirms the end of the transfer.  The
+    # receipt records which attempt produced the saved prefix, the bytes
+    # received afterwards and the exact step at which the file becomes safe
+    # to archive.  A prefix that cannot be proven to match the current
+    # remote version is retained as a pending candidate instead of being
+    # reused.
+    #
     def getbinaryfile(remotefile, localfile = File.basename(remotefile),
-                      blocksize = DEFAULT_BLOCKSIZE, &block) # :yield: data
+                      blocksize = DEFAULT_BLOCKSIZE, receipt: nil, &block) # :yield: data
+      return getbinaryfile_with_receipt(remotefile, localfile, blocksize,
+                                        receipt, &block) if receipt
+
       f = nil
       result = nil
       if localfile
@@ -812,6 +842,167 @@ module Net
         f&.close
       end
     end
+
+    # Implements the receipt-aware, resumable staged download.  Kept separate
+    # from #getbinaryfile so the legacy path is unchanged.
+    def getbinaryfile_with_receipt(remotefile, localfile, blocksize,
+                                   receipt, &block)
+      facts = collect_version_facts(remotefile)
+      rest_offset, version_status =
+        prepare_resumable_prefix(localfile, receipt, facts)
+      if version_status == :mismatch || version_status == :indeterminate
+        receipt.record_verification!(facts, version_status)
+        receipt.mark_candidate!
+        receipt.persist!
+        raise FTPResumeVersionError.new(
+          "cannot resume #{remotefile}: saved prefix cannot be verified " \
+          "against the current remote version (#{version_status}); " \
+          "retained as pending candidate at #{receipt.candidate_path}",
+          receipt
+        )
+      end
+
+      state = rest_offset.positive? ? :resuming : :receiving
+      receipt.mark_attempt!(state: state,
+                            rest_offset: rest_offset,
+                            version_facts: facts,
+                            version_status: version_status)
+      f = File.open(receipt.staging_path, "a")
+      f.binmode
+      result = block_given? ? nil : String.new
+      previous_resume = @resume
+      self.resume = true
+      failed = false
+      begin
+        retrbinary("RETR #{remotefile}", blocksize, rest_offset,
+                   receipt: receipt) do |data|
+          f.write(data)
+          receipt.add_received!(data.bytesize)
+          block&.(data)
+          result&.concat(data)
+        end
+      rescue Exception
+        failed = true
+        raise
+      ensure
+        f.close
+        self.resume = previous_resume
+        if failed
+          # Record the on-disk prefix only after the handle is closed and
+          # flushed, so its length and digest reflect what was actually saved.
+          record_saved_prefix(receipt)
+          receipt.persist!
+        end
+      end
+      if rest_offset.zero?
+        # A fresh reception: the whole file is this attempt's saved prefix.
+        record_saved_prefix(receipt)
+      end
+      # On a successful resume, leave prefix_* describing the verified prefix
+      # produced by the earlier attempt rather than overwriting it with the
+      # now-complete file.
+      archive_confirmed_file(receipt)
+      return result
+    end
+    private :getbinaryfile_with_receipt
+
+    # Gathers the facts available to tell revisions of +remotefile+ apart.
+    def collect_version_facts(remotefile)
+      file_size =
+        begin
+          size(remotefile)
+        rescue FTPError
+          nil
+        end
+      modify_time =
+        begin
+          mtime(remotefile)
+        rescue FTPError
+          nil
+        end
+      unique =
+        begin
+          mlst(remotefile).unique
+        rescue FTPError
+          nil
+        end
+      return VersionFacts.new(size: file_size,
+                               mtime: modify_time,
+                               unique: unique)
+    end
+    private :collect_version_facts
+
+    # Decides whether a previously saved prefix can be reused.  Returns the
+    # REST offset to use and the version comparison result.  An unverifiable
+    # prefix is moved aside as a pending candidate and forces a restart at 0.
+    def prepare_resumable_prefix(localfile, receipt, facts)
+      unless File.file?(receipt.sidecar_path) &&
+               File.file?(receipt.staging_path)
+        return [0, :fresh]
+      end
+
+      saved = TransferReceipt.load(receipt.sidecar_path)
+      saved.localfile = localfile
+      inherit_saved_receipt(receipt, saved)
+
+      status = saved.version_facts.compare(facts)
+      if status == :verified
+        actual_digest = digest_file(receipt.staging_path)
+        if actual_digest != saved.prefix_digest
+          retain_candidate(receipt, "local prefix digest mismatch")
+          return [0, :indeterminate]
+        end
+        return [saved.prefix_bytes, :verified]
+      else
+        reason = status == :mismatch ? "remote version changed" :
+                                        "remote version cannot be distinguished"
+        retain_candidate(receipt, reason)
+        return [0, status]
+      end
+    end
+    private :prepare_resumable_prefix
+
+    # Copies the persisted prefix bookkeeping into the in-memory receipt so a
+    # later attempt still knows which earlier attempt produced the prefix.
+    def inherit_saved_receipt(receipt, saved)
+      receipt.instance_variable_set(:@attempt_count, saved.attempt_count)
+      receipt.instance_variable_set(:@prefix_attempt, saved.prefix_attempt)
+      receipt.instance_variable_set(:@prefix_bytes, saved.prefix_bytes)
+      receipt.instance_variable_set(:@prefix_digest, saved.prefix_digest)
+      receipt.instance_variable_set(:@last_response_code,
+                                    saved.last_response_code)
+      receipt.instance_variable_set(:@last_response, saved.last_response)
+    end
+    private :inherit_saved_receipt
+
+    # Moves an unverifiable staging file out of the way and records why.
+    def retain_candidate(receipt, reason)
+      File.rename(receipt.staging_path, receipt.candidate_path)
+      receipt.mark_candidate!
+      receipt.instance_variable_set(:@candidate_reason, reason)
+      receipt.persist!
+    end
+    private :retain_candidate
+
+    # Attributes the currently saved staging bytes to the latest attempt.
+    def record_saved_prefix(receipt)
+      bytes = File.size?(receipt.staging_path) || 0
+      receipt.record_prefix!(bytes, digest_file(receipt.staging_path))
+    end
+    private :record_saved_prefix
+
+    # Promotes a confirmed staging file to the final destination.
+    def archive_confirmed_file(receipt)
+      File.rename(receipt.staging_path, receipt.localfile)
+      receipt.mark_archived!
+      File.delete(receipt.sidecar_path) if File.file?(receipt.sidecar_path)
+    end
+    private :archive_confirmed_file
+
+    def digest_file(path)
+      File.file?(path) ? Digest::SHA256.file(path).hexdigest : nil
+    end
+    private :digest_file
 
     #
     # Retrieves +remotefile+ in ASCII (text) mode, storing the result in
@@ -847,9 +1038,10 @@ module Net
     # binary).  See #gettextfile and #getbinaryfile.
     #
     def get(remotefile, localfile = File.basename(remotefile),
-            blocksize = DEFAULT_BLOCKSIZE, &block) # :yield: data
+            blocksize = DEFAULT_BLOCKSIZE, receipt: nil, &block) # :yield: data
       if @binary
-        getbinaryfile(remotefile, localfile, blocksize, &block)
+        getbinaryfile(remotefile, localfile, blocksize,
+                      receipt: receipt, &block)
       else
         gettextfile(remotefile, localfile, &block)
       end
@@ -1076,6 +1268,282 @@ module Net
       #
       def writable?
         return facts["perm"].include?(?w)
+      end
+    end
+
+    #
+    # VersionFacts captures the facts a server exposes that may distinguish
+    # one revision of a pathname from another.  The file size alone is never
+    # enough: servers commonly replace a file with a same-size new revision.
+    #
+    # +mtime+ (from MDTM) and +unique+ (from the MLST "unique" fact) are the
+    # usable discriminators.  When a server provides neither, two files with
+    # the same name and size cannot be told apart.
+    #
+    class VersionFacts
+      attr_reader :size, :mtime, :unique
+
+      def initialize(size: nil, mtime: nil, unique: nil)
+        @size = size
+        # Normalize to a canonical MDTM-style UTC string.  A live MDTM is
+        # parsed by Net::FTP#mtime into a Time, but a receipt reloaded from
+        # JSON carries a String; using the same YYYYMMDDHHMMSS form keeps a
+        # freshly collected fact equal to a persisted one.
+        @mtime =
+          case mtime
+          when nil then nil
+          when Time then mtime.utc.strftime("%Y%m%d%H%M%S")
+          else mtime.to_s
+          end
+        @unique = unique
+      end
+
+      # Returns true when at least one fact beyond the size is available to
+      # distinguish revisions.
+      def distinguishable?
+        !(@mtime.nil? && @unique.nil?)
+      end
+
+      # Compares two sets of facts.
+      #
+      # Only discriminators present on *both* sides can be checked.
+      #
+      # Returns:
+      # +:verified+::      at least one shared discriminator exists and every
+      #                    shared one matches.
+      # +:mismatch+::      a shared discriminator differs.
+      # +:indeterminate+:: the two sides share no discriminator, so the
+      #                    versions cannot be proven equal (e.g. neither side
+      #                    can distinguish revisions, or they expose different
+      #                    fact types).
+      def compare(other)
+        comparisons = []
+        unless @mtime.nil? || other.mtime.nil?
+          comparisons << (@mtime == other.mtime)
+        end
+        unless @unique.nil? || other.unique.nil?
+          comparisons << (@unique == other.unique)
+        end
+        return :indeterminate if comparisons.empty?
+        comparisons.all? ? :verified : :mismatch
+      end
+
+      def to_h
+        {
+          "size" => @size,
+          "mtime" => @mtime,
+          "unique" => @unique,
+        }
+      end
+
+      def self.from_h(hash)
+        new(
+          size: hash["size"],
+          mtime: hash["mtime"],
+          unique: hash["unique"],
+        )
+      end
+    end
+
+    #
+    # TransferReceipt is an optional record of a resumable binary download.
+    #
+    # It answers three questions about a transfer:
+    # 1. which reception attempt produced the locally saved prefix
+    #    (#prefix_attempt, #prefix_digest);
+    # 2. which byte ranges have been received since then
+    #    (#rest_offset, #received_bytes, #received_range);
+    # 3. at which step the transfer became safe to archive (#state):
+    #    the data finishing is distinct from the control connection
+    #    confirming the end of the transfer.
+    #
+    # The lifecycle states are:
+    # +:candidate+::      a saved prefix exists but has not been verified to
+    #                     belong to the current remote version.
+    # +:resuming+::       the prefix was verified and a reception is appending
+    #                     to it.
+    # +:receiving+::      a fresh reception is writing the file.
+    # +:interrupted+::    the data connection ended before all bytes arrived.
+    # +:data_complete+::  every expected byte was received, but the control
+    #                     connection has not yet confirmed the end.
+    # +:confirmed+::      the control connection reported a successful end
+    #                     (2xx), so the bytes are sound.
+    # +:archived+::       the confirmed file was moved into its final place.
+    #
+    class TransferReceipt
+      STAGE_PATH_SUFFIX = ".part"
+      SIDECAR_SUFFIX = ".ftp-receipt"
+      CANDIDATE_SUFFIX = ".candidate"
+
+      attr_accessor :localfile, :remotefile
+      attr_reader :state, :attempt_count, :prefix_attempt, :prefix_bytes,
+                  :prefix_digest, :rest_offset, :received_bytes,
+                  :expected_size, :version_status, :version_facts,
+                  :staging_path, :sidecar_path, :candidate_path,
+                  :candidate_reason, :last_response_code, :last_response
+
+      def initialize(localfile:, remotefile:, expected_size: nil)
+        @localfile = localfile
+        @remotefile = remotefile
+        @expected_size = expected_size
+        @staging_path = localfile.to_s + STAGE_PATH_SUFFIX
+        @sidecar_path = localfile.to_s + SIDECAR_SUFFIX
+        @candidate_path = localfile.to_s + CANDIDATE_SUFFIX
+        @candidate_reason = nil
+        @state = :candidate
+        @attempt_count = 0
+        @prefix_attempt = nil
+        @prefix_bytes = 0
+        @prefix_digest = nil
+        @rest_offset = 0
+        @received_bytes = 0
+        @version_status = nil
+        @version_facts = nil
+        @last_response_code = nil
+        @last_response = nil
+      end
+
+      # Loads a receipt previously persisted next to a staged file.
+      def self.load(path)
+        hash = JSON.parse(File.binread(path))
+        receipt = new(
+          localfile: hash["localfile"],
+          remotefile: hash["remotefile"],
+          expected_size: hash["expected_size"],
+        )
+        receipt.instance_variable_set(:@state, hash["state"].to_sym)
+        receipt.instance_variable_set(:@attempt_count, hash["attempt_count"])
+        receipt.instance_variable_set(:@prefix_attempt, hash["prefix_attempt"])
+        receipt.instance_variable_set(:@prefix_bytes, hash["prefix_bytes"])
+        receipt.instance_variable_set(:@prefix_digest, hash["prefix_digest"])
+        receipt.instance_variable_set(:@rest_offset, hash["rest_offset"])
+        receipt.instance_variable_set(:@received_bytes, hash["received_bytes"])
+        receipt.instance_variable_set(:@version_status,
+                                      hash["version_status"]&.to_sym)
+        receipt.instance_variable_set(:@version_facts,
+                                      VersionFacts.from_h(hash["version_facts"]))
+        receipt.instance_variable_set(:@last_response_code,
+                                      hash["last_response_code"])
+        receipt.instance_variable_set(:@last_response, hash["last_response"])
+        receipt.instance_variable_set(:@candidate_reason,
+                                      hash["candidate_reason"])
+        return receipt
+      end
+
+      # Persists the receipt so a later process can resume from the prefix.
+      def persist!(path = @sidecar_path)
+        File.binwrite(path, JSON.generate(to_h))
+        return self
+      end
+
+      def to_h
+        {
+          "localfile" => @localfile,
+          "remotefile" => @remotefile,
+          "expected_size" => @expected_size,
+          "state" => @state.to_s,
+          "attempt_count" => @attempt_count,
+          "prefix_attempt" => @prefix_attempt,
+          "prefix_bytes" => @prefix_bytes,
+          "prefix_digest" => @prefix_digest,
+          "rest_offset" => @rest_offset,
+          "received_bytes" => @received_bytes,
+          "version_status" => @version_status&.to_s,
+          "version_facts" => (@version_facts || VersionFacts.new).to_h,
+          "last_response_code" => @last_response_code,
+          "last_response" => @last_response,
+          "candidate_reason" => @candidate_reason,
+        }
+      end
+
+      # Records the start of a new reception attempt and returns its number.
+      def mark_attempt!(state:, rest_offset:, version_facts:, version_status:)
+        @attempt_count += 1
+        @state = state
+        @rest_offset = rest_offset
+        @received_bytes = 0
+        @version_facts = version_facts
+        @version_status = version_status
+        @expected_size = version_facts.size if version_facts
+        return @attempt_count
+      end
+
+      # Records that the current attempt's prefix of +bytes+ was saved, with
+      # the digest of those bytes.  The prefix is attributed to this attempt.
+      def record_prefix!(bytes, digest)
+        @prefix_attempt = @attempt_count
+        @prefix_bytes = bytes
+        @prefix_digest = digest
+      end
+
+      # Accumulates bytes handed to the per-chunk callback during the current
+      # reception attempt.
+      def add_received!(bytes)
+        @received_bytes += bytes
+      end
+
+      # The absolute byte range received during the current attempt.
+      def received_range
+        (@rest_offset)...(@rest_offset + @received_bytes)
+      end
+
+      # Called when the data connection reaches EOF.  When every expected
+      # byte is present the data is complete but still awaits the control
+      # confirmation; otherwise the transfer was interrupted.
+      def mark_data_end!
+        @state =
+          if !@expected_size.nil? &&
+               @rest_offset + @received_bytes >= @expected_size
+            :data_complete
+          else
+            :interrupted
+          end
+        return @state
+      end
+
+      # Called when the control connection confirms the transfer end (2xx).
+      def mark_confirmed!(response_code, response)
+        @last_response_code = response_code
+        @last_response = response
+        @state = :confirmed
+      end
+
+      # Called when a confirmed staged file is moved to its final destination.
+      def mark_archived!
+        @state = :archived
+      end
+
+      # A prefix retained without proof that it matches the remote version.
+      def mark_candidate!
+        @state = :candidate
+      end
+
+      # Records the outcome of comparing a saved prefix against the current
+      # remote version, including the freshly collected remote facts.
+      def record_verification!(version_facts, version_status)
+        @version_facts = version_facts
+        @version_status = version_status
+        @expected_size = version_facts.size if version_facts
+      end
+
+      def archivable?
+        @state == :confirmed || @state == :archived
+      end
+
+      def confirmed?
+        @state == :confirmed || @state == :archived
+      end
+
+      def data_complete?
+        @state == :data_complete
+      end
+
+      def interrupted?
+        @state == :interrupted
+      end
+
+      def candidate?
+        @state == :candidate
       end
     end
 
