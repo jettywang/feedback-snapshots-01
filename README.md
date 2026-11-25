@@ -45,6 +45,28 @@ Net::FTP.open('example.com') do |ftp|
 end
 ```
 
+### Bounded retrieval
+
+`retrbinary` and `retrlines` accept an optional `read_budget` (a
+non-negative number of data bytes) when only part of a remote file is
+needed, for example to decide whether a report should be archived:
+
+```ruby
+result = ftp.retrlines("RETR report.csv", read_budget: 64 * 1024) do |line, newline|
+  # each line arrives as usual
+end
+
+result.data_complete?          # whole remote file delivered?
+result.control_connection_usable? # safe to run another command?
+result.final_response_code     # final server reply (e.g. "226")
+
+partial = ftp.getbinaryfile("report.bin", nil, read_budget: 1024)
+partial.data_complete?         # false when stopped early
+partial.data                   # the bytes that were delivered
+```
+
+The same option is available on `getbinaryfile`, `gettextfile` and `get`.
+
 ## Development
 
 After checking out the repo, run `bin/setup` to install dependencies. Then, run `rake test` to run the tests. You can also run `bin/console` for an interactive prompt that will allow you to experiment.

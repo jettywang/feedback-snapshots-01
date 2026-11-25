@@ -93,8 +93,108 @@ module Net
     FTP_PORT = 21
     CRLF = "\r\n"
     DEFAULT_BLOCKSIZE = BufferedIO::BUFSIZE
+    # :startdoc:
+
+    # How long to wait, after the first reply to a data-connection abort, for
+    # a possible follow-up reply (for example 426 followed by 226).  This is
+    # deliberately short so a server that sends a single reply does not delay
+    # the caller for a whole read timeout.
+    ABORT_SETTLE_TIMEOUT = 0.2
+
+    # :stopdoc:
     @@default_passive = true
     # :startdoc:
+
+    #
+    # The result of a retrieval performed with an optional read budget (see
+    # Net::FTP#retrbinary and Net::FTP#retrlines).
+    #
+    # A read budget bounds how many data bytes are delivered to the caller,
+    # counted as they actually arrive on the data connection.  The transfer
+    # stops as soon as the budget has been delivered and no further data has
+    # been received.  Data received beyond the budget is discarded.
+    #
+    # The returned object records:
+    # - +bytes_read+:: bytes delivered to the caller
+    # - +data_complete?+:: whether every byte of the remote file was delivered
+    # - +control_connection_usable?+:: whether the final control reply was
+    #   consumed and the control connection is still synchronized
+    # - +final_response+ / +final_response_code+:: the final control reply
+    #   (for an exhausted budget this may be an abort reply such as 426)
+    #
+    class ReadBudgetResult
+      attr_reader :read_budget, :bytes_read, :final_response,
+                  :final_response_code, :reason
+
+      # The retrieved data, when the caller asked for it by passing a nil
+      # +localfile+ and no block to a file-level retrieval method.
+      attr_accessor :data
+
+      def initialize(read_budget:, bytes_read:, data_complete:,
+                     control_connection_usable:, final_response:,
+                     final_response_code:, reason:, data: nil)
+        @read_budget = read_budget
+        @bytes_read = bytes_read
+        @data_complete = data_complete
+        @control_connection_usable = control_connection_usable
+        @final_response = final_response
+        @final_response_code = final_response_code
+        @reason = reason
+        @data = data
+      end
+
+      # Whether every byte of the remote data was delivered before the
+      # transfer ended.
+      def data_complete?
+        @data_complete
+      end
+      alias complete? data_complete?
+
+      # Whether the transfer stopped because the read budget was reached
+      # while more data was still available.
+      def truncated?
+        !@data_complete
+      end
+      alias budget_exhausted? truncated?
+
+      # Whether the control connection was left synchronized after the
+      # transfer, so that another command can be issued.
+      def control_connection_usable?
+        @control_connection_usable
+      end
+      alias control_connection_ok? control_connection_usable?
+
+      # Alias for #bytes_read.
+      def bytes_received
+        @bytes_read
+      end
+
+      # Alias for #read_budget.
+      def budget
+        @read_budget
+      end
+
+      def last_response
+        @final_response
+      end
+
+      def last_response_code
+        @final_response_code
+      end
+
+      def to_h
+        {
+          read_budget: @read_budget,
+          bytes_read: @bytes_read,
+          data_complete: @data_complete,
+          control_connection_usable: @control_connection_usable,
+          final_response: @final_response,
+          final_response_code: @final_response_code,
+          reason: @reason,
+        }
+      end
+    end
+
 
     # When +true+, transfers are performed in binary mode.  Default: +true+.
     attr_reader :binary
@@ -663,7 +763,20 @@ module Net
     # chunks of +blocksize+ characters. Note that +cmd+ is a server command
     # (such as "RETR myfile").
     #
-    def retrbinary(cmd, blocksize, rest_offset = nil) # :yield: data
+    # If +read_budget+ is given, it must be a non-negative Integer bounding
+    # the number of data bytes delivered to the caller.  The transfer stops
+    # once that many bytes have actually been received; any further data is
+    # discarded.  In this mode a Net::FTP::ReadBudgetResult is returned
+    # instead of +nil+, describing how much was delivered, whether the data
+    # was complete and whether the control connection is still usable.  The
+    # block still receives binary chunks, each no larger than +blocksize+.
+    #
+    def retrbinary(cmd, blocksize, rest_offset = nil, read_budget: nil) # :yield: data
+      unless read_budget.nil?
+        return retrbinary_with_budget(cmd, blocksize, rest_offset, read_budget) do |data|
+          yield(data)
+        end
+      end
       synchronize do
         with_binary(true) do
           begin
@@ -688,7 +801,19 @@ module Net
     # no block is given, prints the lines. Note that +cmd+ is a server command
     # (such as "RETR myfile").
     #
-    def retrlines(cmd) # :yield: line
+    # If +read_budget+ is given, it must be a non-negative Integer bounding
+    # the number of data bytes delivered to the caller.  Lines are still
+    # delivered whole (in the same text mode shape as without a budget); a
+    # line that would not fit within the remaining budget is not delivered
+    # and the transfer stops.  In this mode a Net::FTP::ReadBudgetResult is
+    # returned instead of +nil+.
+    #
+    def retrlines(cmd, read_budget: nil) # :yield: line
+      unless read_budget.nil?
+        return retrlines_with_budget(cmd, read_budget) do |line, newline|
+          yield(line, newline)
+        end
+      end
       synchronize do
         with_binary(false) do
           begin
@@ -706,6 +831,201 @@ module Net
         end
       end
     end
+
+    # Binary retrieval bounded by +budget+.  Data is read in blocks no larger
+    # than both +blocksize+ and the remaining budget, so no more than
+    # +budget+ bytes are handed to the caller.  Once the budget is spent one
+    # more byte is read: if the data connection has ended the transfer was
+    # naturally complete, otherwise more data existed and the data
+    # connection is closed early and the control reply is settled.
+    def retrbinary_with_budget(cmd, blocksize, rest_offset, budget) # :yield: data
+      validate_read_budget!(budget)
+      synchronize do
+        with_binary(true) do
+          conn = nil
+          bytes_read = 0
+          truncated = false
+          begin
+            conn = transfercmd(cmd, rest_offset)
+            while bytes_read < budget
+              chunk = conn.read([blocksize, budget - bytes_read].min)
+              break if chunk.nil?
+              bytes_read += chunk.bytesize
+              yield(chunk)
+            end
+            if bytes_read >= budget
+              # Budget spent.  Reading one more byte tells "exactly done"
+              # (end of data) from "more was available" (byte discarded).
+              truncated = true if conn.read(1)
+            end
+          ensure
+            conn.close if conn
+          end
+          complete_transfer(truncated, budget: budget, bytes_read: bytes_read,
+                            truncated: truncated)
+        end
+      end
+    end
+    private :retrbinary_with_budget
+
+    # Text (line) retrieval bounded by +budget+.  Each line is read with
+    # Net::BufferedIO#readuntil's byte limit (when available) so that a line
+    # wider than the remaining budget is rejected rather than read
+    # unbounded; it is then not delivered and the transfer stops.  Reading
+    # one more byte after the last delivered line distinguishes "exactly
+    # done" from "more lines were available".
+    def retrlines_with_budget(cmd, budget) # :yield: line, newline
+      validate_read_budget!(budget)
+      synchronize do
+        with_binary(false) do
+          conn = nil
+          bytes_read = 0
+          truncated = false
+          begin
+            conn = transfercmd(cmd)
+            loop do
+              if bytes_read >= budget
+                truncated = true if conn.read(1)
+                break
+              end
+              remaining = budget - bytes_read
+              line = read_line_up_to(conn, remaining)
+              case line
+              when :eof
+                break
+              when :limit
+                truncated = true
+                break
+              else
+                bytes_read += line.bytesize
+                yield(line.sub(/\r?\n\z/, ""), line.end_with?("\n"))
+              end
+            end
+          ensure
+            conn.close if conn
+          end
+          complete_transfer(truncated, budget: budget, bytes_read: bytes_read,
+                            truncated: truncated)
+        end
+      end
+    end
+    private :retrlines_with_budget
+
+    # Ensures +budget+ is a non-negative Integer.
+    def validate_read_budget!(budget)
+      unless Integer === budget && budget >= 0
+        raise ArgumentError,
+              "read_budget must be a non-negative Integer, got #{budget.inspect}"
+      end
+    end
+    private :validate_read_budget!
+
+    # Reads one line (including its terminator) that fits within +limit+
+    # bytes.  Returns +:eof+ when the data connection ends, +:limit+ when the
+    # line would exceed the limit, or the line itself otherwise.
+    def read_line_up_to(conn, limit)
+      return :limit if limit <= 0
+      if conn.respond_to?(:readline_with_limit)
+        conn.readline_with_limit(limit)
+      else
+        line = conn.gets
+        return :eof if line.nil?
+        line.bytesize > limit ? :limit : line
+      end
+    end
+    private :read_line_up_to
+
+    # After the data connection has been closed, reads the final control
+    # reply.  When the transfer was stopped early (+aborted+), an ABOR is
+    # sent first so the server can report the abort; both a possible 426 and
+    # the following 226 reply are consumed so the control connection ends
+    # synchronized.  Returns a Net::FTP::ReadBudgetResult.
+    def complete_transfer(aborted, budget:, bytes_read:, truncated:)
+      if aborted
+        final_response = settle_aborted_transfer
+      else
+        final_response = getresp
+        if !final_response.start_with?("2")
+          raise FTPReplyError, final_response
+        end
+      end
+      result = ReadBudgetResult.new(
+        read_budget: budget,
+        bytes_read: bytes_read,
+        data_complete: !truncated,
+        control_connection_usable: control_synchronized?(final_response),
+        final_response: final_response,
+        final_response_code: final_response && final_response[0, 3],
+        reason: truncated ? :budget_exhausted : :complete,
+      )
+      return result
+    end
+    private :complete_transfer
+
+    # Sends ABOR and consumes the replies it produces.  The 426 (abort
+    # acknowledged) and any following 2xx are read; if the server answers
+    # directly with 226/225 that single reply is used.  Returns the most
+    # significant reply string, or nil if the control connection is gone.
+    def settle_aborted_transfer
+      begin
+        send_abort
+      rescue IOError, SystemCallError
+        return nil
+      end
+      # Wait for the abort acknowledgement under the configured read
+      # timeout: a server that takes a while to answer is still usable.
+      first = read_reply_quietly
+      return nil if first.nil?
+      if first.start_with?("426")
+        second = read_reply_quietly(ABORT_SETTLE_TIMEOUT)
+        return second || first
+      end
+      return first
+    end
+    private :settle_aborted_transfer
+
+    # Sends ABOR out-of-band, falling back to ordinary in-band writing for
+    # connections that do not support OOB.
+    def send_abort
+      debug_print "put: ABOR"
+      begin
+        @sock.send("ABOR" + CRLF, Socket::MSG_OOB)
+      rescue Errno::EOPNOTSUPP, NotImplementedError, Errno::EINVAL
+        @sock.write("ABOR" + CRLF)
+      end
+    end
+    private :send_abort
+
+    # Reads one control reply, optionally under a short timeout, returning
+    # nil instead of raising when the connection has ended or timed out.
+    # Unlike #getresp this keeps a 4xx/5xx abort reply as a value, so the
+    # caller can report it without treating the abort as a protocol failure.
+    def read_reply_quietly(timeout = nil)
+      previous_timeout = @sock.read_timeout rescue nil
+      begin
+        @sock.read_timeout = timeout if timeout
+        resp = getmultiline
+        @last_response = resp
+        @last_response_code = resp[0, 3]
+        resp
+      rescue EOFError, IOError, SystemCallError, Net::ReadTimeout,
+             FTPError, ProtocolError
+        nil
+      ensure
+        @sock.read_timeout = previous_timeout if timeout && previous_timeout
+      end
+    end
+    private :read_reply_quietly
+
+    # Whether the control connection is still synchronized after +response+.
+    # A nil response means it was lost; otherwise the reader is at a reply
+    # boundary and another command may be issued.
+    def control_synchronized?(response)
+      return false if response.nil?
+      return false if @sock.nil? || @sock.closed?
+      true
+    end
+    private :control_synchronized?
 
     #
     # Puts the connection into binary (image) mode, issues the given server-side
@@ -785,10 +1105,19 @@ module Net
     # If a block is supplied, it is passed the retrieved data in +blocksize+
     # chunks.
     #
+    # If +read_budget+ is given, the transfer is bounded as described for
+    # #retrbinary and a Net::FTP::ReadBudgetResult is returned; the retrieved
+    # data (if requested by passing a nil +localfile+) is available through
+    # the result's +data+ attribute.  Only the bytes actually delivered are
+    # written to +localfile+, so a truncated result leaves a partial file and
+    # result.data_complete? tells whether it is the whole remote file.
+    #
     def getbinaryfile(remotefile, localfile = File.basename(remotefile),
-                      blocksize = DEFAULT_BLOCKSIZE, &block) # :yield: data
+                      blocksize = DEFAULT_BLOCKSIZE, read_budget: nil,
+                      &block) # :yield: data
       f = nil
       result = nil
+      budget_result = nil
       if localfile
         if @resume
           rest_offset = File.size?(localfile)
@@ -802,10 +1131,15 @@ module Net
       end
       begin
         f&.binmode
-        retrbinary("RETR #{remotefile}", blocksize, rest_offset) do |data|
+        budget_result = retrbinary("RETR #{remotefile}", blocksize, rest_offset,
+                                   read_budget: read_budget) do |data|
           f&.write(data)
           block&.(data)
           result&.concat(data)
+        end
+        if budget_result
+          budget_result.data = result
+          return budget_result
         end
         return result
       ensure
@@ -820,21 +1154,32 @@ module Net
     # If a block is supplied, it is passed the retrieved data one
     # line at a time.
     #
+    # If +read_budget+ is given, the transfer is bounded as described for
+    # #retrlines and a Net::FTP::ReadBudgetResult is returned; the delivered
+    # text (if requested by passing a nil +localfile+) is available through
+    # the result's +data+ attribute.
+    #
     def gettextfile(remotefile, localfile = File.basename(remotefile),
-                    &block) # :yield: line
+                    read_budget: nil, &block) # :yield: line
       f = nil
       result = nil
+      budget_result = nil
       if localfile
         f = File.open(localfile, "w")
       elsif !block_given?
         result = String.new
       end
       begin
-        retrlines("RETR #{remotefile}") do |line, newline|
+        budget_result = retrlines("RETR #{remotefile}",
+                                  read_budget: read_budget) do |line, newline|
           l = newline ? line + "\n" : line
           f&.print(l)
           block&.(line, newline)
           result&.concat(l)
+        end
+        if budget_result
+          budget_result.data = result
+          return budget_result
         end
         return result
       ensure
@@ -847,11 +1192,12 @@ module Net
     # binary).  See #gettextfile and #getbinaryfile.
     #
     def get(remotefile, localfile = File.basename(remotefile),
-            blocksize = DEFAULT_BLOCKSIZE, &block) # :yield: data
+            blocksize = DEFAULT_BLOCKSIZE, read_budget: nil, &block) # :yield: data
       if @binary
-        getbinaryfile(remotefile, localfile, blocksize, &block)
+        getbinaryfile(remotefile, localfile, blocksize,
+                      read_budget: read_budget, &block)
       else
-        gettextfile(remotefile, localfile, &block)
+        gettextfile(remotefile, localfile, read_budget: read_budget, &block)
       end
     end
 
@@ -1530,6 +1876,43 @@ module Net
       def gets
         line = readuntil("\n", true)
         return line.empty? ? nil : line
+      end
+
+      # Reads one line only if it fits within +limit+ bytes (terminator
+      # included).  Returns +:eof+ at end of data and +:limit+ when the line
+      # would exceed the limit, in which case nothing is consumed.
+      def readline_with_limit(limit)
+        if self.class.readuntil_supports_limit?
+          line = readuntil("\n", true, limit: limit)
+          return :eof if line.empty?
+          line
+        else
+          # Older net-protocol has no byte limit on readuntil; read a line
+          # and reject it if it does not fit.  The line has then been
+          # consumed, which the caller treats as the end of the transfer.
+          line = gets
+          return :eof if line.nil?
+          line.bytesize > limit ? :limit : line
+        end
+      rescue Net::ProtocolError => error
+        if defined?(Net::ReadLimitExceeded) &&
+            error.is_a?(Net::ReadLimitExceeded)
+          :limit
+        else
+          raise
+        end
+      end
+
+      def self.readuntil_supports_limit? # :nodoc:
+        return @readuntil_supports_limit unless @readuntil_supports_limit.nil?
+        @readuntil_supports_limit =
+          begin
+            BufferedIO.instance_method(:readuntil).parameters.any? { |type, name|
+              type == :key && name == :limit
+            }
+          rescue NameError
+            false
+          end
       end
 
       def readline
