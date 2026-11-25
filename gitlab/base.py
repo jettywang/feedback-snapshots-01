@@ -15,6 +15,9 @@ from gitlab.exceptions import GitlabParsingError
 
 from .client import Gitlab, GitlabList
 
+if TYPE_CHECKING:
+    from gitlab.snapshots import ApprovalExport, ApprovalSnapshot
+
 __all__ = ["RESTObject", "RESTObjectList", "RESTManager"]
 
 
@@ -45,6 +48,7 @@ class RESTObject:
     _module: ModuleType
     _parent_attrs: dict[str, Any]
     _repr_attr: str | None = None
+    _state_revision: int
     _updated_attrs: dict[str, Any]
     _lazy: bool
     manager: RESTManager[Any]
@@ -71,6 +75,7 @@ class RESTObject:
                 "_module": importlib.import_module(self.__module__),
                 "_created_from_list": created_from_list,
                 "_lazy": lazy,
+                "_state_revision": 0,
             }
         )
         self.__dict__["_parent_attrs"] = self.manager.parent_attrs
@@ -134,6 +139,24 @@ class RESTObject:
 
     def __setattr__(self, name: str, value: Any) -> None:
         self.__dict__["_updated_attrs"][name] = value
+        self.__dict__["_state_revision"] = (
+            int(self.__dict__.get("_state_revision", 0)) + 1
+        )
+
+    def discard_updates(self) -> None:
+        """Discard local, uncommitted attribute changes."""
+        self.__dict__["_updated_attrs"] = {}
+        self.__dict__["_state_revision"] = (
+            int(self.__dict__.get("_state_revision", 0)) + 1
+        )
+
+    def rollback_updates(self) -> None:
+        """Alias for :meth:`discard_updates`."""
+        self.discard_updates()
+
+    def revert_updates(self) -> None:
+        """Alias for :meth:`discard_updates`."""
+        self.discard_updates()
 
     def asdict(self, *, with_parent_attrs: bool = False) -> dict[str, Any]:
         data = {}
@@ -222,6 +245,43 @@ class RESTObject:
     def _update_attrs(self, new_attrs: dict[str, Any]) -> None:
         self.__dict__["_updated_attrs"] = {}
         self.__dict__["_attrs"] = new_attrs
+        self.__dict__["_state_revision"] = (
+            int(self.__dict__.get("_state_revision", 0)) + 1
+        )
+
+    def approval_snapshot(
+        self, fields: Any | None = None, **kwargs: Any
+    ) -> ApprovalSnapshot:
+        """Create an allow-listed, immutable approval snapshot."""
+        from gitlab.snapshots import capture_approval_snapshot
+
+        return capture_approval_snapshot(self, fields, **kwargs)
+
+    def export_approval(
+        self, fields: Any | None = None, **kwargs: Any
+    ) -> ApprovalExport:
+        """Create an approval snapshot and return its export document."""
+        from gitlab.snapshots import export_approval
+
+        return export_approval(self, fields, **kwargs)
+
+    def safe_export(self, fields: Any | None = None, **kwargs: Any) -> ApprovalExport:
+        """Alias for :meth:`export_approval`."""
+        return self.export_approval(fields, **kwargs)
+
+    def approval_response(
+        self, fields: Any | None = None, **kwargs: Any
+    ) -> ApprovalExport:
+        """Alias for :meth:`export_approval`."""
+        return self.export_approval(fields, **kwargs)
+
+    def to_safe_dict(self, fields: Any | None = None, **kwargs: Any) -> dict[str, Any]:
+        """Return an allow-listed approval export as a dictionary."""
+        return dict(self.export_approval(fields, **kwargs))
+
+    def to_safe_json(self, fields: Any | None = None, **kwargs: Any) -> str:
+        """Return an allow-listed approval export as JSON."""
+        return self.export_approval(fields, **kwargs).to_json()
 
     def get_id(self) -> int | str | None:
         """Returns the id of the resource."""

@@ -7,6 +7,7 @@
    cli-usage
    api-usage
    api-usage-advanced
+   approval-snapshots
    api-usage-graphql
    cli-examples
    api-objects

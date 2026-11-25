@@ -28,6 +28,14 @@ from gitlab._version import (  # noqa: F401
 )
 from gitlab.client import AsyncGraphQL, Gitlab, GitlabList, GraphQL  # noqa: F401
 from gitlab.exceptions import *  # noqa: F401,F403
+from gitlab.snapshots import (  # noqa: F401
+    ApprovalExport,
+    ApprovalPolicy,
+    ApprovalSnapshot,
+    capture_approval_snapshot,
+    export_approval,
+    safe_export,
+)
 
 warnings.filterwarnings("default", category=DeprecationWarning, module="^gitlab")
 
@@ -43,5 +51,11 @@ __all__ = [
     "GitlabList",
     "AsyncGraphQL",
     "GraphQL",
+    "ApprovalExport",
+    "ApprovalPolicy",
+    "ApprovalSnapshot",
+    "capture_approval_snapshot",
+    "export_approval",
+    "safe_export",
 ]
 __all__.extend(gitlab.exceptions.__all__)
