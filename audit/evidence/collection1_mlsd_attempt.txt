@@ -1,0 +1,2 @@
+MLSD attempted after CWD to /archive
+reply: 502 Command not implemented.

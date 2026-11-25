@@ -1,0 +1,10 @@
+[
+  {
+    "command": "RETR /report.csv",
+    "resolved_path": "/report.csv",
+    "cwd_at_time": "/",
+    "bytes": 4096,
+    "sha256": "8e197a987f076f273bae4da0631a3a97a960e646d39159fce412e1732921f1b5",
+    "reply": "226 Transfer complete."
+  }
+]

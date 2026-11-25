@@ -1,0 +1,10 @@
+{
+  "pathname": "/report.csv",
+  "facts": {
+    "type": "file",
+    "size": 4096,
+    "modify": "2026-11-26T09:41:07Z",
+    "unique": "9F3A01",
+    "perm": "r"
+  }
+}

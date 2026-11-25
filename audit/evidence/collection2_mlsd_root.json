@@ -1,0 +1,21 @@
+[
+  {
+    "pathname": "report.csv",
+    "facts": {
+      "type": "file",
+      "size": 4096,
+      "modify": "2026-11-26T09:41:07Z",
+      "unique": "9F3A01",
+      "perm": "r"
+    }
+  },
+  {
+    "pathname": "archive",
+    "facts": {
+      "type": "dir",
+      "modify": "2025-03-03T00:00:00Z",
+      "unique": "9F3A00",
+      "perm": "flcdmpe"
+    }
+  }
+]
