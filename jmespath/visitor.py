@@ -1,6 +1,7 @@
 import operator
 
 from jmespath import functions
+from jmespath import policy as policy_module
 from jmespath.compat import string_type
 from numbers import Number
 
@@ -77,7 +78,16 @@ class _Expression(object):
         self.interpreter = interpreter
 
     def visit(self, node, *args, **kwargs):
-        return self.interpreter.visit(node, *args, **kwargs)
+        # An expression reference is only evaluated later, from inside a
+        # higher order function.  Mark the nested evaluation so function
+        # calls underneath it are authorized against the live policy rather
+        # than the search entry snapshot.
+        interpreter = self.interpreter
+        interpreter._expref_depth += 1
+        try:
+            return interpreter.visit(node, *args, **kwargs)
+        finally:
+            interpreter._expref_depth -= 1
 
 
 class Visitor(object):
@@ -109,7 +119,7 @@ class TreeInterpreter(Visitor):
     _EQUALITY_OPS = ['eq', 'ne']
     MAP_TYPE = dict
 
-    def __init__(self, options=None):
+    def __init__(self, options=None, policy=None, audit=None, query_id=None):
         super(TreeInterpreter, self).__init__()
         self._dict_cls = self.MAP_TYPE
         if options is None:
@@ -118,9 +128,86 @@ class TreeInterpreter(Visitor):
         if options.dict_cls is not None:
             self._dict_cls = self._options.dict_cls
         if options.custom_functions is not None:
-            self._functions = self._options.custom_functions
+            # Copy so the per-interpreter policy gate never mutates the
+            # shared Functions instance handed in through Options.
+            self._functions = type(options.custom_functions).__new__(
+                type(options.custom_functions))
+            self._functions.__dict__.update(
+                options.custom_functions.__dict__)
         else:
             self._functions = functions.Functions()
+        self._built_in_functions = frozenset(
+            functions.Functions.FUNCTION_TABLE)
+        self._policy = policy
+        self._audit = audit
+        self._query_id = query_id
+        self._expref_depth = 0
+        self._entry_snapshot = None
+        self._install_gate()
+
+    def run(self, node, value):
+        """Evaluate ``node`` with policy handoff bookkeeping."""
+        if self._policy is not None:
+            self._entry_snapshot = self._policy.snapshot()
+            self._emit(
+                'search_start',
+                policy_revision=self._entry_snapshot.revision)
+            try:
+                result = self.visit(node, value)
+            except policy_module.ExtensionRevokedError as error:
+                self._emit(
+                    'search_cancelled',
+                    function=error.function_name,
+                    checkpoint=error.checkpoint,
+                    policy_revision=error.revision)
+                raise
+            else:
+                self._emit(
+                    'search_completed',
+                    policy_revision=self._policy.revision)
+                return result
+        return self.visit(node, value)
+
+    def _install_gate(self):
+        if self._policy is None:
+            return
+        registry = self._functions
+        original_call = registry.call_function
+        gate = self._authorize
+
+        def gated_call(function_name, resolved_args):
+            gate(function_name)
+            return original_call(function_name, resolved_args)
+
+        registry.call_function = gated_call
+
+    def _authorize(self, function_name):
+        if function_name in self._built_in_functions or self._policy is None:
+            return
+        deferred = self._expref_depth > 0
+        if deferred:
+            snapshot = self._policy.snapshot()
+            checkpoint = 'deferred_expression'
+        else:
+            snapshot = self._entry_snapshot
+            checkpoint = 'function_entry'
+        allowed = snapshot.is_allowed(function_name)
+        self._emit(
+            'function_check',
+            function=function_name,
+            checkpoint=checkpoint,
+            allowed=allowed,
+            policy_revision=snapshot.revision,
+            deferred=deferred)
+        if not allowed:
+            raise policy_module.ExtensionRevokedError(
+                function_name, checkpoint, snapshot.revision)
+
+    def _emit(self, event, **payload):
+        if self._audit is None:
+            return
+        payload['query_id'] = self._query_id
+        self._audit.record(event=event, **payload)
 
     def default_visit(self, node, *args, **kwargs):
         raise NotImplementedError(node['type'])

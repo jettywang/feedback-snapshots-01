@@ -511,10 +511,13 @@ class ParsedResult(object):
         self.expression = expression
         self.parsed = parsed
 
-    def search(self, value, options=None):
-        interpreter = visitor.TreeInterpreter(options)
-        result = interpreter.visit(self.parsed, value)
-        return result
+    def search(self, value, options=None, policy=None, audit=None,
+               query_id=None):
+        interpreter = visitor.TreeInterpreter(
+            options, policy=policy, audit=audit, query_id=query_id)
+        if policy is None:
+            return interpreter.visit(self.parsed, value)
+        return interpreter.run(self.parsed, value)
 
     def _render_dot_file(self):
         """Render the parsed AST as a dot file.
