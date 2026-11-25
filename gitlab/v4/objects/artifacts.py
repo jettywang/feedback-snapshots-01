@@ -11,7 +11,7 @@ import requests
 
 from gitlab import cli
 from gitlab import exceptions as exc
-from gitlab import utils
+from gitlab import transfer, utils
 from gitlab.base import RESTManager, RESTObject
 
 __all__ = ["ProjectArtifact", "ProjectArtifactManager"]
@@ -27,6 +27,21 @@ class ProjectArtifactManager(RESTManager[ProjectArtifact]):
     _obj_cls = ProjectArtifact
     _path = "/projects/{project_id}/jobs/artifacts"
     _from_parent_attrs = {"project_id": "id"}
+
+    def _fill_receipt(
+        self,
+        receipt: transfer.DownloadReceipt,
+        *,
+        ref_name: str,
+        job: str,
+        artifact_path: str | None,
+    ) -> None:
+        """Populate the project/job context of a download receipt."""
+        receipt.project_id = (self.parent_attrs or {}).get("project_id")
+        receipt.job_name = job
+        receipt.ref_name = ref_name
+        if artifact_path is not None:
+            receipt.artifact_path = artifact_path
 
     @exc.on_http_error(exc.GitlabDeleteError)
     def delete(self, **kwargs: Any) -> None:
@@ -55,6 +70,7 @@ class ProjectArtifactManager(RESTManager[ProjectArtifact]):
         chunk_size: int = 1024,
         *,
         iterator: Literal[False] = False,
+        receipt: transfer.DownloadReceipt | None = None,
         **kwargs: Any,
     ) -> bytes: ...
 
@@ -68,6 +84,7 @@ class ProjectArtifactManager(RESTManager[ProjectArtifact]):
         chunk_size: int = 1024,
         *,
         iterator: Literal[True] = True,
+        receipt: None = None,
         **kwargs: Any,
     ) -> Iterator[Any]: ...
 
@@ -81,8 +98,23 @@ class ProjectArtifactManager(RESTManager[ProjectArtifact]):
         chunk_size: int = 1024,
         *,
         iterator: Literal[False] = False,
+        receipt: transfer.DownloadReceipt | None = None,
         **kwargs: Any,
     ) -> None: ...
+
+    @overload
+    def download(
+        self,
+        ref_name: str,
+        job: str,
+        streamed: bool = False,
+        action: None = None,
+        chunk_size: int = 1024,
+        *,
+        iterator: Literal[True] = True,
+        receipt: transfer.DownloadReceipt,
+        **kwargs: Any,
+    ) -> transfer.AuditedStream: ...
 
     @cli.register_custom_action(
         cls_names="ProjectArtifactManager",
@@ -99,6 +131,7 @@ class ProjectArtifactManager(RESTManager[ProjectArtifact]):
         chunk_size: int = 1024,
         *,
         iterator: bool = False,
+        receipt: transfer.DownloadReceipt | None = None,
         **kwargs: Any,
     ) -> bytes | Iterator[Any] | None:
         """Get the job artifacts archive from a specific tag or branch.
@@ -116,6 +149,10 @@ class ProjectArtifactManager(RESTManager[ProjectArtifact]):
             action: Callable responsible of dealing with chunk of
                 data
             chunk_size: Size of each chunk
+            receipt: Optional :class:`~gitlab.transfer.DownloadReceipt`
+                updated while chunks are received, providing an auditable
+                record (project, job, received bytes, digest and completion
+                state) of the download
             **kwargs: Extra options to send to the server (e.g. sudo)
 
         Raises:
@@ -123,7 +160,9 @@ class ProjectArtifactManager(RESTManager[ProjectArtifact]):
             GitlabGetError: If the artifacts could not be retrieved
 
         Returns:
-            The artifacts if `streamed` is False, None otherwise.
+            The artifacts if `streamed` is False, None otherwise. When
+            `iterator` and `receipt` are both provided, an
+            :class:`~gitlab.transfer.AuditedStream` is returned.
         """
         path = f"{self.path}/{ref_name}/download"
         result = self.gitlab.http_get(
@@ -131,8 +170,12 @@ class ProjectArtifactManager(RESTManager[ProjectArtifact]):
         )
         if TYPE_CHECKING:
             assert isinstance(result, requests.Response)
+        if receipt is not None:
+            self._fill_receipt(
+                receipt, ref_name=ref_name, job=job, artifact_path=None
+            )
         return utils.response_content(
-            result, streamed, action, chunk_size, iterator=iterator
+            result, streamed, action, chunk_size, iterator=iterator, receipt=receipt
         )
 
     @overload
@@ -146,6 +189,7 @@ class ProjectArtifactManager(RESTManager[ProjectArtifact]):
         chunk_size: int = 1024,
         *,
         iterator: Literal[False] = False,
+        receipt: transfer.DownloadReceipt | None = None,
         **kwargs: Any,
     ) -> bytes: ...
 
@@ -160,6 +204,7 @@ class ProjectArtifactManager(RESTManager[ProjectArtifact]):
         chunk_size: int = 1024,
         *,
         iterator: Literal[True] = True,
+        receipt: None = None,
         **kwargs: Any,
     ) -> Iterator[Any]: ...
 
@@ -174,8 +219,24 @@ class ProjectArtifactManager(RESTManager[ProjectArtifact]):
         chunk_size: int = 1024,
         *,
         iterator: Literal[False] = False,
+        receipt: transfer.DownloadReceipt | None = None,
         **kwargs: Any,
     ) -> None: ...
+
+    @overload
+    def raw(
+        self,
+        ref_name: str,
+        artifact_path: str,
+        job: str,
+        streamed: bool = False,
+        action: None = None,
+        chunk_size: int = 1024,
+        *,
+        iterator: Literal[True] = True,
+        receipt: transfer.DownloadReceipt,
+        **kwargs: Any,
+    ) -> transfer.AuditedStream: ...
 
     @cli.register_custom_action(
         cls_names="ProjectArtifactManager",
@@ -192,6 +253,7 @@ class ProjectArtifactManager(RESTManager[ProjectArtifact]):
         chunk_size: int = 1024,
         *,
         iterator: bool = False,
+        receipt: transfer.DownloadReceipt | None = None,
         **kwargs: Any,
     ) -> bytes | Iterator[Any] | None:
         """Download a single artifact file from a specific tag or branch from
@@ -210,6 +272,10 @@ class ProjectArtifactManager(RESTManager[ProjectArtifact]):
             action: Callable responsible of dealing with chunk of
                 data
             chunk_size: Size of each chunk
+            receipt: Optional :class:`~gitlab.transfer.DownloadReceipt`
+                updated while chunks are received, providing an auditable
+                record (project, job, received bytes, digest and completion
+                state) of the download
             **kwargs: Extra options to send to the server (e.g. sudo)
 
         Raises:
@@ -217,7 +283,9 @@ class ProjectArtifactManager(RESTManager[ProjectArtifact]):
             GitlabGetError: If the artifacts could not be retrieved
 
         Returns:
-            The artifact if `streamed` is False, None otherwise.
+            The artifact if `streamed` is False, None otherwise. When
+            `iterator` and `receipt` are both provided, an
+            :class:`~gitlab.transfer.AuditedStream` is returned.
         """
         path = f"{self.path}/{ref_name}/raw/{artifact_path}"
         result = self.gitlab.http_get(
@@ -225,6 +293,13 @@ class ProjectArtifactManager(RESTManager[ProjectArtifact]):
         )
         if TYPE_CHECKING:
             assert isinstance(result, requests.Response)
+        if receipt is not None:
+            self._fill_receipt(
+                receipt,
+                ref_name=ref_name,
+                job=job,
+                artifact_path=artifact_path,
+            )
         return utils.response_content(
-            result, streamed, action, chunk_size, iterator=iterator
+            result, streamed, action, chunk_size, iterator=iterator, receipt=receipt
         )

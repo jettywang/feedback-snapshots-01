@@ -79,6 +79,14 @@ gitlab.mixins module
     :undoc-members:
     :show-inheritance:
 
+gitlab.transfer module
+----------------------
+
+.. automodule:: gitlab.transfer
+    :members:
+    :undoc-members:
+    :show-inheritance:
+
 gitlab.utils module
 -------------------
 

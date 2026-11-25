@@ -13,6 +13,7 @@ from typing import Any, Callable, Literal
 
 import requests
 
+import gitlab.transfer
 from gitlab import const, types
 
 
@@ -73,15 +74,33 @@ def response_content(
     chunk_size: int,
     *,
     iterator: bool,
+    receipt: gitlab.transfer.DownloadReceipt | None = None,
 ) -> bytes | Iterator[Any] | None:
     if iterator:
+        if receipt is not None:
+            return gitlab.transfer.AuditedStream(
+                response, receipt, chunk_size=chunk_size
+            )
         return response.iter_content(chunk_size=chunk_size)
 
     if streamed is False:
+        if receipt is not None:
+            receipt.bind_response(response)
+            receipt.record_chunk(response.content)
+            receipt.mark_complete()
         return response.content
 
     if action is None:
         action = _StdoutStream()
+
+    if receipt is not None:
+        with gitlab.transfer.AuditedStream(
+            response, receipt, chunk_size=chunk_size
+        ) as stream:
+            for chunk in stream:
+                if chunk:
+                    action(chunk)
+        return None
 
     for chunk in response.iter_content(chunk_size=chunk_size):
         if chunk:

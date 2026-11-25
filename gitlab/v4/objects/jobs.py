@@ -6,12 +6,23 @@ import requests
 
 from gitlab import cli
 from gitlab import exceptions as exc
-from gitlab import utils
+from gitlab import transfer, utils
 from gitlab.base import RESTObject
 from gitlab.mixins import RefreshMixin, RetrieveMixin
 from gitlab.types import ArrayAttribute
 
 __all__ = ["ProjectJob", "ProjectJobManager"]
+
+
+def _fill_job_receipt(
+    job: ProjectJob, receipt: transfer.DownloadReceipt, artifact_path: str | None
+) -> None:
+    """Populate the project/job context of a download receipt."""
+    parent_attrs = job.manager.parent_attrs or {}
+    receipt.project_id = parent_attrs.get("project_id")
+    receipt.job_id = job.encoded_id
+    if artifact_path is not None:
+        receipt.artifact_path = artifact_path
 
 
 class ProjectJob(RefreshMixin, RESTObject):
@@ -122,6 +133,7 @@ class ProjectJob(RefreshMixin, RESTObject):
         chunk_size: int = 1024,
         *,
         iterator: Literal[False] = False,
+        receipt: transfer.DownloadReceipt | None = None,
         **kwargs: Any,
     ) -> bytes: ...
 
@@ -133,6 +145,7 @@ class ProjectJob(RefreshMixin, RESTObject):
         chunk_size: int = 1024,
         *,
         iterator: Literal[True] = True,
+        receipt: None = None,
         **kwargs: Any,
     ) -> Iterator[Any]: ...
 
@@ -144,8 +157,21 @@ class ProjectJob(RefreshMixin, RESTObject):
         chunk_size: int = 1024,
         *,
         iterator: Literal[False] = False,
+        receipt: transfer.DownloadReceipt | None = None,
         **kwargs: Any,
     ) -> None: ...
+
+    @overload
+    def artifacts(
+        self,
+        streamed: bool = False,
+        action: None = None,
+        chunk_size: int = 1024,
+        *,
+        iterator: Literal[True] = True,
+        receipt: transfer.DownloadReceipt,
+        **kwargs: Any,
+    ) -> transfer.AuditedStream: ...
 
     @cli.register_custom_action(cls_names="ProjectJob")
     @exc.on_http_error(exc.GitlabGetError)
@@ -156,6 +182,7 @@ class ProjectJob(RefreshMixin, RESTObject):
         chunk_size: int = 1024,
         *,
         iterator: bool = False,
+        receipt: transfer.DownloadReceipt | None = None,
         **kwargs: Any,
     ) -> bytes | Iterator[Any] | None:
         """Get the job artifacts.
@@ -169,6 +196,10 @@ class ProjectJob(RefreshMixin, RESTObject):
             action: Callable responsible of dealing with chunk of
                 data
             chunk_size: Size of each chunk
+            receipt: Optional :class:`~gitlab.transfer.DownloadReceipt`
+                updated while chunks are received, providing an auditable
+                record (project, job, received bytes, digest and completion
+                state) of the download
             **kwargs: Extra options to send to the server (e.g. sudo)
 
         Raises:
@@ -176,7 +207,9 @@ class ProjectJob(RefreshMixin, RESTObject):
             GitlabGetError: If the artifacts could not be retrieved
 
         Returns:
-            The artifacts if `streamed` is False, None otherwise.
+            The artifacts if `streamed` is False, None otherwise. When
+            `iterator` and `receipt` are both provided, an
+            :class:`~gitlab.transfer.AuditedStream` is returned.
         """
         path = f"{self.manager.path}/{self.encoded_id}/artifacts"
         result = self.manager.gitlab.http_get(
@@ -184,8 +217,10 @@ class ProjectJob(RefreshMixin, RESTObject):
         )
         if TYPE_CHECKING:
             assert isinstance(result, requests.Response)
+        if receipt is not None:
+            _fill_job_receipt(self, receipt, artifact_path=None)
         return utils.response_content(
-            result, streamed, action, chunk_size, iterator=iterator
+            result, streamed, action, chunk_size, iterator=iterator, receipt=receipt
         )
 
     @overload
@@ -197,6 +232,7 @@ class ProjectJob(RefreshMixin, RESTObject):
         chunk_size: int = 1024,
         *,
         iterator: Literal[False] = False,
+        receipt: transfer.DownloadReceipt | None = None,
         **kwargs: Any,
     ) -> bytes: ...
 
@@ -209,6 +245,7 @@ class ProjectJob(RefreshMixin, RESTObject):
         chunk_size: int = 1024,
         *,
         iterator: Literal[True] = True,
+        receipt: None = None,
         **kwargs: Any,
     ) -> Iterator[Any]: ...
 
@@ -221,8 +258,22 @@ class ProjectJob(RefreshMixin, RESTObject):
         chunk_size: int = 1024,
         *,
         iterator: Literal[False] = False,
+        receipt: transfer.DownloadReceipt | None = None,
         **kwargs: Any,
     ) -> None: ...
+
+    @overload
+    def artifact(
+        self,
+        path: str,
+        streamed: bool = False,
+        action: None = None,
+        chunk_size: int = 1024,
+        *,
+        iterator: Literal[True] = True,
+        receipt: transfer.DownloadReceipt,
+        **kwargs: Any,
+    ) -> transfer.AuditedStream: ...
 
     @cli.register_custom_action(cls_names="ProjectJob")
     @exc.on_http_error(exc.GitlabGetError)
@@ -234,6 +285,7 @@ class ProjectJob(RefreshMixin, RESTObject):
         chunk_size: int = 1024,
         *,
         iterator: bool = False,
+        receipt: transfer.DownloadReceipt | None = None,
         **kwargs: Any,
     ) -> bytes | Iterator[Any] | None:
         """Get a single artifact file from within the job's artifacts archive.
@@ -248,6 +300,10 @@ class ProjectJob(RefreshMixin, RESTObject):
             action: Callable responsible of dealing with chunk of
                 data
             chunk_size: Size of each chunk
+            receipt: Optional :class:`~gitlab.transfer.DownloadReceipt`
+                updated while chunks are received, providing an auditable
+                record (project, job, received bytes, digest and completion
+                state) of the download
             **kwargs: Extra options to send to the server (e.g. sudo)
 
         Raises:
@@ -255,16 +311,20 @@ class ProjectJob(RefreshMixin, RESTObject):
             GitlabGetError: If the artifacts could not be retrieved
 
         Returns:
-            The artifacts if `streamed` is False, None otherwise.
+            The artifacts if `streamed` is False, None otherwise. When
+            `iterator` and `receipt` are both provided, an
+            :class:`~gitlab.transfer.AuditedStream` is returned.
         """
-        path = f"{self.manager.path}/{self.encoded_id}/artifacts/{path}"
+        request_path = f"{self.manager.path}/{self.encoded_id}/artifacts/{path}"
         result = self.manager.gitlab.http_get(
-            path, streamed=streamed, raw=True, **kwargs
+            request_path, streamed=streamed, raw=True, **kwargs
         )
         if TYPE_CHECKING:
             assert isinstance(result, requests.Response)
+        if receipt is not None:
+            _fill_job_receipt(self, receipt, artifact_path=path)
         return utils.response_content(
-            result, streamed, action, chunk_size, iterator=iterator
+            result, streamed, action, chunk_size, iterator=iterator, receipt=receipt
         )
 
     @overload
@@ -275,6 +335,7 @@ class ProjectJob(RefreshMixin, RESTObject):
         chunk_size: int = 1024,
         *,
         iterator: Literal[False] = False,
+        receipt: transfer.DownloadReceipt | None = None,
         **kwargs: Any,
     ) -> bytes: ...
 
@@ -286,6 +347,7 @@ class ProjectJob(RefreshMixin, RESTObject):
         chunk_size: int = 1024,
         *,
         iterator: Literal[True] = True,
+        receipt: None = None,
         **kwargs: Any,
     ) -> Iterator[Any]: ...
 
@@ -297,8 +359,21 @@ class ProjectJob(RefreshMixin, RESTObject):
         chunk_size: int = 1024,
         *,
         iterator: Literal[False] = False,
+        receipt: transfer.DownloadReceipt | None = None,
         **kwargs: Any,
     ) -> None: ...
+
+    @overload
+    def trace(
+        self,
+        streamed: bool = False,
+        action: None = None,
+        chunk_size: int = 1024,
+        *,
+        iterator: Literal[True] = True,
+        receipt: transfer.DownloadReceipt,
+        **kwargs: Any,
+    ) -> transfer.AuditedStream: ...
 
     @cli.register_custom_action(cls_names="ProjectJob")
     @exc.on_http_error(exc.GitlabGetError)
@@ -309,6 +384,7 @@ class ProjectJob(RefreshMixin, RESTObject):
         chunk_size: int = 1024,
         *,
         iterator: bool = False,
+        receipt: transfer.DownloadReceipt | None = None,
         **kwargs: Any,
     ) -> bytes | Iterator[Any] | None:
         """Get the job trace.
@@ -322,6 +398,10 @@ class ProjectJob(RefreshMixin, RESTObject):
             action: Callable responsible of dealing with chunk of
                 data
             chunk_size: Size of each chunk
+            receipt: Optional :class:`~gitlab.transfer.DownloadReceipt`
+                updated while chunks are received, providing an auditable
+                record (project, job, received bytes, digest and completion
+                state) of the download
             **kwargs: Extra options to send to the server (e.g. sudo)
 
         Raises:
@@ -337,8 +417,10 @@ class ProjectJob(RefreshMixin, RESTObject):
         )
         if TYPE_CHECKING:
             assert isinstance(result, requests.Response)
+        if receipt is not None:
+            _fill_job_receipt(self, receipt, artifact_path=None)
         return utils.response_content(
-            result, streamed, action, chunk_size, iterator=iterator
+            result, streamed, action, chunk_size, iterator=iterator, receipt=receipt
         )
 
 

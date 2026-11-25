@@ -293,6 +293,59 @@ the entire content server-side first::
         artifact_bytes_iterator = build_or_job.artifacts(iterator=True)
         return StreamingResponse(artifact_bytes_iterator, media_type="application/zip")
 
+Auditable downloads with receipts
+---------------------------------
+
+When you download artifacts repeatedly under the same file name, a
+:class:`~gitlab.transfer.DownloadReceipt` provides an evidence record that ties
+the bytes you actually received to the project and job. Pass one to any artifact,
+trace or artifact-manager download call to opt in::
+
+    from gitlab.transfer import DownloadReceipt
+
+    receipt = DownloadReceipt()
+    with open("archive.zip", "wb") as f:
+        build_or_job.artifacts(streamed=True, action=f.write, receipt=receipt)
+
+The receipt is updated while chunks are received and records the project, job,
+request path, number of bytes received, expected size (from ``Content-Length``),
+a SHA-256 digest of the received bytes, UTC timestamps and a ``complete`` flag.
+You can reconcile a fully saved copy against its receipt with the digest::
+
+    import hashlib
+
+    with open("archive.zip", "rb") as f:
+        assert receipt.sha256 == hashlib.sha256(f.read()).hexdigest()
+    assert receipt.complete is True
+
+With ``iterator=True`` the call returns an
+:class:`~gitlab.transfer.AuditedStream` that behaves like the plain response
+iterator. If you stop consuming it early, or the connection drops while reading,
+the receipt is left in an auditable, incomplete state, still carrying the
+project, job and number of bytes received so far::
+
+    receipt = DownloadReceipt()
+    stream = build_or_job.artifacts(iterator=True, receipt=receipt)
+    try:
+        for chunk in stream:
+            ...  # a drop at the end of the stream raises here
+    except Exception:
+        pass
+    assert receipt.complete is False
+    assert receipt.bytes_received > 0  # bytes actually received
+
+    # Closing the stream explicitly records an early close as well.
+    other = DownloadReceipt()
+    other_stream = build_or_job.artifacts(iterator=True, receipt=other)
+    next(iter(other_stream))
+    other_stream.close()
+    assert other.complete is False
+
+Receipts never store credentials. Only the URL path (with sensitive query
+parameters such as ``private_token`` stripped) is retained, and stream errors
+are reduced to their exception type instead of their message, so tokens cannot
+leak into the record.
+
 Delete all artifacts of a project that can be deleted::
 
   project.artifacts.delete()
