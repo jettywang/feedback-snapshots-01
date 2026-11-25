@@ -297,6 +297,7 @@ class IDTokenCredentials(
         signer=None,
         use_metadata_identity_endpoint=False,
         quota_project_id=None,
+        signing_policy=None,
     ):
         """
         Args:
@@ -321,6 +322,10 @@ class IDTokenCredentials(
                 otherwise ValueError will be raised.
             quota_project_id (Optional[str]): The project ID used for quota and
                 billing.
+            signing_policy (google.auth._signing_policy.SigningLifecyclePolicy):
+                Optional policy that governs the lifecycle of the IAM signing
+                key. Ignored when ``signer`` is supplied or when the metadata
+                identity endpoint is used.
 
         Raises:
             ValueError:
@@ -357,6 +362,7 @@ class IDTokenCredentials(
                     request=request,
                     credentials=Credentials(),
                     service_account_email=self._service_account_email,
+                    signing_policy=signing_policy,
                 )
             self._signer = signer
             self._token_uri = token_uri or _DEFAULT_TOKEN_URI
@@ -526,6 +532,13 @@ class IDTokenCredentials(
     @_helpers.copy_docstring(credentials.Signing)
     def signer(self):
         return self._signer
+
+    @property  # type: ignore
+    @_helpers.copy_docstring(credentials.Signing)
+    def signing_policy(self):
+        if self._signer is not None:
+            return getattr(self._signer, "signing_policy", None)
+        return None
 
     def sign_bytes(self, message):
         """Signs the given message.

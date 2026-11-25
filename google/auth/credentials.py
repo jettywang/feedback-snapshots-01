@@ -653,6 +653,16 @@ class Signing(metaclass=abc.ABCMeta):
         # (pylint doesn't recognize that this is abstract)
         raise NotImplementedError("Signer must be implemented.")
 
+    @property
+    def signing_policy(self):
+        """Optional[google.auth._signing_policy.SigningLifecyclePolicy]: The
+        policy governing signing key retirement and historical verification.
+
+        Returns ``None`` for credentials that do not enforce a signing
+        lifecycle policy.
+        """
+        return None
+
 
 class TokenState(Enum):
     """

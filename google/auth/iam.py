@@ -25,6 +25,7 @@ import json
 
 from google.auth import _exponential_backoff
 from google.auth import _helpers
+from google.auth import _signing_policy
 from google.auth import credentials
 from google.auth import crypt
 from google.auth import exceptions
@@ -71,7 +72,13 @@ class Signer(crypt.Signer):
         /signBlob
     """
 
-    def __init__(self, request, credentials, service_account_email):
+    def __init__(
+        self,
+        request,
+        credentials,
+        service_account_email,
+        signing_policy=None,
+    ):
         """
         Args:
             request (google.auth.transport.Request): The object used to make
@@ -86,10 +93,18 @@ class Signer(crypt.Signer):
                 which service account to use to sign bytes. Often, this can
                 be the same as the service account email in the given
                 credentials.
+            signing_policy (google.auth._signing_policy.SigningLifecyclePolicy):
+                Optional policy that governs the signing key lifecycle. When
+                provided, the key IAM actually uses (the response's
+                ``keyId``) must still be authorized when the response
+                arrives, and pending signing calls are tracked so archived
+                signatures keep their verification evidence after key
+                retirement.
         """
         self._request = request
         self._credentials = credentials
         self._service_account_email = service_account_email
+        self._signing_policy = signing_policy
 
     def _make_signing_request(self, message):
         """Makes a request to the API signBlob API."""
@@ -104,6 +119,10 @@ class Signer(crypt.Signer):
             {"payload": base64.b64encode(message).decode("utf-8")}
         ).encode("utf-8")
 
+        receipt = None
+        if self._signing_policy is not None:
+            receipt = self._signing_policy.begin_signing(message)
+
         retries = _exponential_backoff.ExponentialBackoff()
         for _ in retries:
             self._credentials.before_request(self._request, method, url, headers)
@@ -114,12 +133,35 @@ class Signer(crypt.Signer):
                 continue
 
             if response.status != http_client.OK:
+                if receipt is not None:
+                    self._signing_policy.cancel_signing(receipt)
                 raise exceptions.TransportError(
                     "Error calling the IAM signBlob API: {}".format(response.data)
                 )
 
-            return json.loads(response.data.decode("utf-8"))
+            response_data = json.loads(response.data.decode("utf-8"))
+            signature = base64.b64decode(response_data["signedBlob"])
+
+            if self._signing_policy is not None:
+                key_id = response_data.get("keyId")
+                verifier = self._signing_policy.get_verifier(key_id)
+                # Re-checks the key the service actually returned against the
+                # current policy, covering retirement that happened while the
+                # remote call was in flight.
+                signature = self._signing_policy.complete_signing(
+                    receipt, key_id, signature, verifier=verifier
+                )
+
+            return signature
+        if receipt is not None:
+            self._signing_policy.cancel_signing(receipt)
         raise exceptions.TransportError("exhausted signBlob endpoint retries")
+
+    @property
+    def signing_policy(self):
+        """Optional[google.auth._signing_policy.SigningLifecyclePolicy]: The
+        signing lifecycle policy attached to this signer, if any."""
+        return self._signing_policy
 
     @property
     def key_id(self):
@@ -133,5 +175,4 @@ class Signer(crypt.Signer):
 
     @_helpers.copy_docstring(crypt.Signer)
     def sign(self, message):
-        response = self._make_signing_request(message)
-        return base64.b64decode(response["signedBlob"])
+        return self._make_signing_request(message)

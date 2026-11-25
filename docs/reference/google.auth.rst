@@ -35,3 +35,4 @@ Submodules
    google.auth.impersonated_credentials
    google.auth.jwt
    google.auth._jwt_async
+   google.auth._signing_policy

@@ -106,3 +106,9 @@ class TimeoutError(GoogleAuthError):
 
 class ResponseError(GoogleAuthError):
     """Used to indicate an error occurred when reading an HTTP response."""
+
+
+class KeyRetirementError(GoogleAuthError):
+    """Used to indicate that a signing key is no longer authorized to create
+    new signatures because it has been retired by the signing lifecycle
+    policy."""
