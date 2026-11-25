@@ -24,12 +24,22 @@ from google.auth._default import (
     load_credentials_from_dict,
     load_credentials_from_file,
 )
+from google.auth.connection_boundary import (
+    ConnectionBoundary,
+    PrivateNetworkBoundary,
+)
 
 
 __version__ = google_auth_version.__version__
 
 
-__all__ = ["default", "load_credentials_from_file", "load_credentials_from_dict"]
+__all__ = [
+    "default",
+    "load_credentials_from_file",
+    "load_credentials_from_dict",
+    "ConnectionBoundary",
+    "PrivateNetworkBoundary",
+]
 
 
 class Python37DeprecationWarning(DeprecationWarning):  # pragma: NO COVER

@@ -28,10 +28,12 @@ class Credentials(credentials.Credentials):
     These credentials use API key to provide authorization to applications.
     """
 
-    def __init__(self, token):
+    def __init__(self, token, connection_boundary=None):
         """
         Args:
             token (str): API key string
+            connection_boundary (Optional[google.auth.connection_boundary.ConnectionBoundary]):
+                Optional endpoint admission policy.
         Raises:
             ValueError: If the provided API key is not a non-empty string.
         """
@@ -39,6 +41,7 @@ class Credentials(credentials.Credentials):
         if not token:
             raise exceptions.InvalidValue("Token must be a non-empty API key string")
         self.token = token
+        self._connection_boundary = connection_boundary
 
     @property
     def expired(self):
@@ -73,4 +76,9 @@ class Credentials(credentials.Credentials):
             url (str): The request's URI or the RPC service's URI.
             headers (Mapping): The request's headers.
         """
-        self.apply(headers)
+        from google.auth import connection_boundary
+
+        with connection_boundary.authorization_scope(
+            self, method, url, headers
+        ):
+            self.apply(headers)

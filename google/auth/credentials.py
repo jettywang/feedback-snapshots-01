@@ -65,6 +65,9 @@ class Credentials(_BaseCredentials):
         """Optional[dict]: Cache of a trust boundary response which has a list
         of allowed regions and an encoded string representation of credentials
         trust boundary."""
+        self._connection_boundary = None
+        """Optional[google.auth.connection_boundary.ConnectionBoundary]:
+        Opt-in admission policy for credential-related connections."""
         self._universe_domain = DEFAULT_UNIVERSE_DOMAIN
         """Optional[str]: The universe domain value, default is googleapis.com
         """
@@ -224,13 +227,18 @@ class Credentials(_BaseCredentials):
         # pylint: disable=unused-argument
         # (Subclasses may use these arguments to ascertain information about
         # the http request.)
-        if self._use_non_blocking_refresh:
-            self._non_blocking_refresh(request)
-        else:
-            self._blocking_refresh(request)
+        from google.auth import connection_boundary
 
-        metrics.add_metric_header(headers, self._metric_header_for_usage())
-        self.apply(headers)
+        with connection_boundary.authorization_scope(
+            self, method, url, headers
+        ):
+            if self._use_non_blocking_refresh:
+                self._non_blocking_refresh(request)
+            else:
+                self._blocking_refresh(request)
+
+            metrics.add_metric_header(headers, self._metric_header_for_usage())
+            self.apply(headers)
 
     def with_non_blocking_refresh(self):
         self._use_non_blocking_refresh = True
@@ -364,8 +372,19 @@ class CredentialsWithTrustBoundary(Credentials):
         This method calls the subclass's token refresh logic and then
         refreshes the trust boundary if applicable.
         """
-        self._perform_refresh_token(request)
-        self._refresh_trust_boundary(request)
+        boundary = getattr(self, "_connection_boundary", None)
+        if boundary is None:
+            self._perform_refresh_token(request)
+            self._refresh_trust_boundary(request)
+            return
+
+        from google.auth import connection_boundary
+
+        with boundary.operation(self) as operation:
+            guarded_request = operation.guard(request)
+            self._perform_refresh_token(guarded_request)
+            with operation.stage(connection_boundary.TRUST_BOUNDARY):
+                self._refresh_trust_boundary(guarded_request)
 
     def _refresh_trust_boundary(self, request):
         """Triggers a refresh of the trust boundary and updates the cache if necessary.

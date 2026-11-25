@@ -90,6 +90,7 @@ class Credentials(credentials.ReadOnlyScoped, credentials.CredentialsWithQuotaPr
         trust_boundary=None,
         universe_domain=credentials.DEFAULT_UNIVERSE_DOMAIN,
         account=None,
+        connection_boundary=None,
     ):
         """
         Args:
@@ -157,6 +158,7 @@ class Credentials(credentials.ReadOnlyScoped, credentials.CredentialsWithQuotaPr
         self._trust_boundary = trust_boundary
         self._universe_domain = universe_domain or credentials.DEFAULT_UNIVERSE_DOMAIN
         self._account = account or ""
+        self._connection_boundary = connection_boundary
         self._cred_file_path = None
 
     def __getstate__(self):
@@ -202,6 +204,7 @@ class Credentials(credentials.ReadOnlyScoped, credentials.CredentialsWithQuotaPr
         self._refresh_worker = None
         self._use_non_blocking_refresh = d.get("_use_non_blocking_refresh", False)
         self._account = d.get("_account", "")
+        self._connection_boundary = d.get("_connection_boundary")
 
     @property
     def refresh_token(self):

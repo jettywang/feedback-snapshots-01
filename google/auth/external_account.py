@@ -28,6 +28,7 @@ token exchange endpoint following the `OAuth 2.0 Token Exchange`_ spec.
 """
 
 import abc
+from contextlib import nullcontext
 import copy
 from dataclasses import dataclass
 import datetime
@@ -38,12 +39,16 @@ import re
 
 from google.auth import _constants
 from google.auth import _helpers
+from google.auth import connection_boundary
 from google.auth import credentials
 from google.auth import exceptions
 from google.auth import impersonated_credentials
 from google.auth import metrics
 from google.oauth2 import sts
 from google.oauth2 import utils
+
+ConnectionBoundary = connection_boundary.ConnectionBoundary
+PrivateNetworkBoundary = connection_boundary.PrivateNetworkBoundary
 
 # External account JSON type identifier.
 _EXTERNAL_ACCOUNT_JSON_TYPE = "external_account"
@@ -118,6 +123,8 @@ class Credentials(
         workforce_pool_user_project=None,
         universe_domain=credentials.DEFAULT_UNIVERSE_DOMAIN,
         trust_boundary=None,
+        connection_boundary=None,
+        **boundary_options,
     ):
         """Instantiates an external account credentials object.
 
@@ -156,6 +163,26 @@ class Credentials(
                 endpoint returned an error.
         """
         super(Credentials, self).__init__()
+        if connection_boundary is None:
+            for alias in (
+                "network_boundary",
+                "boundary",
+                "admission_policy",
+                "connection_policy",
+                "private_network_boundary",
+            ):
+                if alias in boundary_options:
+                    connection_boundary = boundary_options.pop(alias)
+                    break
+        if boundary_options:
+            raise TypeError(
+                "Unexpected credential options: {}".format(
+                    ", ".join(sorted(boundary_options))
+                )
+            )
+        if isinstance(connection_boundary, dict):
+            connection_boundary = ConnectionBoundary(**connection_boundary)
+
         self._audience = audience
         self._subject_token_type = subject_token_type
         self._universe_domain = universe_domain
@@ -177,6 +204,7 @@ class Credentials(
         self._default_scopes = default_scopes
         self._workforce_pool_user_project = workforce_pool_user_project
         self._trust_boundary = trust_boundary
+        self._connection_boundary = connection_boundary
 
         if self._client_id:
             self._client_auth = utils.ClientAuthentication(
@@ -330,6 +358,12 @@ class Credentials(
 
         return self._token_info_url
 
+    @property
+    def connection_boundary(self):
+        """Optional[google.auth.connection_boundary.ConnectionBoundary]."""
+
+        return self._connection_boundary
+
     @_helpers.copy_docstring(credentials.Credentials)
     def get_cred_info(self):
         if self._cred_file_path:
@@ -349,6 +383,7 @@ class Credentials(
         scoped = self.__class__(**kwargs)
         scoped._cred_file_path = self._cred_file_path
         scoped._metrics_options = self._metrics_options
+        scoped._connection_boundary = self._connection_boundary
         return scoped
 
     @abc.abstractmethod
@@ -420,8 +455,47 @@ class Credentials(
         source credentials and the impersonated credentials. For non-impersonated
         credentials, it will refresh the access token and the trust boundary.
         """
-        self._perform_refresh_token(request)
-        self._handle_trust_boundary(request)
+        if self._connection_boundary is None:
+            self._perform_refresh_token(request)
+            self._handle_trust_boundary(request)
+            return
+
+        with self._connection_boundary.operation(self) as operation:
+            guarded_request = operation.guard(request)
+            self._perform_refresh_token(guarded_request)
+            with operation.stage(connection_boundary.TRUST_BOUNDARY):
+                self._handle_trust_boundary(guarded_request)
+
+    def before_request(self, request, method, url, headers):
+        boundary = self._connection_boundary
+        if boundary is None:
+            super(Credentials, self).before_request(request, method, url, headers)
+            return
+
+        with boundary.operation(self) as operation:
+            decision = operation.check(
+                connection_boundary.AUTHORIZATION,
+                url,
+                headers=headers,
+                method=method,
+            )
+            decision.raise_if_denied()
+            with operation.stage(connection_boundary.AUTHORIZATION):
+                super(Credentials, self).before_request(
+                    request, method, url, headers
+                )
+            operation.check(
+                connection_boundary.AUTHORIZATION,
+                url,
+                headers=headers,
+                method=method,
+            )
+
+    def _connection_stage(self, stage):
+        operation = connection_boundary._current_operation.get()
+        if operation is None:
+            return nullcontext()
+        return operation.stage(stage)
 
     def _handle_trust_boundary(self, request):
         # If we are impersonating, the trust boundary is handled by the
@@ -433,6 +507,15 @@ class Credentials(
             self._refresh_trust_boundary(request)
 
     def _perform_refresh_token(self, request, cert_fingerprint=None):
+        if (
+            self._connection_boundary is not None
+            and connection_boundary._current_operation.get() is None
+        ):
+            with self._connection_boundary.operation(self) as operation:
+                return self._perform_refresh_token(
+                    operation.guard(request), cert_fingerprint=cert_fingerprint
+                )
+
         scopes = self._scopes if self._scopes is not None else self._default_scopes
 
         # Inject client certificate into request.
@@ -445,7 +528,8 @@ class Credentials(
             self._impersonated_credentials = self._initialize_impersonated_credentials()
 
         if self._impersonated_credentials:
-            self._impersonated_credentials.refresh(request)
+            with self._connection_stage(connection_boundary.IMPERSONATION):
+                self._impersonated_credentials.refresh(request)
             self.token = self._impersonated_credentials.token
             self.expiry = self._impersonated_credentials.expiry
         else:
@@ -464,17 +548,22 @@ class Credentials(
                     self._metrics_options
                 )
             }
-            response_data = self._sts_client.exchange_token(
-                request=request,
-                grant_type=_STS_GRANT_TYPE,
-                subject_token=self.retrieve_subject_token(request),
-                subject_token_type=self._subject_token_type,
-                audience=self._audience,
-                scopes=scopes,
-                requested_token_type=_STS_REQUESTED_TOKEN_TYPE,
-                additional_options=additional_options if additional_options else None,
-                additional_headers=additional_headers,
-            )
+            with self._connection_stage(connection_boundary.CREDENTIAL_READ):
+                subject_token = self.retrieve_subject_token(request)
+            with self._connection_stage(connection_boundary.EXCHANGE):
+                response_data = self._sts_client.exchange_token(
+                    request=request,
+                    grant_type=_STS_GRANT_TYPE,
+                    subject_token=subject_token,
+                    subject_token_type=self._subject_token_type,
+                    audience=self._audience,
+                    scopes=scopes,
+                    requested_token_type=_STS_REQUESTED_TOKEN_TYPE,
+                    additional_options=additional_options
+                    if additional_options
+                    else None,
+                    additional_headers=additional_headers,
+                )
             self.token = response_data.get("access_token")
             expires_in = response_data.get("expires_in")
             # Some services do not respect the OAUTH2.0 RFC and send expires_in as a
@@ -525,6 +614,7 @@ class Credentials(
         new_cred = self.__class__(**kwargs)
         new_cred._cred_file_path = self._cred_file_path
         new_cred._metrics_options = self._metrics_options
+        new_cred._connection_boundary = self._connection_boundary
         return new_cred
 
     @_helpers.copy_docstring(credentials.CredentialsWithQuotaProject)
@@ -667,6 +757,11 @@ class Credentials(
         Raises:
             InvalidValue: For invalid parameters.
         """
+        connection_boundary = kwargs.pop(
+            "connection_boundary", info.get("connection_boundary")
+        )
+        if connection_boundary is not None:
+            kwargs["connection_boundary"] = connection_boundary
         return cls(
             audience=info.get("audience"),
             subject_token_type=info.get("subject_token_type"),

@@ -88,6 +88,7 @@ class Credentials(
         quota_project_id=None,
         universe_domain=credentials.DEFAULT_UNIVERSE_DOMAIN,
         trust_boundary=None,
+        connection_boundary=None,
     ):
         """Instantiates a external account authorized user credentials object.
 
@@ -135,6 +136,7 @@ class Credentials(
         self._universe_domain = universe_domain or credentials.DEFAULT_UNIVERSE_DOMAIN
         self._cred_file_path = None
         self._trust_boundary = trust_boundary
+        self._connection_boundary = connection_boundary
 
         if not self.valid and not self.can_refresh:
             raise exceptions.InvalidOperation(

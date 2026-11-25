@@ -32,6 +32,10 @@ class TransportError(GoogleAuthError):
     """Used to indicate an error occurred during an HTTP request."""
 
 
+class ConnectionBoundaryError(TransportError):
+    """Used to indicate a request violates its network connection boundary."""
+
+
 class RefreshError(GoogleAuthError):
     """Used to indicate that an refreshing the credentials' access token
     failed."""
