@@ -342,6 +342,29 @@ By default, lockfiles are named following the [PEP 751](https://peps.python.org/
 lock-filename = "locks/test-requirements.lock"
 ```
 
+### Lock targets ### {: #lock-targets }
+
+The `lock-targets` option lists the build targets an environment's lockfile must cover. It is used by [`dep audit`](../../cli/reference.md#hatch-dep-audit). When unset, targets are read from `tool.hatch.build.targets`, falling back to `sdist` and `wheel`.
+
+```toml config-example
+[tool.hatch.envs.linux]
+lock-targets = ["wheel"]
+
+[tool.hatch.envs.integration]
+lock-targets = ["sdist", "wheel"]
+```
+
+### Lock marker ### {: #lock-marker }
+
+The `lock-marker` option is a [PEP 508](https://peps.python.org/pep-0508/#environment-markers) environment marker that limits which lock candidates are counted by [`dep audit`](../../cli/reference.md#hatch-dep-audit). Candidates whose marker does not evaluate to true are recorded as `inactive`.
+
+Comma-separated clauses may be scoped to a single target with a `target:` prefix; unscoped clauses apply to every target:
+
+```toml config-example
+[tool.hatch.envs.ci]
+lock-marker = "wheel: sys_platform == 'linux', sdist: python_version >= '3.10'"
+```
+
 ### Global lock-envs ### {: #lock-envs }
 
 You can enable locking for all environments at once by setting `lock-envs` to `true` at the top level of your Hatch configuration:

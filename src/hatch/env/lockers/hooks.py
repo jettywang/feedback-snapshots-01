@@ -1,3 +1,4 @@
+from hatch.env.lockers.memory import MemoryLocker
 from hatch.env.lockers.pip import PipLocker
 from hatch.env.lockers.uv import UvLocker
 from hatchling.plugin import hookimpl
@@ -5,4 +6,4 @@ from hatchling.plugin import hookimpl
 
 @hookimpl
 def hatch_register_locker():
-    return [UvLocker, PipLocker]
+    return [UvLocker, PipLocker, MemoryLocker]

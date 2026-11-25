@@ -1,11 +1,15 @@
 import click
 
+from hatch.cli.dep.audit import audit
 from hatch.cli.env.lock import dependency_lock_click_options, run_dep_lock
 
 
 @click.group(short_help="Manage environment dependencies")
 def dep():
     pass
+
+
+dep.add_command(audit)
 
 
 @dep.command("lock", short_help="Generate a lockfile for the active environment (`-e` / `HATCH_ENV`)")

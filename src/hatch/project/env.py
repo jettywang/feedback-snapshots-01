@@ -21,6 +21,8 @@ RESERVED_OPTIONS = {
     "env-vars": dict,
     "features": list,
     "lock-filename": str,
+    "lock-marker": str,
+    "lock-targets": list,
     "locker": str,
     "locked": bool,
     "matrix-name-format": str,

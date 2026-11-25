@@ -33,3 +33,10 @@ Expose the module on the `hatch` entry point (see [Plugins — Discovery](about.
 | ------------- | ------------- | ----- |
 | `uv` | Virtual env + UV installer | `uv pip compile` / `uv pip sync`; supports layered locks (extras, dependency-groups, `pyproject.toml`). |
 | `pip` | Any supported environment | `pip lock`; flat dependency list only (no layered extras/groups in the pip locker). `apply_lock` is a no-op — use UV for `locked` installs from a pylock today. |
+| `memory` | Explicitly selected | Resolves from an in-process registry for offline audits and tests; writes a PEP 751-shaped lockfile. |
+
+## Reporting resolved versions
+
+Lockers may implement `report_versions(environment, lock_path, *, target="", marker="")` to return the package versions they resolved for a lock candidate. [`dep audit`](../how-to/environment/lockfiles.md#auditing-security-patch-coverage) uses it to check patch coverage across build targets.
+
+The default implementation reads `[[packages]]` from the lockfile. Return an empty mapping to fall back to that behavior. The built-in `memory` locker resolves from an in-process registry and is intended for offline tests.

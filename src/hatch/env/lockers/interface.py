@@ -67,6 +67,28 @@ class LockerInterface(ABC):
         """Install packages so the environment matches the lockfile at ``lock_path``."""
 
     @classmethod
+    def report_versions(
+        cls,
+        _environment: EnvironmentInterface,
+        lock_path: Path,
+        *,
+        target: str = "",
+        marker: str = "",
+    ) -> dict[str, str]:
+        """
+        Report the package versions this locker resolved for a lock candidate.
+
+        Used by the offline lock audit. The default reads ``[[packages]]`` from the
+        lockfile; lockers that resolve in memory can override it. Returning an empty
+        mapping falls back to reading the lockfile. ``target`` and ``marker`` describe
+        the candidate being audited.
+        """
+        from hatch.env.lock_audit import read_lockfile_versions
+
+        _ = target, marker
+        return read_lockfile_versions(lock_path)
+
+    @classmethod
     def install_matches_lock(cls, _environment: EnvironmentInterface, _lock_path: Path) -> bool:
         """
         Whether the environment already matches what :meth:`apply_lock` would install.

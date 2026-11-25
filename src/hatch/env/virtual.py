@@ -157,6 +157,8 @@ class VirtualEnvironment(EnvironmentInterface):
             "installer": str,
             "uv-path": str,
             "locker": str,
+            "lock-marker": str,
+            "lock-targets": list,
         }
 
     def activate(self):

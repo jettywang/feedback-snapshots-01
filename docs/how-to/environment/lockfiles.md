@@ -143,3 +143,27 @@ By default, Hatch picks a built-in **locker** from the environment installer:
 Override with [`tool.hatch.locker`](../../config/environment/overview.md#locker) or [`tool.hatch.envs.<name>.locker`](../../config/environment/overview.md#locker). See [Dependency locker plugins](../../plugins/locker.md) to implement `hatch_register_locker`.
 
 See [Dependency locker plugins](../../plugins/locker.md) for the full plugin interface.
+
+## Auditing security patch coverage
+
+[`dep audit`](../../cli/reference.md#hatch-dep-audit) checks that every locked environment carries a security patch for each build target it declares. The result is written to an offline-verifiable evidence file.
+
+```console
+$ hatch dep audit --patch "urllib3>=2.2.2" --env linux --env macos
+```
+
+Each environment is audited once per declared build target. Targets come from [`lock-targets`](../../config/environment/overview.md#lock-targets) when set, otherwise from `tool.hatch.build.targets`, falling back to `sdist` and `wheel`.
+
+A candidate whose environment does not list the patch package among its lock inputs is recorded as `not required`, so a package that only one environment needs is not reported as missing elsewhere. At least one active candidate must actually contain the patch for an audit to pass.
+
+[`lock-marker`](../../config/environment/overview.md#lock-marker) limits which candidates are counted for the current machine. A target-specific clause uses a `target:` prefix and can be combined with shared clauses, for example `"wheel: sys_platform == 'linux', python_version >= '3.10'"`. Candidates whose marker does not apply are recorded as `inactive` and never contribute to a pass.
+
+If a locker fails while resolving a candidate, that candidate is recorded as `failed` and any existing lockfile is kept in the evidence as `retained_versions` for review. Retained versions and passes from earlier runs never satisfy the current run.
+
+To confirm the recorded state without a locker or network access:
+
+```console
+$ hatch dep audit --patch "urllib3>=2.2.2" --verify
+```
+
+Evidence is bound to the lockfile digest, so editing a lockfile after the fact invalidates the recorded pass.
