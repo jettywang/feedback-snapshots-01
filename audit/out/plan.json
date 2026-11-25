@@ -1,0 +1,1229 @@
+{
+  "repeat_command": "ruby audit/run.rb",
+  "scope": "No real sockets or binds; Socket.tcp, Addrinfo.tcp, and SOCKSSocket are recording doubles.",
+  "source_calls": {
+    "control_socket": "lib/net/ftp.rb:406 open_socket(host, port)",
+    "socket_selection": "lib/net/ftp.rb:367-375",
+    "active_listen": "lib/net/ftp.rb:556 Addrinfo.tcp(@bare_sock.local_address.ip_address, 0).listen",
+    "active_command": "lib/net/ftp.rb:541-551 sendport/port/EPRT",
+    "active_order": "lib/net/ftp.rb:595-611 listen, PORT/EPRT, 1XX reply, accept",
+    "passive_selection": "lib/net/ftp.rb:561-568 PASV/227 or EPSV/229",
+    "passive_connect": "lib/net/ftp.rb:577 open_socket(host, port)"
+  },
+  "config_comparison": {
+    "same_client_identity": {
+      "client_id": "archive-agent-01",
+      "archive_job": "nightly-bundle-to-object-store",
+      "ftp_host": "ftp.archive.example",
+      "credentials_ref": "vault://archive/ftp"
+    },
+    "offline": true,
+    "rows": [
+      {
+        "key": "Net::FTP passive",
+        "before": false,
+        "after": true,
+        "impact": "迁移后使用出站 PASV/EPSV，避免在客户端开放主动回连监听。",
+        "changed": true
+      },
+      {
+        "key": "use_pasv_ip",
+        "before": false,
+        "after": true,
+        "impact": "true 时采用 227 明示主机；false 时用 @bare_sock.remote_address 推导。",
+        "changed": true
+      },
+      {
+        "key": "SOCKS_SERVER",
+        "before": null,
+        "after": "edge-proxy.audit.example:1080",
+        "impact": "这是本版 Net::FTP 唯一识别的代理钩子；两级链本身在代码之外。",
+        "changed": true
+      },
+      {
+        "key": "proxy_chain_length",
+        "before": 0,
+        "after": 2,
+        "impact": "Net::FTP 没有两级代理客户端配置项。",
+        "changed": true
+      },
+      {
+        "key": "client_ingress_rules",
+        "before": 2,
+        "after": 0,
+        "impact": "改为被动后，客户端侧 FTP 回连入站规则降为 0。",
+        "changed": true
+      },
+      {
+        "key": "client_egress_rules",
+        "before": [
+          "client_ipv4 -> ftp_ipv4:21/tcp",
+          "client_ipv6 -> ftp_ipv6:21/tcp"
+        ],
+        "after": [
+          "client_ipv4 -> edge_proxy_ipv4:1080/tcp",
+          "client_ipv6 -> edge_proxy_ipv6:1080/tcp"
+        ],
+        "impact": "分段后，客户端主机只需放行到第一级代理的出站。",
+        "changed": true
+      }
+    ]
+  },
+  "scenarios": [
+    {
+      "id": "ipv4_active_complete",
+      "family": "ipv4",
+      "mode": "active",
+      "run": "complete",
+      "proxy_tier_count": 0,
+      "configuration": {
+        "passive_option": false,
+        "passive_after_connect": false,
+        "use_pasv_ip": false
+      },
+      "execution_error": null,
+      "control_local_address": {
+        "ip_address": "192.0.2.10",
+        "ip_port": 51000,
+        "note": "recording local address toward 198.51.100.20"
+      },
+      "control_peer_address": {
+        "ip_address": "198.51.100.20",
+        "ip_port": 21,
+        "note": "Socket.tcp requested peer"
+      },
+      "control_derived_address": {
+        "ip_address": "198.51.100.20"
+      },
+      "server_declared_address": null,
+      "active_advertised_address": {
+        "protocol": "PORT",
+        "eprt_family": null,
+        "ip_address": "192.0.2.10",
+        "port": 50001
+      },
+      "data_connection_target": null,
+      "last_response": "150 File status okay; about to open data connection.\n",
+      "event_counts": {
+        "control_reply": 6,
+        "connect": 1,
+        "control_command": 5,
+        "addrinfo_tcp": 1,
+        "listen": 1,
+        "accept": 1,
+        "listener_shutdown": 1,
+        "listener_drain": 1,
+        "listener_close": 1,
+        "socket_close": 2,
+        "socket_shutdown": 1
+      },
+      "checks": [
+        {
+          "name": "control_connect_recorded",
+          "ok": true,
+          "expected_non_committable": false,
+          "evidence": "one connect event with role=control"
+        },
+        {
+          "name": "control_peer_available_to_net_ftp",
+          "ok": true,
+          "expected_non_committable": false,
+          "evidence": "@bare_sock.remote_address.ip_address=198.51.100.20"
+        },
+        {
+          "name": "active_listen_recorded",
+          "ok": true,
+          "expected_non_committable": false,
+          "evidence": "listen={\"ip_address\" => \"192.0.2.10\", \"ip_port\" => 50001, \"note\" => \"recording-listener\"}"
+        },
+        {
+          "name": "active_advertised_command_recorded",
+          "ok": true,
+          "expected_non_committable": false,
+          "evidence": "advertised={protocol: \"PORT\", eprt_family: nil, ip_address: \"192.0.2.10\", port: 50001}"
+        },
+        {
+          "name": "advertised_address_matches_listener",
+          "ok": true,
+          "expected_non_committable": false,
+          "evidence": "PORT/EPRT 192.0.2.10:50001 vs listen 192.0.2.10:50001"
+        },
+        {
+          "name": "listener_uses_control_local_address_family",
+          "ok": true,
+          "expected_non_committable": false,
+          "evidence": "Addrinfo.tcp(192.0.2.10,0) vs bare_sock.local_address=192.0.2.10"
+        },
+        {
+          "name": "accept_recorded",
+          "ok": true,
+          "expected_non_committable": false,
+          "evidence": "accept={\"ip_address\" => \"198.51.100.20\", \"ip_port\" => 20, \"note\" => \"reference active source port\"}"
+        },
+        {
+          "name": "preliminary_reply_precedes_accept",
+          "ok": true,
+          "expected_non_committable": false,
+          "evidence": "1XX seq=14, accept seq=15"
+        }
+      ],
+      "required_paths": [
+        {
+          "owner": "client-egress",
+          "tuple": "192.0.2.10 -> 198.51.100.20:21/tcp",
+          "note": "FTP control connection",
+          "committable_in_plan": true
+        },
+        {
+          "owner": "client-ingress",
+          "tuple": "198.51.100.20:20/tcp -> 192.0.2.10:50001/tcp",
+          "note": "active server callback; fake port is deterministic, real bind uses port 0/ephemeral",
+          "committable_in_plan": true
+        }
+      ],
+      "verdict": "verified_in_recording_double",
+      "judgment": "记录型替身中的连接、地址选择、命令/回复和数据套接字返回均一致；真实防火墙可达性仍需预发证据。",
+      "non_committable": [
+        "真实防火墙可达性",
+        "除非固定端口范围或 ALG，否则无法承诺生产主动端口"
+      ]
+    },
+    {
+      "id": "ipv6_active_complete",
+      "family": "ipv6",
+      "mode": "active",
+      "run": "complete",
+      "proxy_tier_count": 0,
+      "configuration": {
+        "passive_option": false,
+        "passive_after_connect": false,
+        "use_pasv_ip": false
+      },
+      "execution_error": null,
+      "control_local_address": {
+        "ip_address": "2001:db8:10::10",
+        "ip_port": 51000,
+        "note": "recording local address toward 2001:db8:90::20"
+      },
+      "control_peer_address": {
+        "ip_address": "2001:db8:90::20",
+        "ip_port": 21,
+        "note": "Socket.tcp requested peer"
+      },
+      "control_derived_address": {
+        "ip_address": "2001:db8:90::20"
+      },
+      "server_declared_address": null,
+      "active_advertised_address": {
+        "protocol": "EPRT",
+        "eprt_family": 2,
+        "ip_address": "2001:db8:10::10",
+        "port": 50001
+      },
+      "data_connection_target": null,
+      "last_response": "150 File status okay; about to open data connection.\n",
+      "event_counts": {
+        "control_reply": 6,
+        "connect": 1,
+        "control_command": 5,
+        "addrinfo_tcp": 1,
+        "listen": 1,
+        "accept": 1,
+        "listener_shutdown": 1,
+        "listener_drain": 1,
+        "listener_close": 1,
+        "socket_close": 2,
+        "socket_shutdown": 1
+      },
+      "checks": [
+        {
+          "name": "control_connect_recorded",
+          "ok": true,
+          "expected_non_committable": false,
+          "evidence": "one connect event with role=control"
+        },
+        {
+          "name": "control_peer_available_to_net_ftp",
+          "ok": true,
+          "expected_non_committable": false,
+          "evidence": "@bare_sock.remote_address.ip_address=2001:db8:90::20"
+        },
+        {
+          "name": "active_listen_recorded",
+          "ok": true,
+          "expected_non_committable": false,
+          "evidence": "listen={\"ip_address\" => \"2001:db8:10::10\", \"ip_port\" => 50001, \"note\" => \"recording-listener\"}"
+        },
+        {
+          "name": "active_advertised_command_recorded",
+          "ok": true,
+          "expected_non_committable": false,
+          "evidence": "advertised={protocol: \"EPRT\", eprt_family: 2, ip_address: \"2001:db8:10::10\", port: 50001}"
+        },
+        {
+          "name": "advertised_address_matches_listener",
+          "ok": true,
+          "expected_non_committable": false,
+          "evidence": "PORT/EPRT 2001:db8:10::10:50001 vs listen 2001:db8:10::10:50001"
+        },
+        {
+          "name": "listener_uses_control_local_address_family",
+          "ok": true,
+          "expected_non_committable": false,
+          "evidence": "Addrinfo.tcp(2001:db8:10::10,0) vs bare_sock.local_address=2001:db8:10::10"
+        },
+        {
+          "name": "accept_recorded",
+          "ok": true,
+          "expected_non_committable": false,
+          "evidence": "accept={\"ip_address\" => \"2001:db8:90::20\", \"ip_port\" => 20, \"note\" => \"reference active source port\"}"
+        },
+        {
+          "name": "preliminary_reply_precedes_accept",
+          "ok": true,
+          "expected_non_committable": false,
+          "evidence": "1XX seq=35, accept seq=36"
+        }
+      ],
+      "required_paths": [
+        {
+          "owner": "client-egress",
+          "tuple": "2001:db8:10::10 -> 2001:db8:90::20:21/tcp",
+          "note": "FTP control connection",
+          "committable_in_plan": true
+        },
+        {
+          "owner": "client-ingress",
+          "tuple": "2001:db8:90::20:20/tcp -> 2001:db8:10::10:50001/tcp",
+          "note": "active server callback; fake port is deterministic, real bind uses port 0/ephemeral",
+          "committable_in_plan": true
+        }
+      ],
+      "verdict": "verified_in_recording_double",
+      "judgment": "记录型替身中的连接、地址选择、命令/回复和数据套接字返回均一致；真实防火墙可达性仍需预发证据。",
+      "non_committable": [
+        "真实防火墙可达性",
+        "除非固定端口范围或 ALG，否则无法承诺生产主动端口"
+      ]
+    },
+    {
+      "id": "ipv4_passive_default_peer_complete",
+      "family": "ipv4",
+      "mode": "passive",
+      "run": "complete",
+      "proxy_tier_count": 0,
+      "configuration": {
+        "passive_option": true,
+        "passive_after_connect": true,
+        "use_pasv_ip": false,
+        "proxy_peer_mode": "actual_proxy"
+      },
+      "execution_error": null,
+      "control_local_address": {
+        "ip_address": "192.0.2.10",
+        "ip_port": 51000,
+        "note": "recording local address toward 198.51.100.20"
+      },
+      "control_peer_address": {
+        "ip_address": "198.51.100.20",
+        "ip_port": 21,
+        "note": "Socket.tcp requested peer"
+      },
+      "control_derived_address": {
+        "ip_address": "198.51.100.20"
+      },
+      "server_declared_address": {
+        "protocol": "PASV/227",
+        "host": "198.51.100.22",
+        "port": 50021,
+        "raw": "227 Entering Passive Mode (198,51,100,22,195,101)."
+      },
+      "active_advertised_address": null,
+      "data_connection_target": {
+        "host": "198.51.100.20",
+        "port": 50021,
+        "impl": "Socket.tcp"
+      },
+      "last_response": "150 File status okay; about to open data connection.\n",
+      "event_counts": {
+        "control_reply": 6,
+        "connect": 2,
+        "control_command": 5,
+        "socket_close": 2,
+        "socket_shutdown": 1
+      },
+      "checks": [
+        {
+          "name": "control_connect_recorded",
+          "ok": true,
+          "expected_non_committable": false,
+          "evidence": "one connect event with role=control"
+        },
+        {
+          "name": "control_peer_available_to_net_ftp",
+          "ok": true,
+          "expected_non_committable": false,
+          "evidence": "@bare_sock.remote_address.ip_address=198.51.100.20"
+        },
+        {
+          "name": "server_declared_227/pasv_recorded",
+          "ok": true,
+          "expected_non_committable": false,
+          "evidence": "declared={protocol: \"PASV/227\", host: \"198.51.100.22\", port: 50021, raw: \"227 Entering Passive Mode (198,51,100,22,195,101).\"}"
+        },
+        {
+          "name": "passive_data_connect_recorded",
+          "ok": true,
+          "expected_non_committable": false,
+          "evidence": "data connect={requested_host: \"198.51.100.20\", requested_port: 50021}"
+        },
+        {
+          "name": "passive_port_matches_reply",
+          "ok": true,
+          "expected_non_committable": false,
+          "evidence": "connect port 50021 vs reply port 50021"
+        },
+        {
+          "name": "passive_host_matches_net_ftp_selection",
+          "ok": true,
+          "expected_non_committable": false,
+          "evidence": "connect host 198.51.100.20 vs selected 198.51.100.20"
+        }
+      ],
+      "required_paths": [
+        {
+          "owner": "client-egress",
+          "tuple": "192.0.2.10 -> 198.51.100.20:21/tcp",
+          "note": "FTP control connection",
+          "committable_in_plan": true
+        },
+        {
+          "owner": "client-egress",
+          "tuple": "192.0.2.10 -> 198.51.100.20:50021/tcp",
+          "note": "passive data connection",
+          "committable_in_plan": true
+        }
+      ],
+      "verdict": "verified_in_recording_double",
+      "judgment": "记录型替身中的连接、地址选择、命令/回复和数据套接字返回均一致；真实防火墙可达性仍需预发证据。",
+      "non_committable": [
+        "真实防火墙可达性",
+        "除非固定端口范围或 ALG，否则无法承诺生产主动端口"
+      ]
+    },
+    {
+      "id": "ipv4_passive_declared_complete",
+      "family": "ipv4",
+      "mode": "passive",
+      "run": "complete",
+      "proxy_tier_count": 0,
+      "configuration": {
+        "passive_option": true,
+        "passive_after_connect": true,
+        "use_pasv_ip": true,
+        "proxy_peer_mode": "actual_proxy"
+      },
+      "execution_error": null,
+      "control_local_address": {
+        "ip_address": "192.0.2.10",
+        "ip_port": 51000,
+        "note": "recording local address toward 198.51.100.20"
+      },
+      "control_peer_address": {
+        "ip_address": "198.51.100.20",
+        "ip_port": 21,
+        "note": "Socket.tcp requested peer"
+      },
+      "control_derived_address": {
+        "ip_address": "198.51.100.20"
+      },
+      "server_declared_address": {
+        "protocol": "PASV/227",
+        "host": "198.51.100.22",
+        "port": 50021,
+        "raw": "227 Entering Passive Mode (198,51,100,22,195,101)."
+      },
+      "active_advertised_address": null,
+      "data_connection_target": {
+        "host": "198.51.100.22",
+        "port": 50021,
+        "impl": "Socket.tcp"
+      },
+      "last_response": "150 File status okay; about to open data connection.\n",
+      "event_counts": {
+        "control_reply": 6,
+        "connect": 2,
+        "control_command": 5,
+        "socket_close": 2,
+        "socket_shutdown": 1
+      },
+      "checks": [
+        {
+          "name": "control_connect_recorded",
+          "ok": true,
+          "expected_non_committable": false,
+          "evidence": "one connect event with role=control"
+        },
+        {
+          "name": "control_peer_available_to_net_ftp",
+          "ok": true,
+          "expected_non_committable": false,
+          "evidence": "@bare_sock.remote_address.ip_address=198.51.100.20"
+        },
+        {
+          "name": "server_declared_227/pasv_recorded",
+          "ok": true,
+          "expected_non_committable": false,
+          "evidence": "declared={protocol: \"PASV/227\", host: \"198.51.100.22\", port: 50021, raw: \"227 Entering Passive Mode (198,51,100,22,195,101).\"}"
+        },
+        {
+          "name": "passive_data_connect_recorded",
+          "ok": true,
+          "expected_non_committable": false,
+          "evidence": "data connect={requested_host: \"198.51.100.22\", requested_port: 50021}"
+        },
+        {
+          "name": "passive_port_matches_reply",
+          "ok": true,
+          "expected_non_committable": false,
+          "evidence": "connect port 50021 vs reply port 50021"
+        },
+        {
+          "name": "passive_host_matches_net_ftp_selection",
+          "ok": true,
+          "expected_non_committable": false,
+          "evidence": "connect host 198.51.100.22 vs selected 198.51.100.22"
+        }
+      ],
+      "required_paths": [
+        {
+          "owner": "client-egress",
+          "tuple": "192.0.2.10 -> 198.51.100.20:21/tcp",
+          "note": "FTP control connection",
+          "committable_in_plan": true
+        },
+        {
+          "owner": "client-egress",
+          "tuple": "192.0.2.10 -> 198.51.100.22:50021/tcp",
+          "note": "passive data connection",
+          "committable_in_plan": true
+        }
+      ],
+      "verdict": "verified_in_recording_double",
+      "judgment": "记录型替身中的连接、地址选择、命令/回复和数据套接字返回均一致；真实防火墙可达性仍需预发证据。",
+      "non_committable": [
+        "真实防火墙可达性",
+        "除非固定端口范围或 ALG，否则无法承诺生产主动端口"
+      ]
+    },
+    {
+      "id": "ipv6_passive_complete",
+      "family": "ipv6",
+      "mode": "passive",
+      "run": "complete",
+      "proxy_tier_count": 0,
+      "configuration": {
+        "passive_option": true,
+        "passive_after_connect": true,
+        "use_pasv_ip": false,
+        "proxy_peer_mode": "actual_proxy"
+      },
+      "execution_error": null,
+      "control_local_address": {
+        "ip_address": "2001:db8:10::10",
+        "ip_port": 51000,
+        "note": "recording local address toward 2001:db8:90::20"
+      },
+      "control_peer_address": {
+        "ip_address": "2001:db8:90::20",
+        "ip_port": 21,
+        "note": "Socket.tcp requested peer"
+      },
+      "control_derived_address": {
+        "ip_address": "2001:db8:90::20"
+      },
+      "server_declared_address": {
+        "protocol": "EPSV/229",
+        "host": null,
+        "port": 50021,
+        "raw": "229 Entering Extended Passive Mode (|||50021|)."
+      },
+      "active_advertised_address": null,
+      "data_connection_target": {
+        "host": "2001:db8:90::20",
+        "port": 50021,
+        "impl": "Socket.tcp"
+      },
+      "last_response": "150 File status okay; about to open data connection.\n",
+      "event_counts": {
+        "control_reply": 6,
+        "connect": 2,
+        "control_command": 5,
+        "socket_close": 2,
+        "socket_shutdown": 1
+      },
+      "checks": [
+        {
+          "name": "control_connect_recorded",
+          "ok": true,
+          "expected_non_committable": false,
+          "evidence": "one connect event with role=control"
+        },
+        {
+          "name": "control_peer_available_to_net_ftp",
+          "ok": true,
+          "expected_non_committable": false,
+          "evidence": "@bare_sock.remote_address.ip_address=2001:db8:90::20"
+        },
+        {
+          "name": "server_declared_229/epsv_recorded",
+          "ok": true,
+          "expected_non_committable": false,
+          "evidence": "declared={protocol: \"EPSV/229\", host: nil, port: 50021, raw: \"229 Entering Extended Passive Mode (|||50021|).\"}"
+        },
+        {
+          "name": "passive_data_connect_recorded",
+          "ok": true,
+          "expected_non_committable": false,
+          "evidence": "data connect={requested_host: \"2001:db8:90::20\", requested_port: 50021}"
+        },
+        {
+          "name": "passive_port_matches_reply",
+          "ok": true,
+          "expected_non_committable": false,
+          "evidence": "connect port 50021 vs reply port 50021"
+        },
+        {
+          "name": "passive_host_matches_net_ftp_selection",
+          "ok": true,
+          "expected_non_committable": false,
+          "evidence": "connect host 2001:db8:90::20 vs selected 2001:db8:90::20"
+        }
+      ],
+      "required_paths": [
+        {
+          "owner": "client-egress",
+          "tuple": "2001:db8:10::10 -> 2001:db8:90::20:21/tcp",
+          "note": "FTP control connection",
+          "committable_in_plan": true
+        },
+        {
+          "owner": "client-egress",
+          "tuple": "2001:db8:10::10 -> 2001:db8:90::20:50021/tcp",
+          "note": "passive data connection",
+          "committable_in_plan": true
+        }
+      ],
+      "verdict": "verified_in_recording_double",
+      "judgment": "记录型替身中的连接、地址选择、命令/回复和数据套接字返回均一致；真实防火墙可达性仍需预发证据。",
+      "non_committable": [
+        "真实防火墙可达性",
+        "除非固定端口范围或 ALG，否则无法承诺生产主动端口"
+      ]
+    },
+    {
+      "id": "active_ipv4_preliminary_only",
+      "family": "ipv4",
+      "mode": "active",
+      "run": "preliminary_only",
+      "proxy_tier_count": 0,
+      "configuration": {
+        "passive_option": false,
+        "passive_after_connect": false,
+        "use_pasv_ip": false
+      },
+      "execution_error": null,
+      "control_local_address": {
+        "ip_address": "192.0.2.10",
+        "ip_port": 51000,
+        "note": "recording local address toward 198.51.100.20"
+      },
+      "control_peer_address": {
+        "ip_address": "198.51.100.20",
+        "ip_port": 21,
+        "note": "Socket.tcp requested peer"
+      },
+      "control_derived_address": {
+        "ip_address": "198.51.100.20"
+      },
+      "server_declared_address": null,
+      "active_advertised_address": {
+        "protocol": "PORT",
+        "eprt_family": null,
+        "ip_address": "192.0.2.10",
+        "port": 50001
+      },
+      "data_connection_target": null,
+      "last_response": "150 File status okay; about to open data connection.\n",
+      "event_counts": {
+        "control_reply": 6,
+        "connect": 1,
+        "control_command": 5,
+        "addrinfo_tcp": 1,
+        "listen": 1,
+        "listener_close": 1,
+        "socket_shutdown": 1,
+        "socket_close": 1
+      },
+      "checks": [
+        {
+          "name": "control_connect_recorded",
+          "ok": true,
+          "expected_non_committable": false,
+          "evidence": "one connect event with role=control"
+        },
+        {
+          "name": "control_peer_available_to_net_ftp",
+          "ok": true,
+          "expected_non_committable": false,
+          "evidence": "@bare_sock.remote_address.ip_address=198.51.100.20"
+        },
+        {
+          "name": "active_listen_recorded",
+          "ok": true,
+          "expected_non_committable": false,
+          "evidence": "listen={\"ip_address\" => \"192.0.2.10\", \"ip_port\" => 50001, \"note\" => \"recording-listener\"}"
+        },
+        {
+          "name": "active_advertised_command_recorded",
+          "ok": true,
+          "expected_non_committable": false,
+          "evidence": "advertised={protocol: \"PORT\", eprt_family: nil, ip_address: \"192.0.2.10\", port: 50001}"
+        },
+        {
+          "name": "advertised_address_matches_listener",
+          "ok": true,
+          "expected_non_committable": false,
+          "evidence": "PORT/EPRT 192.0.2.10:50001 vs listen 192.0.2.10:50001"
+        },
+        {
+          "name": "listener_uses_control_local_address_family",
+          "ok": true,
+          "expected_non_committable": false,
+          "evidence": "Addrinfo.tcp(192.0.2.10,0) vs bare_sock.local_address=192.0.2.10"
+        },
+        {
+          "name": "preliminary_reply_recorded",
+          "ok": true,
+          "expected_non_committable": false,
+          "evidence": "150 File status okay; about to open data connection."
+        },
+        {
+          "name": "no_accept_for_preliminary_only_stop",
+          "ok": true,
+          "expected_non_committable": false,
+          "evidence": "accept event count=0"
+        },
+        {
+          "name": "data_establishment_not_proven",
+          "ok": true,
+          "expected_non_committable": false,
+          "evidence": "1XX alone is not evidence; no accept return or data connect return"
+        }
+      ],
+      "required_paths": [
+        {
+          "owner": "client-egress",
+          "tuple": "192.0.2.10 -> 198.51.100.20:21/tcp",
+          "note": "FTP control connection",
+          "committable_in_plan": true
+        },
+        {
+          "owner": "client-ingress",
+          "tuple": "198.51.100.20:20/tcp -> 192.0.2.10:50001/tcp",
+          "note": "active server callback; fake port is deterministic, real bind uses port 0/ephemeral",
+          "committable_in_plan": false
+        }
+      ],
+      "verdict": "inconclusive",
+      "judgment": "已收到 1XX 预备控制回复，但没有 accept 返回或被动数据 connect 返回；不能判定数据连接建成。",
+      "non_committable": [
+        "真实数据通道建立"
+      ]
+    },
+    {
+      "id": "proxy2_v4_passive_declared_chain",
+      "family": "ipv4",
+      "mode": "passive",
+      "run": "complete",
+      "proxy_tier_count": 2,
+      "configuration": {
+        "passive_option": true,
+        "passive_after_connect": true,
+        "use_pasv_ip": true,
+        "socks_server_env": "edge-proxy.audit.example:1080",
+        "proxy_peer_mode": "actual_proxy"
+      },
+      "execution_error": null,
+      "control_local_address": {
+        "ip_address": "192.0.2.10",
+        "ip_port": 51006,
+        "note": "client address toward first proxy"
+      },
+      "control_peer_address": {
+        "ip_address": "192.0.2.100",
+        "ip_port": 1080,
+        "note": "actual TCP peer visible to TCPSocket-style #remote_address"
+      },
+      "control_derived_address": {
+        "ip_address": "192.0.2.100"
+      },
+      "server_declared_address": {
+        "protocol": "PASV/227",
+        "host": "198.51.100.22",
+        "port": 50021,
+        "raw": "227 Entering Passive Mode (198,51,100,22,195,101)."
+      },
+      "active_advertised_address": null,
+      "data_connection_target": {
+        "host": "198.51.100.22",
+        "port": 50021,
+        "impl": "SOCKSSocket.open"
+      },
+      "last_response": "150 File status okay; about to open data connection.\n",
+      "event_counts": {
+        "connect": 2,
+        "proxy_leg": 4,
+        "control_reply": 6,
+        "control_command": 5,
+        "socket_close": 2,
+        "socket_shutdown": 1
+      },
+      "checks": [
+        {
+          "name": "control_connect_recorded",
+          "ok": true,
+          "expected_non_committable": false,
+          "evidence": "one connect event with role=control"
+        },
+        {
+          "name": "control_peer_available_to_net_ftp",
+          "ok": true,
+          "expected_non_committable": false,
+          "evidence": "@bare_sock.remote_address.ip_address=192.0.2.100"
+        },
+        {
+          "name": "server_declared_227/pasv_recorded",
+          "ok": true,
+          "expected_non_committable": false,
+          "evidence": "declared={protocol: \"PASV/227\", host: \"198.51.100.22\", port: 50021, raw: \"227 Entering Passive Mode (198,51,100,22,195,101).\"}"
+        },
+        {
+          "name": "passive_data_connect_recorded",
+          "ok": true,
+          "expected_non_committable": false,
+          "evidence": "data connect={requested_host: \"198.51.100.22\", requested_port: 50021}"
+        },
+        {
+          "name": "passive_port_matches_reply",
+          "ok": true,
+          "expected_non_committable": false,
+          "evidence": "connect port 50021 vs reply port 50021"
+        },
+        {
+          "name": "passive_host_matches_net_ftp_selection",
+          "ok": true,
+          "expected_non_committable": false,
+          "evidence": "connect host 198.51.100.22 vs selected 198.51.100.22"
+        }
+      ],
+      "required_paths": [
+        {
+          "owner": "client-egress",
+          "tuple": "192.0.2.10 -> 192.0.2.100:1080/tcp",
+          "note": "open only this from the client host",
+          "committable_in_plan": true
+        },
+        {
+          "owner": "proxy-internal",
+          "tuple": "192.0.2.100:1080 -> 203.0.113.100:1080/tcp",
+          "note": "proxy-to-proxy policy; not controlled by Net::FTP",
+          "committable_in_plan": null
+        },
+        {
+          "owner": "proxy-final-egress",
+          "tuple": "inner-proxy -> 198.51.100.22:50021/tcp",
+          "note": "final proxy egress must allow the host Net::FTP passed to SOCKSSocket.open",
+          "committable_in_plan": null
+        }
+      ],
+      "verdict": "conditional",
+      "judgment": "记录型替身中的调用顺序和地址选择一致；生产仍取决于两级代理策略、代理协议和 remote_address 语义。",
+      "non_committable": [
+        "P1→P2 与 P2→目标的防火墙状态",
+        "真实代理 CONNECT/SOCKS 协商"
+      ]
+    },
+    {
+      "id": "proxy2_v6_passive_preserved_peer_chain",
+      "family": "ipv6",
+      "mode": "passive",
+      "run": "complete",
+      "proxy_tier_count": 2,
+      "configuration": {
+        "passive_option": true,
+        "passive_after_connect": true,
+        "use_pasv_ip": false,
+        "socks_server_env": "edge-proxy.audit.example:1080",
+        "proxy_peer_mode": "preserve_target"
+      },
+      "execution_error": null,
+      "control_local_address": {
+        "ip_address": "2001:db8:10::10",
+        "ip_port": 51007,
+        "note": "client address toward first proxy"
+      },
+      "control_peer_address": {
+        "ip_address": "2001:db8:90::20",
+        "ip_port": 21,
+        "note": "application target passed to SOCKSSocket.open"
+      },
+      "control_derived_address": {
+        "ip_address": "2001:db8:90::20"
+      },
+      "server_declared_address": {
+        "protocol": "EPSV/229",
+        "host": null,
+        "port": 50021,
+        "raw": "229 Entering Extended Passive Mode (|||50021|)."
+      },
+      "active_advertised_address": null,
+      "data_connection_target": {
+        "host": "2001:db8:90::20",
+        "port": 50021,
+        "impl": "SOCKSSocket.open"
+      },
+      "last_response": "150 File status okay; about to open data connection.\n",
+      "event_counts": {
+        "connect": 2,
+        "proxy_leg": 4,
+        "control_reply": 6,
+        "control_command": 5,
+        "socket_close": 2,
+        "socket_shutdown": 1
+      },
+      "checks": [
+        {
+          "name": "control_connect_recorded",
+          "ok": true,
+          "expected_non_committable": false,
+          "evidence": "one connect event with role=control"
+        },
+        {
+          "name": "control_peer_available_to_net_ftp",
+          "ok": true,
+          "expected_non_committable": false,
+          "evidence": "@bare_sock.remote_address.ip_address=2001:db8:90::20"
+        },
+        {
+          "name": "server_declared_229/epsv_recorded",
+          "ok": true,
+          "expected_non_committable": false,
+          "evidence": "declared={protocol: \"EPSV/229\", host: nil, port: 50021, raw: \"229 Entering Extended Passive Mode (|||50021|).\"}"
+        },
+        {
+          "name": "passive_data_connect_recorded",
+          "ok": true,
+          "expected_non_committable": false,
+          "evidence": "data connect={requested_host: \"2001:db8:90::20\", requested_port: 50021}"
+        },
+        {
+          "name": "passive_port_matches_reply",
+          "ok": true,
+          "expected_non_committable": false,
+          "evidence": "connect port 50021 vs reply port 50021"
+        },
+        {
+          "name": "passive_host_matches_net_ftp_selection",
+          "ok": true,
+          "expected_non_committable": false,
+          "evidence": "connect host 2001:db8:90::20 vs selected 2001:db8:90::20"
+        }
+      ],
+      "required_paths": [
+        {
+          "owner": "client-egress",
+          "tuple": "2001:db8:10::10 -> 2001:db8:10::fe:1080/tcp",
+          "note": "open only this from the client host",
+          "committable_in_plan": true
+        },
+        {
+          "owner": "proxy-internal",
+          "tuple": "2001:db8:10::fe:1080 -> 2001:db8:99::fe:1080/tcp",
+          "note": "proxy-to-proxy policy; not controlled by Net::FTP",
+          "committable_in_plan": null
+        },
+        {
+          "owner": "proxy-final-egress",
+          "tuple": "inner-proxy -> 2001:db8:90::20:50021/tcp",
+          "note": "final proxy egress must allow the host Net::FTP passed to SOCKSSocket.open",
+          "committable_in_plan": null
+        }
+      ],
+      "verdict": "conditional",
+      "judgment": "记录型替身中的调用顺序和地址选择一致；生产仍取决于两级代理策略、代理协议和 remote_address 语义。",
+      "non_committable": [
+        "P1→P2 与 P2→目标的防火墙状态",
+        "真实代理 CONNECT/SOCKS 协商"
+      ]
+    },
+    {
+      "id": "proxy2_v6_passive_actual_peer_mismatch",
+      "family": "ipv6",
+      "mode": "passive",
+      "run": "complete",
+      "proxy_tier_count": 2,
+      "configuration": {
+        "passive_option": true,
+        "passive_after_connect": true,
+        "use_pasv_ip": false,
+        "socks_server_env": "edge-proxy.audit.example:1080",
+        "proxy_peer_mode": "actual_proxy"
+      },
+      "execution_error": null,
+      "control_local_address": {
+        "ip_address": "2001:db8:10::10",
+        "ip_port": 51008,
+        "note": "client address toward first proxy"
+      },
+      "control_peer_address": {
+        "ip_address": "2001:db8:10::fe",
+        "ip_port": 1080,
+        "note": "actual TCP peer visible to TCPSocket-style #remote_address"
+      },
+      "control_derived_address": {
+        "ip_address": "2001:db8:10::fe"
+      },
+      "server_declared_address": {
+        "protocol": "EPSV/229",
+        "host": null,
+        "port": 50021,
+        "raw": "229 Entering Extended Passive Mode (|||50021|)."
+      },
+      "active_advertised_address": null,
+      "data_connection_target": {
+        "host": "2001:db8:10::fe",
+        "port": 50021,
+        "impl": "SOCKSSocket.open"
+      },
+      "last_response": "150 File status okay; about to open data connection.\n",
+      "event_counts": {
+        "connect": 2,
+        "proxy_leg": 4,
+        "control_reply": 6,
+        "control_command": 5,
+        "socket_close": 2,
+        "socket_shutdown": 1
+      },
+      "checks": [
+        {
+          "name": "control_connect_recorded",
+          "ok": true,
+          "expected_non_committable": false,
+          "evidence": "one connect event with role=control"
+        },
+        {
+          "name": "control_peer_available_to_net_ftp",
+          "ok": true,
+          "expected_non_committable": false,
+          "evidence": "@bare_sock.remote_address.ip_address=2001:db8:10::fe"
+        },
+        {
+          "name": "server_declared_229/epsv_recorded",
+          "ok": true,
+          "expected_non_committable": false,
+          "evidence": "declared={protocol: \"EPSV/229\", host: nil, port: 50021, raw: \"229 Entering Extended Passive Mode (|||50021|).\"}"
+        },
+        {
+          "name": "passive_data_connect_recorded",
+          "ok": true,
+          "expected_non_committable": false,
+          "evidence": "data connect={requested_host: \"2001:db8:10::fe\", requested_port: 50021}"
+        },
+        {
+          "name": "passive_port_matches_reply",
+          "ok": true,
+          "expected_non_committable": false,
+          "evidence": "connect port 50021 vs reply port 50021"
+        },
+        {
+          "name": "passive_host_matches_net_ftp_selection",
+          "ok": true,
+          "expected_non_committable": false,
+          "evidence": "connect host 2001:db8:10::fe vs selected 2001:db8:10::fe"
+        },
+        {
+          "name": "derived_proxy_address_is_not_the_ftp_data_endpoint",
+          "ok": false,
+          "expected_non_committable": true,
+          "evidence": "Net::FTP selected 2001:db8:10::fe; FTP-side endpoint is 2001:db8:90::20"
+        }
+      ],
+      "required_paths": [
+        {
+          "owner": "client-egress",
+          "tuple": "2001:db8:10::10 -> 2001:db8:10::fe:1080/tcp",
+          "note": "open only this from the client host",
+          "committable_in_plan": true
+        },
+        {
+          "owner": "proxy-internal",
+          "tuple": "2001:db8:10::fe:1080 -> 2001:db8:99::fe:1080/tcp",
+          "note": "proxy-to-proxy policy; not controlled by Net::FTP",
+          "committable_in_plan": null
+        },
+        {
+          "owner": "proxy-final-egress",
+          "tuple": "inner-proxy -> 2001:db8:10::fe:50021/tcp",
+          "note": "final proxy egress must allow the host Net::FTP passed to SOCKSSocket.open",
+          "committable_in_plan": null
+        }
+      ],
+      "verdict": "not_committable",
+      "judgment": "TCPSocket 式 SOCKS 套接字的 remote_address 是第一级代理；EPSV 又不带主机，导致 Net::FTP 把数据目标选成代理地址而非 FTP 主机。",
+      "non_committable": [
+        "actual-peer 语义下的 IPv6/EPSV 目标",
+        "必须在预发核对代理套接字的 remote_address"
+      ]
+    },
+    {
+      "id": "proxy2_active_not_committable",
+      "family": "ipv4",
+      "mode": "active",
+      "run": "complete",
+      "proxy_tier_count": 2,
+      "configuration": {
+        "passive_option": false,
+        "passive_after_connect": true,
+        "use_pasv_ip": false,
+        "socks_server_env": "edge-proxy.audit.example:1080",
+        "proxy_peer_mode": "actual_proxy"
+      },
+      "execution_error": null,
+      "control_local_address": {
+        "ip_address": "192.0.2.10",
+        "ip_port": 51009,
+        "note": "client address toward first proxy"
+      },
+      "control_peer_address": {
+        "ip_address": "192.0.2.100",
+        "ip_port": 1080,
+        "note": "actual TCP peer visible to TCPSocket-style #remote_address"
+      },
+      "control_derived_address": {
+        "ip_address": "192.0.2.100"
+      },
+      "server_declared_address": null,
+      "active_advertised_address": {
+        "protocol": "PORT",
+        "eprt_family": null,
+        "ip_address": "192.0.2.10",
+        "port": 50001
+      },
+      "data_connection_target": null,
+      "last_response": "150 File status okay; about to open data connection.\n",
+      "event_counts": {
+        "connect": 1,
+        "proxy_leg": 2,
+        "control_reply": 6,
+        "control_command": 5,
+        "addrinfo_tcp": 1,
+        "listen": 1,
+        "accept": 1,
+        "listener_shutdown": 1,
+        "listener_drain": 1,
+        "listener_close": 1,
+        "socket_close": 2,
+        "socket_shutdown": 1
+      },
+      "checks": [
+        {
+          "name": "control_connect_recorded",
+          "ok": true,
+          "expected_non_committable": false,
+          "evidence": "one connect event with role=control"
+        },
+        {
+          "name": "control_peer_available_to_net_ftp",
+          "ok": true,
+          "expected_non_committable": false,
+          "evidence": "@bare_sock.remote_address.ip_address=192.0.2.100"
+        },
+        {
+          "name": "socks_hook_forces_passive_during_connect",
+          "ok": true,
+          "expected_non_committable": false,
+          "evidence": "passive option=false, passive immediately after connect=true; audit then explicitly re-enables active for that scenario"
+        },
+        {
+          "name": "active_listen_recorded",
+          "ok": true,
+          "expected_non_committable": false,
+          "evidence": "listen={\"ip_address\" => \"192.0.2.10\", \"ip_port\" => 50001, \"note\" => \"recording-listener\"}"
+        },
+        {
+          "name": "active_advertised_command_recorded",
+          "ok": true,
+          "expected_non_committable": false,
+          "evidence": "advertised={protocol: \"PORT\", eprt_family: nil, ip_address: \"192.0.2.10\", port: 50001}"
+        },
+        {
+          "name": "advertised_address_matches_listener",
+          "ok": true,
+          "expected_non_committable": false,
+          "evidence": "PORT/EPRT 192.0.2.10:50001 vs listen 192.0.2.10:50001"
+        },
+        {
+          "name": "listener_uses_control_local_address_family",
+          "ok": true,
+          "expected_non_committable": false,
+          "evidence": "Addrinfo.tcp(192.0.2.10,0) vs bare_sock.local_address=192.0.2.10"
+        },
+        {
+          "name": "accept_recorded",
+          "ok": true,
+          "expected_non_committable": false,
+          "evidence": "accept={\"ip_address\" => \"198.51.100.20\", \"ip_port\" => 20}"
+        },
+        {
+          "name": "preliminary_reply_precedes_accept",
+          "ok": true,
+          "expected_non_committable": false,
+          "evidence": "1XX seq=183, accept seq=184"
+        },
+        {
+          "name": "reverse_proxy_bind_or_callback_operation_observed",
+          "ok": false,
+          "expected_non_committable": true,
+          "evidence": "Net::FTP calls only local listen/PORT/EPRT; recording ledger has no proxy BIND API call"
+        }
+      ],
+      "required_paths": [
+        {
+          "owner": "client-egress",
+          "tuple": "192.0.2.10 -> 192.0.2.100:1080/tcp",
+          "note": "open only this from the client host",
+          "committable_in_plan": true
+        },
+        {
+          "owner": "proxy-internal",
+          "tuple": "192.0.2.100:1080 -> 203.0.113.100:1080/tcp",
+          "note": "proxy-to-proxy policy; not controlled by Net::FTP",
+          "committable_in_plan": null
+        },
+        {
+          "owner": "proxy-callback",
+          "tuple": "FTP data peer -> active listener -> client/proxy chain",
+          "note": "stock Net::FTP has no SOCKS BIND/reverse-proxy call; no committable path",
+          "committable_in_plan": false
+        }
+      ],
+      "verdict": "not_committable",
+      "judgment": "Net::FTP 仅完成本地 listen 与 PORT/EPRT，没有调用 SOCKS BIND 或任何反向代理接口；真实回连通路无法承诺。",
+      "non_committable": [
+        "两级正向代理后的主动回连",
+        "外部通告地址转换"
+      ]
+    }
+  ]
+}

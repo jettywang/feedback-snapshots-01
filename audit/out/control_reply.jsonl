@@ -1,0 +1,60 @@
+{"seq":1,"kind":"control_reply","scenario":"ipv4_active_complete","role":"control","code":"220","line":"220 recording FTP ready.","source":"RecordingSocketDouble#initialize"}
+{"seq":4,"kind":"control_reply","scenario":"ipv4_active_complete","role":"control","code":"331","line":"331 Please specify the password.","source":"RecordingSocketDouble#route"}
+{"seq":6,"kind":"control_reply","scenario":"ipv4_active_complete","role":"control","code":"230","line":"230 Login successful.","source":"RecordingSocketDouble#route"}
+{"seq":8,"kind":"control_reply","scenario":"ipv4_active_complete","role":"control","code":"200","line":"200 Switching to Binary mode.","source":"RecordingSocketDouble#route"}
+{"seq":12,"kind":"control_reply","scenario":"ipv4_active_complete","role":"control","code":"200","line":"200 PORT command successful.","source":"RecordingSocketDouble#route"}
+{"seq":14,"kind":"control_reply","scenario":"ipv4_active_complete","role":"control","code":"150","line":"150 File status okay; about to open data connection.","source":"RecordingSocketDouble#route"}
+{"seq":22,"kind":"control_reply","scenario":"ipv6_active_complete","role":"control","code":"220","line":"220 recording FTP ready.","source":"RecordingSocketDouble#initialize"}
+{"seq":25,"kind":"control_reply","scenario":"ipv6_active_complete","role":"control","code":"331","line":"331 Please specify the password.","source":"RecordingSocketDouble#route"}
+{"seq":27,"kind":"control_reply","scenario":"ipv6_active_complete","role":"control","code":"230","line":"230 Login successful.","source":"RecordingSocketDouble#route"}
+{"seq":29,"kind":"control_reply","scenario":"ipv6_active_complete","role":"control","code":"200","line":"200 Switching to Binary mode.","source":"RecordingSocketDouble#route"}
+{"seq":33,"kind":"control_reply","scenario":"ipv6_active_complete","role":"control","code":"200","line":"200 EPRT command successful.","source":"RecordingSocketDouble#route"}
+{"seq":35,"kind":"control_reply","scenario":"ipv6_active_complete","role":"control","code":"150","line":"150 File status okay; about to open data connection.","source":"RecordingSocketDouble#route"}
+{"seq":43,"kind":"control_reply","scenario":"ipv4_passive_default_peer_complete","role":"control","code":"220","line":"220 recording FTP ready.","source":"RecordingSocketDouble#initialize"}
+{"seq":46,"kind":"control_reply","scenario":"ipv4_passive_default_peer_complete","role":"control","code":"331","line":"331 Please specify the password.","source":"RecordingSocketDouble#route"}
+{"seq":48,"kind":"control_reply","scenario":"ipv4_passive_default_peer_complete","role":"control","code":"230","line":"230 Login successful.","source":"RecordingSocketDouble#route"}
+{"seq":50,"kind":"control_reply","scenario":"ipv4_passive_default_peer_complete","role":"control","code":"200","line":"200 Switching to Binary mode.","source":"RecordingSocketDouble#route"}
+{"seq":52,"kind":"control_reply","scenario":"ipv4_passive_default_peer_complete","role":"control","code":"227","line":"227 Entering Passive Mode (198,51,100,22,195,101).","source":"RecordingSocketDouble#route"}
+{"seq":55,"kind":"control_reply","scenario":"ipv4_passive_default_peer_complete","role":"control","code":"150","line":"150 File status okay; about to open data connection.","source":"RecordingSocketDouble#route"}
+{"seq":59,"kind":"control_reply","scenario":"ipv4_passive_declared_complete","role":"control","code":"220","line":"220 recording FTP ready.","source":"RecordingSocketDouble#initialize"}
+{"seq":62,"kind":"control_reply","scenario":"ipv4_passive_declared_complete","role":"control","code":"331","line":"331 Please specify the password.","source":"RecordingSocketDouble#route"}
+{"seq":64,"kind":"control_reply","scenario":"ipv4_passive_declared_complete","role":"control","code":"230","line":"230 Login successful.","source":"RecordingSocketDouble#route"}
+{"seq":66,"kind":"control_reply","scenario":"ipv4_passive_declared_complete","role":"control","code":"200","line":"200 Switching to Binary mode.","source":"RecordingSocketDouble#route"}
+{"seq":68,"kind":"control_reply","scenario":"ipv4_passive_declared_complete","role":"control","code":"227","line":"227 Entering Passive Mode (198,51,100,22,195,101).","source":"RecordingSocketDouble#route"}
+{"seq":71,"kind":"control_reply","scenario":"ipv4_passive_declared_complete","role":"control","code":"150","line":"150 File status okay; about to open data connection.","source":"RecordingSocketDouble#route"}
+{"seq":75,"kind":"control_reply","scenario":"ipv6_passive_complete","role":"control","code":"220","line":"220 recording FTP ready.","source":"RecordingSocketDouble#initialize"}
+{"seq":78,"kind":"control_reply","scenario":"ipv6_passive_complete","role":"control","code":"331","line":"331 Please specify the password.","source":"RecordingSocketDouble#route"}
+{"seq":80,"kind":"control_reply","scenario":"ipv6_passive_complete","role":"control","code":"230","line":"230 Login successful.","source":"RecordingSocketDouble#route"}
+{"seq":82,"kind":"control_reply","scenario":"ipv6_passive_complete","role":"control","code":"200","line":"200 Switching to Binary mode.","source":"RecordingSocketDouble#route"}
+{"seq":84,"kind":"control_reply","scenario":"ipv6_passive_complete","role":"control","code":"229","line":"229 Entering Extended Passive Mode (|||50021|).","source":"RecordingSocketDouble#route"}
+{"seq":87,"kind":"control_reply","scenario":"ipv6_passive_complete","role":"control","code":"150","line":"150 File status okay; about to open data connection.","source":"RecordingSocketDouble#route"}
+{"seq":91,"kind":"control_reply","scenario":"active_ipv4_preliminary_only","role":"control","code":"220","line":"220 recording FTP ready.","source":"RecordingSocketDouble#initialize"}
+{"seq":94,"kind":"control_reply","scenario":"active_ipv4_preliminary_only","role":"control","code":"331","line":"331 Please specify the password.","source":"RecordingSocketDouble#route"}
+{"seq":96,"kind":"control_reply","scenario":"active_ipv4_preliminary_only","role":"control","code":"230","line":"230 Login successful.","source":"RecordingSocketDouble#route"}
+{"seq":98,"kind":"control_reply","scenario":"active_ipv4_preliminary_only","role":"control","code":"200","line":"200 Switching to Binary mode.","source":"RecordingSocketDouble#route"}
+{"seq":102,"kind":"control_reply","scenario":"active_ipv4_preliminary_only","role":"control","code":"200","line":"200 PORT command successful.","source":"RecordingSocketDouble#route"}
+{"seq":104,"kind":"control_reply","scenario":"active_ipv4_preliminary_only","role":"control","code":"150","line":"150 File status okay; about to open data connection.","source":"RecordingSocketDouble#route"}
+{"seq":111,"kind":"control_reply","scenario":"proxy2_v4_passive_declared_chain","role":"control","code":"220","line":"220 recording FTP ready via SOCKS.","source":"RecordingSocketDouble#initialize"}
+{"seq":113,"kind":"control_reply","scenario":"proxy2_v4_passive_declared_chain","role":"control","code":"331","line":"331 Please specify the password.","source":"RecordingSocketDouble#route"}
+{"seq":115,"kind":"control_reply","scenario":"proxy2_v4_passive_declared_chain","role":"control","code":"230","line":"230 Login successful.","source":"RecordingSocketDouble#route"}
+{"seq":117,"kind":"control_reply","scenario":"proxy2_v4_passive_declared_chain","role":"control","code":"200","line":"200 Switching to Binary mode.","source":"RecordingSocketDouble#route"}
+{"seq":119,"kind":"control_reply","scenario":"proxy2_v4_passive_declared_chain","role":"control","code":"227","line":"227 Entering Passive Mode (198,51,100,22,195,101).","source":"RecordingSocketDouble#route"}
+{"seq":124,"kind":"control_reply","scenario":"proxy2_v4_passive_declared_chain","role":"control","code":"150","line":"150 File status okay; about to open data connection.","source":"RecordingSocketDouble#route"}
+{"seq":131,"kind":"control_reply","scenario":"proxy2_v6_passive_preserved_peer_chain","role":"control","code":"220","line":"220 recording FTP ready via SOCKS.","source":"RecordingSocketDouble#initialize"}
+{"seq":133,"kind":"control_reply","scenario":"proxy2_v6_passive_preserved_peer_chain","role":"control","code":"331","line":"331 Please specify the password.","source":"RecordingSocketDouble#route"}
+{"seq":135,"kind":"control_reply","scenario":"proxy2_v6_passive_preserved_peer_chain","role":"control","code":"230","line":"230 Login successful.","source":"RecordingSocketDouble#route"}
+{"seq":137,"kind":"control_reply","scenario":"proxy2_v6_passive_preserved_peer_chain","role":"control","code":"200","line":"200 Switching to Binary mode.","source":"RecordingSocketDouble#route"}
+{"seq":139,"kind":"control_reply","scenario":"proxy2_v6_passive_preserved_peer_chain","role":"control","code":"229","line":"229 Entering Extended Passive Mode (|||50021|).","source":"RecordingSocketDouble#route"}
+{"seq":144,"kind":"control_reply","scenario":"proxy2_v6_passive_preserved_peer_chain","role":"control","code":"150","line":"150 File status okay; about to open data connection.","source":"RecordingSocketDouble#route"}
+{"seq":151,"kind":"control_reply","scenario":"proxy2_v6_passive_actual_peer_mismatch","role":"control","code":"220","line":"220 recording FTP ready via SOCKS.","source":"RecordingSocketDouble#initialize"}
+{"seq":153,"kind":"control_reply","scenario":"proxy2_v6_passive_actual_peer_mismatch","role":"control","code":"331","line":"331 Please specify the password.","source":"RecordingSocketDouble#route"}
+{"seq":155,"kind":"control_reply","scenario":"proxy2_v6_passive_actual_peer_mismatch","role":"control","code":"230","line":"230 Login successful.","source":"RecordingSocketDouble#route"}
+{"seq":157,"kind":"control_reply","scenario":"proxy2_v6_passive_actual_peer_mismatch","role":"control","code":"200","line":"200 Switching to Binary mode.","source":"RecordingSocketDouble#route"}
+{"seq":159,"kind":"control_reply","scenario":"proxy2_v6_passive_actual_peer_mismatch","role":"control","code":"229","line":"229 Entering Extended Passive Mode (|||50021|).","source":"RecordingSocketDouble#route"}
+{"seq":164,"kind":"control_reply","scenario":"proxy2_v6_passive_actual_peer_mismatch","role":"control","code":"150","line":"150 File status okay; about to open data connection.","source":"RecordingSocketDouble#route"}
+{"seq":171,"kind":"control_reply","scenario":"proxy2_active_not_committable","role":"control","code":"220","line":"220 recording FTP ready via SOCKS.","source":"RecordingSocketDouble#initialize"}
+{"seq":173,"kind":"control_reply","scenario":"proxy2_active_not_committable","role":"control","code":"331","line":"331 Please specify the password.","source":"RecordingSocketDouble#route"}
+{"seq":175,"kind":"control_reply","scenario":"proxy2_active_not_committable","role":"control","code":"230","line":"230 Login successful.","source":"RecordingSocketDouble#route"}
+{"seq":177,"kind":"control_reply","scenario":"proxy2_active_not_committable","role":"control","code":"200","line":"200 Switching to Binary mode.","source":"RecordingSocketDouble#route"}
+{"seq":181,"kind":"control_reply","scenario":"proxy2_active_not_committable","role":"control","code":"200","line":"200 PORT command successful.","source":"RecordingSocketDouble#route"}
+{"seq":183,"kind":"control_reply","scenario":"proxy2_active_not_committable","role":"control","code":"150","line":"150 File status okay; about to open data connection.","source":"RecordingSocketDouble#route"}

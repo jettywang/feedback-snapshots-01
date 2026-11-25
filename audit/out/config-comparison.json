@@ -1,0 +1,59 @@
+{
+  "same_client_identity": {
+    "client_id": "archive-agent-01",
+    "archive_job": "nightly-bundle-to-object-store",
+    "ftp_host": "ftp.archive.example",
+    "credentials_ref": "vault://archive/ftp"
+  },
+  "offline": true,
+  "rows": [
+    {
+      "key": "Net::FTP passive",
+      "before": false,
+      "after": true,
+      "impact": "迁移后使用出站 PASV/EPSV，避免在客户端开放主动回连监听。",
+      "changed": true
+    },
+    {
+      "key": "use_pasv_ip",
+      "before": false,
+      "after": true,
+      "impact": "true 时采用 227 明示主机；false 时用 @bare_sock.remote_address 推导。",
+      "changed": true
+    },
+    {
+      "key": "SOCKS_SERVER",
+      "before": null,
+      "after": "edge-proxy.audit.example:1080",
+      "impact": "这是本版 Net::FTP 唯一识别的代理钩子；两级链本身在代码之外。",
+      "changed": true
+    },
+    {
+      "key": "proxy_chain_length",
+      "before": 0,
+      "after": 2,
+      "impact": "Net::FTP 没有两级代理客户端配置项。",
+      "changed": true
+    },
+    {
+      "key": "client_ingress_rules",
+      "before": 2,
+      "after": 0,
+      "impact": "改为被动后，客户端侧 FTP 回连入站规则降为 0。",
+      "changed": true
+    },
+    {
+      "key": "client_egress_rules",
+      "before": [
+        "client_ipv4 -> ftp_ipv4:21/tcp",
+        "client_ipv6 -> ftp_ipv6:21/tcp"
+      ],
+      "after": [
+        "client_ipv4 -> edge_proxy_ipv4:1080/tcp",
+        "client_ipv6 -> edge_proxy_ipv6:1080/tcp"
+      ],
+      "impact": "分段后，客户端主机只需放行到第一级代理的出站。",
+      "changed": true
+    }
+  ]
+}

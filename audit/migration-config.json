@@ -1,0 +1,95 @@
+{
+  "client_id": "archive-agent-01",
+  "archive_job": "nightly-bundle-to-object-store",
+  "ftp_host": "ftp.archive.example",
+  "credentials_ref": "vault://archive/ftp",
+  "offline_only": true,
+  "reference_endpoints": {
+    "client_ipv4": "192.0.2.10",
+    "client_ipv6": "2001:db8:10::10",
+    "ftp_ipv4": "198.51.100.20",
+    "ftp_ipv6": "2001:db8:90::20",
+    "ftp_pasv_declared_ipv4": "198.51.100.22",
+    "pasv_port": 50021,
+    "active_double_port": 50001,
+    "ftp_data_source_port_reference": 20,
+    "edge_proxy_ipv4": "192.0.2.100",
+    "edge_proxy_ipv6": "2001:db8:10::fe",
+    "inner_proxy_ipv4": "203.0.113.100",
+    "inner_proxy_ipv6": "2001:db8:99::fe",
+    "proxy_port": 1080
+  },
+  "before": {
+    "label": "before-migration-direct-active",
+    "net_ftp_options": {
+      "passive": false,
+      "use_pasv_ip": false,
+      "binary": true,
+      "open_timeout": 30,
+      "read_timeout": 60
+    },
+    "env": {
+      "SOCKS_SERVER": null
+    },
+    "proxy_chain": [],
+    "client_egress": [
+      "client_ipv4 -> ftp_ipv4:21/tcp",
+      "client_ipv6 -> ftp_ipv6:21/tcp"
+    ],
+    "client_ingress": [
+      "ftp_ipv4:ftp_data_source_port_reference/tcp -> client_ipv4:<active-port>/tcp",
+      "ftp_ipv6:ftp_data_source_port_reference/tcp -> client_ipv6:<active-port>/tcp"
+    ]
+  },
+  "after": {
+    "label": "after-migration-segmented-two-proxy-passive",
+    "net_ftp_options": {
+      "passive": true,
+      "use_pasv_ip": true,
+      "binary": true,
+      "open_timeout": 30,
+      "read_timeout": 60
+    },
+    "env": {
+      "SOCKS_SERVER": "edge-proxy.audit.example:1080"
+    },
+    "proxy_chain": [
+      {
+        "hop": 1,
+        "name": "edge-proxy",
+        "ipv4": "192.0.2.100",
+        "ipv6": "2001:db8:10::fe",
+        "port": 1080
+      },
+      {
+        "hop": 2,
+        "name": "inner-proxy",
+        "ipv4": "203.0.113.100",
+        "ipv6": "2001:db8:99::fe",
+        "port": 1080
+      }
+    ],
+    "proxy_mode_assumption": "external chained SOCKS/CONNECT service; Net::FTP has no two-proxy option",
+    "client_egress": [
+      "client_ipv4 -> edge_proxy_ipv4:1080/tcp",
+      "client_ipv6 -> edge_proxy_ipv6:1080/tcp"
+    ],
+    "client_ingress": [],
+    "proxy_to_proxy": [
+      "edge_proxy_ipv4 -> inner_proxy_ipv4:1080/tcp",
+      "edge_proxy_ipv6 -> inner_proxy_ipv6:1080/tcp"
+    ],
+    "proxy_final_egress": [
+      "inner_proxy_ipv4 -> ftp_ipv4:21/tcp",
+      "inner_proxy_ipv4 -> ftp_pasv_declared_ipv4:pasv_port/tcp",
+      "inner_proxy_ipv6 -> ftp_ipv6:21/tcp",
+      "inner_proxy_ipv6 -> ftp_ipv6:pasv_port/tcp"
+    ]
+  },
+  "same_client_must_not_change": [
+    "client_id",
+    "archive_job",
+    "ftp_host",
+    "credentials_ref"
+  ]
+}
