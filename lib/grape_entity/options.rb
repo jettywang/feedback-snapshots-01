@@ -9,7 +9,13 @@ module Grape
 
       attr_reader :opts_hash
 
-      def_delegators :opts_hash, :dig, :key?, :fetch, :[], :empty?
+      def_delegators :opts_hash, :dig, :key?, :fetch, :empty?
+
+      THREAD_STACK_KEY = :grape_entity_attr_path
+
+      def [](key)
+        key == :attr_path ? current_attr_path : opts_hash[key]
+      end
 
       def initialize(opts_hash = {})
         @opts_hash = opts_hash
@@ -17,6 +23,7 @@ module Grape
         @has_except = !opts_hash[:except].nil?
         @for_nesting_cache = {}
         @should_return_key_cache = {}
+        @attr_path_base = (opts_hash[:attr_path] || []).dup
       end
 
       def merge(new_opts)
@@ -85,14 +92,29 @@ module Grape
       def with_attr_path(part)
         return yield unless part
 
-        stack = (opts_hash[:attr_path] ||= [])
-        stack.push part
-        result = yield
-        stack.pop
-        result
+        stack = thread_attr_path
+        previous_size = stack.size
+        stack.push(part)
+        begin
+          yield
+        ensure
+          # Roll back even when the representation fails so a sibling or a
+          # later request never inherits the failed child's path.
+          stack.pop(stack.size - previous_size)
+        end
       end
 
       private
+
+      def current_attr_path
+        stack = Thread.current[THREAD_STACK_KEY]&.[](object_id)
+        stack ? stack.dup : @attr_path_base.dup
+      end
+
+      def thread_attr_path
+        threads = (Thread.current[THREAD_STACK_KEY] ||= {})
+        threads[object_id] ||= @attr_path_base.dup
+      end
 
       def build_for_nesting(key)
         Options.new(
@@ -100,7 +122,7 @@ module Grape
             root: nil,
             only: only_fields(key),
             except: except_fields(key),
-            attr_path: opts_hash[:attr_path]
+            attr_path: current_attr_path
           )
         )
       end
