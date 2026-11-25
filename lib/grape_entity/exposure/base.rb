@@ -8,6 +8,7 @@ module Grape
     module Exposure
       class Base
         attr_reader :attribute, :is_safe, :documentation, :override, :conditions, :for_merge
+        attr_accessor :source_location
 
         def self.new(attribute, options, conditions, ...)
           super(attribute, options, conditions).tap { |e| e.setup(...) }
@@ -25,10 +26,13 @@ module Grape
           @documentation = options[:documentation]
           @override = options[:override]
           @conditions = conditions
+          @source_location = Grape::Entity.declaration_location(caller_locations)
         end
 
         def dup(&block)
-          self.class.new(*dup_args, &block)
+          exposure = self.class.new(*dup_args, &block)
+          exposure.source_location = source_location
+          exposure
         end
 
         def dup_args
@@ -105,6 +109,9 @@ module Grape
         end
 
         def should_expose?(entity, options)
+          trace = options.decision_trace
+          return trace.record(self, entity, options) if trace
+
           should_return_key?(options) && conditions_met?(entity, options)
         end
 

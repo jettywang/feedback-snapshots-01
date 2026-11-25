@@ -154,6 +154,42 @@ expose :ip, if: { type: :full } # exposed if options :type has a value of :full
 expose :ip, unless: ... # the opposite of :if
 ```
 
+##### Internal Decision Trace
+
+When the same entity exposes fields differently per role, an optional, internal
+`Grape::Entity::DecisionTrace` records why each field was shown or hidden. It is
+opt-in through the `:decision_trace` representation option and never changes the
+rendered output: conditions still run once, in declaration order, with the same
+short-circuiting.
+
+```ruby
+class UserEntity < Grape::Entity
+  expose :name
+  expose :email, if: ->(user, options) { options[:role] == :admin }
+end
+
+trace = Grape::Entity::DecisionTrace.new
+entity = UserEntity.new(user, role: :guest, decision_trace: trace)
+entity.serializable_hash # => { name: "Ada" }
+
+entity.explain_decisions
+# [{ field: :name, entity: "UserEntity", outcome: :visible, declared_at: "...", conditions: [] },
+#  { field: :email, entity: "UserEntity", outcome: :hidden, declared_at: "...",
+#    conditions: [{ kind: "BlockCondition", inverse: false, result: false,
+#                   status: :unmet, declared_at: "app/entities/user_entity.rb:3" }] }]
+
+entity.decision_counters
+# => { evaluated_conditions: 1, met_conditions: 0, unmet_conditions: 1,
+#      not_executed_conditions: 0, visible_fields: 1, hidden_fields: 1 }
+```
+
+Each condition is reported as `:met`, `:unmet`, or `:not_executed` when an
+earlier condition already rejected the field (or `:only`/`:except` filtered it
+out). `declared_at` points at the source line that declared the exposure or
+condition, so a condition inherited from a parent entity is distinguishable from
+one defined later in a subclass. Building the explanation only reads recorded
+data; it never invokes a user supplied condition a second time.
+
 #### Safe Exposure
 
 Don't raise an exception and expose as nil, even if the :x cannot be evaluated.

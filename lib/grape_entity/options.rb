@@ -11,6 +11,10 @@ module Grape
 
       def_delegators :opts_hash, :dig, :key?, :fetch, :[], :empty?
 
+      def decision_trace
+        opts_hash[:decision_trace]
+      end
+
       def initialize(opts_hash = {})
         @opts_hash = opts_hash
         @has_only = !opts_hash[:only].nil?

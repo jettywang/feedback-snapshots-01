@@ -8,6 +8,7 @@
 #### Features
 
 * Your contribution here.
+* Add an optional, internal `Grape::Entity::DecisionTrace` (enabled via the `:decision_trace` representation option) that records per-field role visibility decisions (`:met`, `:unmet`, `:not_executed`) with the source location that declared each condition, distinguishing inherited conditions from subclass-defined ones. Tracing reuses the single rendering pass, preserves short-circuiting, and never re-evaluates user conditions or alters the rendered hash.
 
 
 ### 1.1.0 (2026-06-05)

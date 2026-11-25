@@ -102,6 +102,15 @@ module Grape
         @root_exposure ||= Exposure.new(nil, nesting: true)
       end
 
+      # First frame outside of the grape-entity library itself. Used to tag
+      # conditions and exposures with the user code location that declared
+      # them, so an internal DecisionTrace can point compliance reviewers at
+      # the exact source line behind a role decision.
+      def declaration_location(locations)
+        lib_root = File.expand_path('..', __dir__)
+        locations.find { |location| location.absolute_path && !location.absolute_path.start_with?(lib_root) }
+      end
+
       attr_writer :root_exposure, :formatters
 
       # Returns all formatters that are registered for this and it's ancestors
@@ -488,6 +497,26 @@ module Grape
       @object = object
       @options = options.is_a?(Options) ? options : Options.new(options)
       @delegator = Delegator.new(object)
+      @decision_trace = @options.decision_trace
+    end
+
+    # The optional, internal DecisionTrace attached through the
+    # +:decision_trace+ representation option. Rendered output never contains
+    # this object; it only collects audit data about role-based visibility.
+    attr_reader :decision_trace
+
+    # Read-only explanation of the visibility decisions recorded while
+    # rendering this entity. Returns an empty array when no trace was
+    # attached, and never re-evaluates a condition.
+    def explain_decisions(field = nil)
+      return [] unless @decision_trace
+
+      @decision_trace.explain(field)
+    end
+
+    # Counters from the attached trace, or nil when tracing is disabled.
+    def decision_counters
+      @decision_trace&.counters
     end
 
     def root_exposures
