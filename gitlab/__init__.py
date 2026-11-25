@@ -18,6 +18,12 @@
 import warnings
 
 import gitlab.config  # noqa: F401
+from gitlab.boundary import (  # noqa: F401
+    AllowedMigration,
+    AnonymousIdentityAuth,
+    BoundaryDecision,
+    NetworkBoundary,
+)
 from gitlab._version import (  # noqa: F401
     __author__,
     __copyright__,
@@ -27,6 +33,7 @@ from gitlab._version import (  # noqa: F401
     __version__,
 )
 from gitlab.client import AsyncGraphQL, Gitlab, GitlabList, GraphQL  # noqa: F401
+from gitlab.exceptions import BoundaryViolation  # noqa: F401
 from gitlab.exceptions import *  # noqa: F401,F403
 
 warnings.filterwarnings("default", category=DeprecationWarning, module="^gitlab")
@@ -41,6 +48,11 @@ __all__ = [
     "__version__",
     "Gitlab",
     "GitlabList",
+    "AllowedMigration",
+    "AnonymousIdentityAuth",
+    "BoundaryDecision",
+    "BoundaryViolation",
+    "NetworkBoundary",
     "AsyncGraphQL",
     "GraphQL",
 ]

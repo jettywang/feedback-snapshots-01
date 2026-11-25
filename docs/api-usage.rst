@@ -401,6 +401,55 @@ The generator exposes extra listing information as received from the server:
 .. note::
    If ``page`` and ``iterator=True`` are used together, the latter is ignored.
 
+Network boundary and reverse proxies
+------------------------------------
+
+When GitLab is served under a reverse-proxy prefix such as
+``https://gitlab.example/internal/gitlab``, python-gitlab only follows
+response-driven pagination links that remain on that origin and below the
+same path prefix. Changing ``page`` or ``per_page`` query parameters does not
+change this boundary.
+
+A link to another origin is blocked unless it is explicitly admitted as a
+migration. Each migration independently declares whether GitLab identity
+headers (``PRIVATE-TOKEN``, ``JOB-TOKEN`` or ``Authorization``) may be carried
+to it:
+
+.. code-block:: python
+
+   from gitlab import AllowedMigration, Gitlab
+
+   gl = Gitlab(
+       "https://gitlab.example/internal/gitlab",
+       private_token=token,
+       allowed_migrations=[
+           # Follow the mirror, but do not send the GitLab token.
+           "https://read-only-mirror.example/internal/gitlab",
+           # This destination is allowed to receive the GitLab identity.
+           AllowedMigration(
+               "https://identity-mirror.example/internal/gitlab",
+               carry_gitlab_identity=True,
+           ),
+       ],
+   )
+
+If a forbidden page is encountered, the iterator raises
+``gitlab.BoundaryViolation`` before opening a connection to that destination.
+The iterator keeps a checkpoint:
+
+.. code-block:: python
+
+   pages = gl.http_list("/projects", iterator=True)
+   try:
+       projects = list(pages)
+   except gitlab.BoundaryViolation:
+       print(pages.last_completed_page)
+       print(pages.completed_pages)
+       print(pages.iteration_state)
+
+``completed_pages`` contains pages whose items have all been handed to the
+caller, while ``loaded_pages`` contains pages successfully received and parsed.
+
 Sudo
 ====
 

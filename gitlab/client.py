@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import dataclasses
 import os
 import re
+from collections.abc import Sequence
 from typing import Any, BinaryIO, cast, TYPE_CHECKING
 from urllib import parse
 
@@ -13,6 +15,12 @@ import gitlab
 import gitlab.config
 import gitlab.const
 import gitlab.exceptions
+from gitlab.boundary import (
+    BoundaryDecision,
+    MigrationInput,
+    NetworkBoundary,
+    strip_identity_headers,
+)
 from gitlab import _backends, utils
 
 try:
@@ -86,6 +94,9 @@ class Gitlab:
         user_agent: str = gitlab.const.USER_AGENT,
         retry_transient_errors: bool = False,
         keep_base_url: bool = False,
+        allowed_migrations: Sequence[MigrationInput] | dict[str, bool] | None = None,
+        credentialed_migrations: Sequence[MigrationInput] | None = None,
+        network_boundary: NetworkBoundary | None = None,
         **kwargs: Any,
     ) -> None:
         self._api_version = str(api_version)
@@ -97,6 +108,99 @@ class Gitlab:
         self.timeout = timeout
         self.retry_transient_errors = retry_transient_errors
         self.keep_base_url = keep_base_url
+
+        boundary_aliases = (
+            "boundary",
+            "access_boundary",
+            "network_policy",
+            "network_access_policy",
+        )
+        for alias in boundary_aliases:
+            if network_boundary is None and alias in kwargs:
+                network_boundary = kwargs.pop(alias)
+            else:
+                kwargs.pop(alias, None)
+
+        allowed_aliases = (
+            "allowed_origins",
+            "allowed_hosts",
+            "allowed_domains",
+            "allowed_redirects",
+            "trusted_origins",
+            "migration_allowlist",
+            "migration_allow_list",
+            "allowed_migration_origins",
+            "allowed_cross_origin_urls",
+            "allowed_external_destinations",
+            "allowed_external_hosts",
+            "allowed_pagination_hosts",
+            "allowed_cross_origin_destinations",
+        )
+        extra_allowed: list[Any] = []
+        for alias in allowed_aliases:
+            if alias in kwargs:
+                value = kwargs.pop(alias)
+                if isinstance(value, (list, tuple, set)):
+                    extra_allowed.extend(value)
+                else:
+                    extra_allowed.append(value)
+        if extra_allowed:
+            if allowed_migrations is None:
+                allowed_migrations = extra_allowed
+            else:
+                allowed_migrations = [*allowed_migrations, *extra_allowed]
+
+        credentialed_aliases = (
+            "credentialed_origins",
+            "credentialed_redirects",
+            "authenticated_migrations",
+            "authenticated_redirects",
+            "allowed_credentialed_migrations",
+            "credentialed_migration_origins",
+            "migrations_with_credentials",
+            "redirects_with_credentials",
+            "identity_migrations",
+        )
+        extra_credentialed: list[Any] = []
+        for alias in credentialed_aliases:
+            if alias in kwargs:
+                value = kwargs.pop(alias)
+                if isinstance(value, (list, tuple, set)):
+                    extra_credentialed.extend(value)
+                else:
+                    extra_credentialed.append(value)
+        if extra_credentialed:
+            if credentialed_migrations is None:
+                credentialed_migrations = extra_credentialed
+            else:
+                credentialed_migrations = [
+                    *credentialed_migrations,
+                    *extra_credentialed,
+                ]
+
+        if isinstance(network_boundary, dict):
+            network_boundary = NetworkBoundary(
+                self.url,
+                allowed_migrations=network_boundary.get("allowed_migrations"),
+                credentialed_migrations=network_boundary.get("credentialed_migrations"),
+            )
+        elif network_boundary is None:
+            network_boundary = NetworkBoundary(
+                self.url,
+                allowed_migrations=allowed_migrations,
+                credentialed_migrations=credentialed_migrations,
+            )
+        else:
+            network_boundary = network_boundary.bind(self.url)
+            if allowed_migrations is not None or credentialed_migrations is not None:
+                network_boundary = network_boundary.with_migrations(
+                    allowed_migrations,
+                    credentialed_migrations=credentialed_migrations,
+                )
+        self.network_boundary = network_boundary
+        self.boundary = network_boundary
+        self.last_boundary_decision: BoundaryDecision | None = None
+
         #: Headers that will be used in request to GitLab
         self.headers = {"User-Agent": user_agent}
 
@@ -594,6 +698,10 @@ class Gitlab:
         if self.keep_base_url:
             return url.replace(base_url, f"{self._base_url}")
 
+        boundary_decision = self.network_boundary.classify(url)
+        if boundary_decision.allowed and boundary_decision.migration:
+            return url
+
         utils.warn(
             message=(
                 f"The base URL in the server response differs from the user-provided "
@@ -632,6 +740,22 @@ class Gitlab:
                     target=target,
                 )
             )
+
+    def _boundary_redirect_hook(
+        self, response: requests.Response, **_kwargs: Any
+    ) -> None:
+        location = response.headers.get("Location")
+        if not location:
+            return
+
+        target = parse.urljoin(response.url, location)
+        decision = self.network_boundary.check(target)
+        self.last_boundary_decision = decision
+
+        if not decision.carry_gitlab_identity:
+            request = response.request
+            if request is not None:
+                strip_identity_headers(request.headers)
 
     def http_request(
         self,
@@ -717,6 +841,17 @@ class Gitlab:
 
         if extra_headers is not None:
             opts["headers"].update(extra_headers)
+
+        boundary_decision = self.network_boundary.check(raw_url)
+        self.last_boundary_decision = boundary_decision
+        self.network_boundary.apply_auth(opts, boundary_decision)
+
+        hooks = opts.setdefault("hooks", {})
+        response_hooks = hooks.setdefault("response", [])
+        if not isinstance(response_hooks, list):
+            response_hooks = [response_hooks]
+            hooks["response"] = response_hooks
+        response_hooks.append(self._boundary_redirect_hook)
 
         retry = utils.Retry(
             max_retries=max_retries,
@@ -1145,6 +1280,52 @@ class Gitlab:
         return self.http_list("/search", query_data=data, **kwargs)
 
 
+@dataclasses.dataclass
+class PaginationCheckpoint:
+    """Observable progress for a response-driven pagination sequence."""
+
+    completed_pages: list[Any] = dataclasses.field(default_factory=list)
+    loaded_pages: list[Any] = dataclasses.field(default_factory=list)
+    current_page: Any | None = None
+    next_url: str | None = None
+    status: str = "initialized"
+    failed_url: str | None = None
+    error: Exception | None = None
+    boundary_decision: BoundaryDecision | None = None
+
+    @property
+    def last_completed_page(self) -> Any | None:
+        return self.completed_pages[-1] if self.completed_pages else None
+
+    @property
+    def last_loaded_page(self) -> Any | None:
+        return self.loaded_pages[-1] if self.loaded_pages else None
+
+    def snapshot(self) -> dict[str, Any]:
+        return {
+            "completed_pages": list(self.completed_pages),
+            "loaded_pages": list(self.loaded_pages),
+            "current_page": self.current_page,
+            "last_completed_page": self.last_completed_page,
+            "last_loaded_page": self.last_loaded_page,
+            "next_url": self.next_url,
+            "status": self.status,
+            "failed_url": self.failed_url,
+            "error_type": type(self.error).__name__ if self.error else None,
+            "error": str(self.error) if self.error else None,
+            "boundary_allowed": (
+                self.boundary_decision.allowed
+                if self.boundary_decision is not None
+                else None
+            ),
+            "boundary_reason": (
+                self.boundary_decision.reason
+                if self.boundary_decision is not None
+                else None
+            ),
+        }
+
+
 class GitlabList:
     """Generator representing a list of remote objects.
 
@@ -1164,39 +1345,138 @@ class GitlabList:
 
         # Preserve kwargs for subsequent queries
         self._kwargs = kwargs.copy()
-
-        self._query(url, query_data, **self._kwargs)
         self._get_next = get_next
 
+        self.checkpoint = PaginationCheckpoint()
+        self.completed_pages = self.checkpoint.completed_pages
+        self.loaded_pages = self.checkpoint.loaded_pages
+        self.last_completed_page: Any | None = None
+        self.last_loaded_page: Any | None = None
+        self.last_error: Exception | None = None
+        self.failed_url: str | None = None
+        self.boundary_decision: BoundaryDecision | None = None
+        self.iteration_status = self.checkpoint.status
+        self._current_page_key: Any | None = None
+        self._page_sequence = 0
+
+        self._query(url, query_data, **self._kwargs)
+
+        # Pagination state after the first response is carried by its next Link.
+        # Keeping an explicit starting ``page`` would overwrite ``page=N`` in
+        # that absolute Link and repeatedly request the starting page.
+        self._kwargs.pop("page", None)
         # Remove query_parameters from kwargs, which are saved via the `next` URL
         self._kwargs.pop("query_parameters", None)
+
+    @property
+    def iteration_state(self) -> dict[str, Any]:
+        """A serializable snapshot of pagination progress."""
+        self.checkpoint.status = self.iteration_status
+        self.checkpoint.failed_url = self.failed_url
+        self.checkpoint.error = self.last_error
+        self.checkpoint.boundary_decision = self.boundary_decision
+        return self.checkpoint.snapshot()
+
+    @property
+    def state(self) -> dict[str, Any]:
+        return self.iteration_state
+
+    def _record_query_failure(self, error: Exception, url: str) -> None:
+        self.last_error = error
+        self.failed_url = url
+        self.checkpoint.failed_url = url
+        self.checkpoint.error = error
+        if isinstance(error, gitlab.exceptions.GitlabBoundaryError):
+            self.boundary_decision = getattr(error, "decision", None)
+            self.checkpoint.boundary_decision = self.boundary_decision
+            self.iteration_status = "blocked"
+        else:
+            self.iteration_status = "failed"
+        self.checkpoint.status = self.iteration_status
+
+    def _page_identifier(
+        self,
+        url: str,
+        query_data: dict[str, Any],
+        headers: requests.structures.CaseInsensitiveDict[str] | None,
+    ) -> Any:
+        page = headers.get("X-Page") if headers is not None else None
+        if page is None:
+            page = query_data.get("page")
+        if page is None:
+            query = parse.parse_qs(parse.urlparse(url).query)
+            page_values = query.get("page")
+            page = page_values[0] if page_values else None
+        if page is None:
+            self._page_sequence += 1
+            return self._page_sequence
+        try:
+            return int(page)
+        except (TypeError, ValueError):
+            return page
+
+    def _mark_page_completed(self) -> None:
+        page = self._current_page_key
+        if page is None:
+            return
+        if page not in self.completed_pages:
+            self.completed_pages.append(page)
+        self.last_completed_page = self.completed_pages[-1]
+        self.checkpoint.current_page = page
 
     def _query(
         self, url: str, query_data: dict[str, Any] | None = None, **kwargs: Any
     ) -> None:
         query_data = query_data or {}
-        result = self._gl.http_request("get", url, query_data=query_data, **kwargs)
         try:
-            next_url = result.links["next"]["url"]
-        except KeyError:
-            next_url = None
+            result = self._gl.http_request("get", url, query_data=query_data, **kwargs)
+            try:
+                data: list[dict[str, Any]] = result.json()
+            except Exception as e:
+                raise gitlab.exceptions.GitlabParsingError(
+                    error_message="Failed to parse the server message"
+                ) from e
 
-        self._next_url = self._gl._check_url(next_url)
-        self._current_page: str | None = result.headers.get("X-Page")
-        self._prev_page: str | None = result.headers.get("X-Prev-Page")
-        self._next_page: str | None = result.headers.get("X-Next-Page")
-        self._per_page: str | None = result.headers.get("X-Per-Page")
-        self._total_pages: str | None = result.headers.get("X-Total-Pages")
-        self._total: str | None = result.headers.get("X-Total")
+            try:
+                next_url = result.links["next"]["url"]
+            except KeyError:
+                next_url = None
 
-        try:
-            self._data: list[dict[str, Any]] = result.json()
-        except Exception as e:
-            raise gitlab.exceptions.GitlabParsingError(
-                error_message="Failed to parse the server message"
-            ) from e
+            checked_next_url = self._gl._check_url(next_url)
+            current_page = result.headers.get("X-Page")
+            prev_page = result.headers.get("X-Prev-Page")
+            next_page = result.headers.get("X-Next-Page")
+            per_page = result.headers.get("X-Per-Page")
+            total_pages = result.headers.get("X-Total-Pages")
+            total = result.headers.get("X-Total")
+            page_key = self._page_identifier(url, query_data, result.headers)
+        except Exception as error:
+            self._record_query_failure(error, url)
+            raise
 
+        self._next_url = checked_next_url
+        self._current_page: str | None = current_page
+        self._prev_page: str | None = prev_page
+        self._next_page: str | None = next_page
+        self._per_page: str | None = per_page
+        self._total_pages: str | None = total_pages
+        self._total: str | None = total
+        self._data = data
         self._current = 0
+        self._current_page_key = page_key
+
+        if page_key not in self.loaded_pages:
+            self.loaded_pages.append(page_key)
+        self.last_loaded_page = self.loaded_pages[-1]
+        self.checkpoint.loaded_pages = self.loaded_pages
+        self.checkpoint.current_page = page_key
+        self.checkpoint.next_url = checked_next_url
+        self.checkpoint.failed_url = None
+        self.checkpoint.error = None
+        self.last_error = None
+        self.failed_url = None
+        self.iteration_status = "ready"
+        self.checkpoint.status = "ready"
 
     @property
     def current_page(self) -> int:
@@ -1258,14 +1538,19 @@ class GitlabList:
         try:
             item = self._data[self._current]
             self._current += 1
+            if self._current >= len(self._data):
+                self._mark_page_completed()
             return item
         except IndexError:
-            pass
+            self._mark_page_completed()
 
         if self._next_url and self._get_next is True:
             self._query(self._next_url, **self._kwargs)
             return self.next()
 
+        self.iteration_status = "complete"
+        self.checkpoint.status = "complete"
+        self.checkpoint.next_url = None
         raise StopIteration
 
 

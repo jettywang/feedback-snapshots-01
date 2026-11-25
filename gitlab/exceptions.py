@@ -42,6 +42,33 @@ class RedirectError(GitlabError):
     pass
 
 
+class GitlabBoundaryError(GitlabError):
+    """A request or pagination target is outside the configured boundary."""
+
+    def __init__(
+        self,
+        error_message: str | bytes = "",
+        response_code: int | None = None,
+        response_body: bytes | None = None,
+        decision: Any | None = None,
+    ) -> None:
+        super().__init__(
+            error_message=error_message,
+            response_code=response_code,
+            response_body=response_body,
+        )
+        self.decision = decision
+
+
+class BoundaryViolation(GitlabBoundaryError):
+    pass
+
+
+# Compatibility-friendly aliases for the network boundary terminology.
+BoundaryError = GitlabBoundaryError
+NetworkBoundaryError = GitlabBoundaryError
+
+
 class GitlabParsingError(GitlabError):
     pass
 
@@ -354,11 +381,13 @@ def on_http_error(error: type[Exception]) -> Callable[[__F], __F]:
 
 # Export manually to keep mypy happy
 __all__ = [
+    "BoundaryError",
     "GitlabActivateError",
     "GitlabAttachFileError",
     "GitlabAuthenticationError",
     "GitlabBanError",
     "GitlabBlockError",
+    "GitlabBoundaryError",
     "GitlabBuildCancelError",
     "GitlabBuildEraseError",
     "GitlabBuildPlayError",
@@ -426,5 +455,6 @@ __all__ = [
     "GitlabUserApproveError",
     "GitlabUserRejectError",
     "GitlabVerifyError",
+    "NetworkBoundaryError",
     "RedirectError",
 ]
