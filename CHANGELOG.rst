@@ -1,7 +1,9 @@
 Next Release (TBD)
 ==================
 
-* No changes yet.
+* Added ``ParsedResult.snapshot()``, which returns an independent,
+  JSON-serializable deep copy of the compiled AST for diagnostic
+  tooling without affecting the compilation cache.
 
 
 1.1.0

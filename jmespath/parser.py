@@ -25,6 +25,8 @@ A few notes on the implementation.
   consuming from the token iterator one token at a time.
 
 """
+import copy
+
 from jmespath import lexer
 from jmespath.compat import with_repr_method
 from jmespath import ast
@@ -515,6 +517,19 @@ class ParsedResult(object):
         interpreter = visitor.TreeInterpreter(options)
         result = interpreter.visit(self.parsed, value)
         return result
+
+    def snapshot(self):
+        """Return an independent, serializable snapshot of the AST.
+
+        This returns a deep copy of the parsed AST made up entirely of
+        plain lists and dictionaries, so it can be serialized (for
+        example with ``json.dumps``) and handed to diagnostic tooling.
+        Mutating the returned tree never affects this ``ParsedResult``,
+        other compiled expressions, or the shared compilation cache;
+        they keep pointing at the original cached tree.
+
+        """
+        return copy.deepcopy(self.parsed)
 
     def _render_dot_file(self):
         """Render the parsed AST as a dot file.

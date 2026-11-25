@@ -1,4 +1,5 @@
 #!/usr/bin/env python
+import json
 import re
 import random
 import string
@@ -388,6 +389,112 @@ class TestRenderGraphvizFile(unittest.TestCase):
             'field2 [label="field(foo)"]\n'
             '  subexpression1 -> field3\n'
             'field3 [label="field(bar)"]\n}')
+
+
+class TestParsedResultSnapshot(unittest.TestCase):
+    EXPRESSION = 'foo[*].{name: bar}'
+    DATA = {'foo': [{'bar': 'one'}, {'bar': 'two'}]}
+    EXPECTED = [{'name': 'one'}, {'name': 'two'}]
+
+    def setUp(self):
+        parser.Parser.purge()
+
+    def tearDown(self):
+        parser.Parser.purge()
+
+    def _annotate(self, node):
+        if isinstance(node, dict):
+            node['diagnostics'] = 'visited %s' % node['type']
+            for child in node.get('children', []):
+                self._annotate(child)
+
+    def test_snapshot_is_deep_copy_with_equal_content(self):
+        parsed = parser.Parser().parse(self.EXPRESSION)
+        snapshot = parsed.snapshot()
+        self.assertEqual(snapshot, parsed.parsed)
+        self.assertIsNot(snapshot, parsed.parsed)
+        snapshot['diagnostics'] = 'mutated'
+        self.assertNotIn('diagnostics', parsed.parsed)
+        self.assertEqual(parser.Parser().parse(self.EXPRESSION).parsed,
+                         parsed.parsed)
+
+    def test_snapshot_is_json_serializable(self):
+        parsed = parser.Parser().parse('foo[0:2].bar')
+        snapshot = parsed.snapshot()
+        roundtripped = json.loads(json.dumps(snapshot))
+        self.assertEqual(roundtripped, snapshot)
+
+    def test_diagnostics_and_cache_lifecycle(self):
+        p = parser.Parser()
+
+        parse_calls = []
+        original_do_parse = parser.Parser._do_parse
+
+        def counting_do_parse(self, expression):
+            parse_calls.append(expression)
+            return original_do_parse(self, expression)
+
+        parser.Parser._do_parse = counting_do_parse
+        try:
+            # First compile performs the actual parse work.
+            parsed = p.parse(self.EXPRESSION)
+            self.assertEqual(parse_calls, [self.EXPRESSION])
+
+            # A diagnostic consumer takes a snapshot and annotates its
+            # own tree while two queries run against the shared compile.
+            snapshot = parsed.snapshot()
+            default_options = visitor.Options()
+            ordered_options = visitor.Options(dict_cls=OrderedDict)
+
+            query_results = {}
+
+            def query_default():
+                query_results['default'] = parsed.search(
+                    self.DATA, options=default_options)
+
+            def query_ordered():
+                query_results['ordered'] = parsed.search(
+                    self.DATA, options=ordered_options)
+
+            threads = [threading.Thread(target=query_default),
+                       threading.Thread(target=query_ordered)]
+            for thread in threads:
+                thread.start()
+            self._annotate(snapshot)
+            for thread in threads:
+                thread.join()
+
+            # Both real queries evaluate the same expression with their
+            # own Options and get independently built result containers.
+            self.assertEqual(query_results['default'], self.EXPECTED)
+            self.assertEqual(query_results['ordered'], self.EXPECTED)
+            self.assertNotIsInstance(query_results['default'][0],
+                                     OrderedDict)
+            self.assertIsInstance(query_results['ordered'][0],
+                                  OrderedDict)
+
+            # The snapshot owns its lifecycle; annotations never leak
+            # into the compiled object or the shared cached tree.
+            self.assertIn('diagnostics', snapshot)
+            self.assertNotIn('diagnostics', parsed.parsed)
+            cached = p.parse(self.EXPRESSION)
+            self.assertIs(cached, parsed)
+            self.assertEqual(parse_calls, [self.EXPRESSION])
+
+            # Purging the cache invalidates future lookups but leaves
+            # the already compiled object usable on its own.
+            parser.Parser.purge()
+            self.assertEqual(parsed.search(self.DATA), self.EXPECTED)
+            recompiled = p.parse(self.EXPRESSION)
+            self.assertEqual(parse_calls,
+                             [self.EXPRESSION, self.EXPRESSION])
+            self.assertIsNot(recompiled, parsed)
+            self.assertEqual(recompiled.parsed, parsed.parsed)
+            self.assertNotIn('diagnostics', recompiled.parsed)
+            self.assertEqual(recompiled.search(self.DATA),
+                             self.EXPECTED)
+        finally:
+            parser.Parser._do_parse = original_do_parse
 
 
 if __name__ == '__main__':
