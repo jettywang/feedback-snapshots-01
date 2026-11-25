@@ -1,0 +1,72 @@
+{
+  "schema": "hatch-approval-demo/v1",
+  "decision": "approved-on-first-review; reuse while pinned fields match",
+  "selection": {
+    "target": "wheel"
+  },
+  "config_scope": {
+    "selected_target": "wheel",
+    "project_dynamic": [
+      "version"
+    ],
+    "version_table": {
+      "source": "code",
+      "path": "src/demo_approval/version.py"
+    },
+    "global_build_hooks": {
+      "probe": {
+        "scope": "global",
+        "approved_config": "baseline"
+      }
+    },
+    "wheel_target_hooks": {
+      "probe": {
+        "scope": "target-wheel",
+        "approved_config": "baseline"
+      }
+    }
+  },
+  "config_scope_digest": "700208a29c5bf213359c95ad5f979a29cc72fba4e697f247f4e58e25887a4a5a",
+  "entry_points": {
+    "probe": {
+      "module": "probe_recorder",
+      "origin": "/Users/apple/Documents/用户反馈项目/batches/feedback-20261120-backend-security-280-jettywang/prepared/FB-20261120-SEC-JW-131/workspace/approval-trace-demo/plugins/source_a/probe_recorder.py",
+      "origin_realpath": "/Users/apple/Documents/用户反馈项目/batches/feedback-20261120-backend-security-280-jettywang/prepared/FB-20261120-SEC-JW-131/workspace/approval-trace-demo/plugins/source_a/probe_recorder.py",
+      "sha256": "d7f80cc115b62e232e87c8c8f6826d8c89fe81e93c5b228c7572de46012e9df4",
+      "dist_name": "probe-recorder",
+      "dist_info_path": "/Users/apple/Documents/用户反馈项目/batches/feedback-20261120-backend-security-280-jettywang/prepared/FB-20261120-SEC-JW-131/workspace/approval-trace-demo/plugins/source_a/probe_recorder_a.dist-info",
+      "dist_info_realpath": "/Users/apple/Documents/用户反馈项目/batches/feedback-20261120-backend-security-280-jettywang/prepared/FB-20261120-SEC-JW-131/workspace/approval-trace-demo/plugins/source_a/probe_recorder_a.dist-info",
+      "dist_info_basename": "probe_recorder_a.dist-info",
+      "entry_points_sha256": "f8ae4ab90880d2555bf4567724589c4fa5b56ae770faa5b254d5bbdef79cc37c",
+      "metadata_sha256": "5053b57378c18a58e447d7155b27737f7d52125c37af292c17762c5531cdadff",
+      "entry_point_value": "probe_recorder",
+      "pin_fields": [
+        "module",
+        "origin_realpath",
+        "sha256",
+        "dist_name",
+        "dist_info_realpath",
+        "dist_info_basename",
+        "entry_points_sha256",
+        "metadata_sha256",
+        "entry_point_value"
+      ]
+    }
+  },
+  "project_code": [
+    {
+      "role": "dynamic-version-code",
+      "path": "/Users/apple/Documents/用户反馈项目/batches/feedback-20261120-backend-security-280-jettywang/prepared/FB-20261120-SEC-JW-131/workspace/approval-trace-demo/.work/project/src/demo_approval/version.py",
+      "realpath": "/Users/apple/Documents/用户反馈项目/batches/feedback-20261120-backend-security-280-jettywang/prepared/FB-20261120-SEC-JW-131/workspace/approval-trace-demo/.work/project/src/demo_approval/version.py",
+      "sha256": "e32a6283ba4876f9ebcd03b4941129358f05b79d298ffbdc366b8849b182f9f9",
+      "executes_python": true
+    }
+  ],
+  "reconfirm_when": [
+    "selected target or target-specific hook table changes",
+    "hook name resolves to different entry point, distribution, file digest, or dist metadata",
+    "hook configuration or enabled-by-default/environment enablement changes",
+    "dynamic version/metadata code path or digest changes",
+    "build-system.requires or backend-path changes"
+  ]
+}

@@ -1,0 +1,29 @@
+[build-system]
+requires = []
+build-backend = "hatchling.build"
+
+[project]
+name = "approval-demo"
+description = "Offline approval sequencing fixture"
+requires-python = ">=3.10"
+dynamic = ["version"]
+
+[tool.hatch.version]
+source = "code"
+path = "src/demo_approval/version.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/demo_approval"]
+
+[tool.hatch.build.hooks.probe]
+scope = "global"
+approved_config = "baseline"
+
+[tool.hatch.build.targets.wheel.hooks.probe]
+scope = "target-wheel"
+approved_config = "baseline"
+
+[tool.hatch.envs.hatch-build]
+path = "/Users/apple/Documents/\u7528\u6237\u53cd\u9988\u9879\u76ee/batches/feedback-20261120-backend-security-280-jettywang/prepared/FB-20261120-SEC-JW-131/workspace/.venv"
+installer = "pip"
+skip-install = true

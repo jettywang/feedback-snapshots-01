@@ -1,0 +1,168 @@
+{
+  "demo_dir": "/Users/apple/Documents/用户反馈项目/batches/feedback-20261120-backend-security-280-jettywang/prepared/FB-20261120-SEC-JW-131/workspace/approval-trace-demo",
+  "work_dir": "/Users/apple/Documents/用户反馈项目/batches/feedback-20261120-backend-security-280-jettywang/prepared/FB-20261120-SEC-JW-131/workspace/approval-trace-demo/.work",
+  "python": "/Users/apple/Documents/用户反馈项目/batches/feedback-20261120-backend-security-280-jettywang/prepared/FB-20261120-SEC-JW-131/workspace/.venv/bin/python",
+  "hatch_command": "/Users/apple/Documents/用户反馈项目/batches/feedback-20261120-backend-security-280-jettywang/prepared/FB-20261120-SEC-JW-131/workspace/.venv/bin/hatch",
+  "cases": [
+    {
+      "name": "baseline-normal-build",
+      "command": [
+        "/Users/apple/Documents/用户反馈项目/batches/feedback-20261120-backend-security-280-jettywang/prepared/FB-20261120-SEC-JW-131/workspace/.venv/bin/hatch",
+        "build",
+        "--target",
+        "wheel"
+      ],
+      "args": [
+        "build",
+        "--target",
+        "wheel"
+      ],
+      "returncode": 0,
+      "plugin_log": "records/baseline-normal-build.jsonl",
+      "gate_log": "records/baseline-normal-build.gate.jsonl",
+      "console_log": "records/baseline-normal-build.console.txt",
+      "enforce": false,
+      "safe_exec": false
+    },
+    {
+      "name": "baseline-hooks-only",
+      "command": [
+        "/Users/apple/Documents/用户反馈项目/batches/feedback-20261120-backend-security-280-jettywang/prepared/FB-20261120-SEC-JW-131/workspace/.venv/bin/hatch",
+        "build",
+        "--target",
+        "wheel",
+        "--hooks-only"
+      ],
+      "args": [
+        "build",
+        "--target",
+        "wheel",
+        "--hooks-only"
+      ],
+      "returncode": 0,
+      "plugin_log": "records/baseline-hooks-only.jsonl",
+      "gate_log": "records/baseline-hooks-only.gate.jsonl",
+      "console_log": "records/baseline-hooks-only.console.txt",
+      "enforce": false,
+      "safe_exec": false
+    },
+    {
+      "name": "baseline-clean-only",
+      "command": [
+        "/Users/apple/Documents/用户反馈项目/batches/feedback-20261120-backend-security-280-jettywang/prepared/FB-20261120-SEC-JW-131/workspace/.venv/bin/hatch",
+        "clean",
+        "--target",
+        "wheel"
+      ],
+      "args": [
+        "clean",
+        "--target",
+        "wheel"
+      ],
+      "returncode": 0,
+      "plugin_log": "records/baseline-clean-only.jsonl",
+      "gate_log": "records/baseline-clean-only.gate.jsonl",
+      "console_log": "records/baseline-clean-only.console.txt",
+      "enforce": false,
+      "safe_exec": false
+    },
+    {
+      "name": "gate-safe-allowed-hooks-only",
+      "command": [
+        "/Users/apple/Documents/用户反馈项目/batches/feedback-20261120-backend-security-280-jettywang/prepared/FB-20261120-SEC-JW-131/workspace/.venv/bin/hatch",
+        "build",
+        "--target",
+        "wheel",
+        "--hooks-only"
+      ],
+      "args": [
+        "build",
+        "--target",
+        "wheel",
+        "--hooks-only"
+      ],
+      "returncode": 0,
+      "plugin_log": "records/gate-safe-allowed-hooks-only.jsonl",
+      "gate_log": "records/gate-safe-allowed-hooks-only.gate.jsonl",
+      "console_log": "records/gate-safe-allowed-hooks-only.console.txt",
+      "enforce": true,
+      "safe_exec": true
+    },
+    {
+      "name": "switch-b-observed-hooks-only",
+      "command": [
+        "/Users/apple/Documents/用户反馈项目/batches/feedback-20261120-backend-security-280-jettywang/prepared/FB-20261120-SEC-JW-131/workspace/.venv/bin/hatch",
+        "build",
+        "--target",
+        "wheel",
+        "--hooks-only"
+      ],
+      "args": [
+        "build",
+        "--target",
+        "wheel",
+        "--hooks-only"
+      ],
+      "returncode": 0,
+      "plugin_log": "records/switch-b-observed-hooks-only.jsonl",
+      "gate_log": "records/switch-b-observed-hooks-only.gate.jsonl",
+      "console_log": "records/switch-b-observed-hooks-only.console.txt",
+      "enforce": false,
+      "safe_exec": false
+    },
+    {
+      "name": "switch-b-blocked-hooks-only",
+      "command": [
+        "/Users/apple/Documents/用户反馈项目/batches/feedback-20261120-backend-security-280-jettywang/prepared/FB-20261120-SEC-JW-131/workspace/.venv/bin/hatch",
+        "build",
+        "--target",
+        "wheel",
+        "--hooks-only"
+      ],
+      "args": [
+        "build",
+        "--target",
+        "wheel",
+        "--hooks-only"
+      ],
+      "returncode": 1,
+      "plugin_log": "records/switch-b-blocked-hooks-only.jsonl",
+      "gate_log": "records/switch-b-blocked-hooks-only.gate.jsonl",
+      "console_log": "records/switch-b-blocked-hooks-only.console.txt",
+      "enforce": true,
+      "safe_exec": false
+    }
+  ],
+  "source_switched_after_case": "gate-safe-allowed-hooks-only",
+  "callback_comparison": {
+    "same_plugin_name": "probe",
+    "same_entry_point_name": "probe",
+    "initialize_callback_args_equal": true,
+    "initialize_callback_args_a": {
+      "build_data_build_hooks": [
+        "probe"
+      ],
+      "version": "standard"
+    },
+    "initialize_callback_args_b": {
+      "build_data_build_hooks": [
+        "probe"
+      ],
+      "version": "standard"
+    },
+    "provenance_fields_in_initialize_callback": false,
+    "out_of_band_a": {
+      "source_id": "A",
+      "module_file": "/Users/apple/Documents/用户反馈项目/batches/feedback-20261120-backend-security-280-jettywang/prepared/FB-20261120-SEC-JW-131/workspace/approval-trace-demo/.work/active/probe_recorder.py",
+      "module_sha256": "d7f80cc115b62e232e87c8c8f6826d8c89fe81e93c5b228c7572de46012e9df4",
+      "pid": 4876
+    },
+    "out_of_band_b": {
+      "source_id": "B",
+      "module_file": "/Users/apple/Documents/用户反馈项目/batches/feedback-20261120-backend-security-280-jettywang/prepared/FB-20261120-SEC-JW-131/workspace/approval-trace-demo/.work/active/probe_recorder.py",
+      "module_sha256": "899a8d6d37fa68a4f3f3ce5acaef847e12b41b264b3f1c6f22922986bb67c773",
+      "pid": 4899
+    },
+    "interpretation": "The lifecycle arguments are identical. Source identity is available only out-of-band from the loaded class/module, entry-point distribution metadata, or an import-time gate; those checks happen after import unless the gate intercepts entry-point loading."
+  }
+}

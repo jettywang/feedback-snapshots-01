@@ -1,0 +1,2 @@
+[hatch]
+probe = probe_recorder

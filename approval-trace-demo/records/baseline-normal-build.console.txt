@@ -1,0 +1,9 @@
+$ /Users/apple/Documents/用户反馈项目/batches/feedback-20261120-backend-security-280-jettywang/prepared/FB-20261120-SEC-JW-131/workspace/.venv/bin/hatch build --target wheel
+
+[stdout]
+──────────────────────────────────── wheel ─────────────────────────────────────
+
+[stderr]
+Checking dependencies
+Inspecting build dependencies
+dist/approval_demo-9.8.7-py3-none-any.whl

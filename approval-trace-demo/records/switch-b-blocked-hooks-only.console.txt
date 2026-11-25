@@ -1,0 +1,37 @@
+$ /Users/apple/Documents/用户反馈项目/batches/feedback-20261120-backend-security-280-jettywang/prepared/FB-20261120-SEC-JW-131/workspace/.venv/bin/hatch build --target wheel --hooks-only
+
+[stdout]
+
+[stderr]
+Inspecting build dependencies
+Traceback (most recent call last):
+  File "/private/tmp/claude-501/tmpdigbq4m7/get_build_deps_wheel.py", line 40, in <module>
+    main()
+  File "/private/tmp/claude-501/tmpdigbq4m7/get_build_deps_wheel.py", line 31, in main
+    for dependency in builder.config.dependencies:
+                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/apple/.local/share/uv/python/cpython-3.12.11-macos-aarch64-none/lib/python3.12/functools.py", line 998, in __get__
+    val = self.func(instance)
+          ^^^^^^^^^^^^^^^^^^^
+  File "/Users/apple/Documents/用户反馈项目/batches/feedback-20261120-backend-security-280-jettywang/prepared/FB-20261120-SEC-JW-131/workspace/backend/src/hatchling/builders/config.py", line 579, in dependencies
+    for dependency in self.dynamic_dependencies:
+                      ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/apple/.local/share/uv/python/cpython-3.12.11-macos-aarch64-none/lib/python3.12/functools.py", line 998, in __get__
+    val = self.func(instance)
+          ^^^^^^^^^^^^^^^^^^^
+  File "/Users/apple/Documents/用户反馈项目/batches/feedback-20261120-backend-security-280-jettywang/prepared/FB-20261120-SEC-JW-131/workspace/backend/src/hatchling/builders/config.py", line 588, in dynamic_dependencies
+    build_hook_cls = self.builder.plugin_manager.build_hook.get(hook_name)
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/apple/Documents/用户反馈项目/batches/feedback-20261120-backend-security-280-jettywang/prepared/FB-20261120-SEC-JW-131/workspace/backend/src/hatchling/plugin/manager.py", line 101, in get
+    return self.collect().get(name)
+           ^^^^^^^^^^^^^^
+  File "/Users/apple/Documents/用户反馈项目/batches/feedback-20261120-backend-security-280-jettywang/prepared/FB-20261120-SEC-JW-131/workspace/backend/src/hatchling/plugin/manager.py", line 70, in collect
+    self.third_party_plugins.load()
+  File "/Users/apple/Documents/用户反馈项目/batches/feedback-20261120-backend-security-280-jettywang/prepared/FB-20261120-SEC-JW-131/workspace/backend/src/hatchling/plugin/manager.py", line 110, in load
+    self.manager.load_setuptools_entrypoints("hatch")
+  File "/Users/apple/Documents/用户反馈项目/batches/feedback-20261120-backend-security-280-jettywang/prepared/FB-20261120-SEC-JW-131/workspace/.venv/lib/python3.12/site-packages/pluggy/_manager.py", line 521, in load_setuptools_entrypoints
+    plugin = ep.load()
+             ^^^^^^^^^
+  File "/Users/apple/Documents/用户反馈项目/batches/feedback-20261120-backend-security-280-jettywang/prepared/FB-20261120-SEC-JW-131/workspace/approval-trace-demo/gate/sitecustomize.py", line 139, in _guarded_load
+    raise PermissionError(f"Approval mismatch for Hatch plugin entry point `{self.name}`: {mismatches}")
+PermissionError: Approval mismatch for Hatch plugin entry point `probe`: {'origin_realpath': {'approved': '/Users/apple/Documents/用户反馈项目/batches/feedback-20261120-backend-security-280-jettywang/prepared/FB-20261120-SEC-JW-131/workspace/approval-trace-demo/plugins/source_a/probe_recorder.py', 'actual': '/Users/apple/Documents/用户反馈项目/batches/feedback-20261120-backend-security-280-jettywang/prepared/FB-20261120-SEC-JW-131/workspace/approval-trace-demo/plugins/source_b/probe_recorder.py'}, 'sha256': {'approved': 'd7f80cc115b62e232e87c8c8f6826d8c89fe81e93c5b228c7572de46012e9df4', 'actual': '899a8d6d37fa68a4f3f3ce5acaef847e12b41b264b3f1c6f22922986bb67c773'}, 'dist_info_realpath': {'approved': '/Users/apple/Documents/用户反馈项目/batches/feedback-20261120-backend-security-280-jettywang/prepared/FB-20261120-SEC-JW-131/workspace/approval-trace-demo/plugins/source_a/probe_recorder_a.dist-info', 'actual': '/Users/apple/Documents/用户反馈项目/batches/feedback-20261120-backend-security-280-jettywang/prepared/FB-20261120-SEC-JW-131/workspace/approval-trace-demo/plugins/source_b/probe_recorder_b.dist-info'}, 'dist_info_basename': {'approved': 'probe_recorder_a.dist-info', 'actual': 'probe_recorder_b.dist-info'}, 'metadata_sha256': {'approved': '5053b57378c18a58e447d7155b27737f7d52125c37af292c17762c5531cdadff', 'actual': '01c7e46c89c6a43886247635283fa4d11e1f3eeccdc693476df098a3c15e973d'}}
