@@ -71,6 +71,7 @@ module Net
   # - #gettextfile
   # - #putbinaryfile
   # - #puttextfile
+  # - #publish
   # - #chdir
   # - #nlst
   # - #size
@@ -915,6 +916,251 @@ module Net
         puttextfile(localfile, remotefile, &block)
       end
     end
+
+    #
+    # PublishReceipt describes the outcome of a staged publish attempted by
+    # FTP#publish or FTP#resume_publish.
+    #
+    # +state+ is one of:
+    #
+    # [:published] The fixed release name now holds the candidate content.
+    #              If +reason+ is :already_published, an earlier interrupted
+    #              attempt had already completed the rename and this call
+    #              issued no further transfer or rename.
+    # [:staged]    The candidate remains stored under the staging name and
+    #              no rename was attempted.  +reason+ is :weak_facts when
+    #              the server could not report the facts needed to confirm
+    #              the staged upload or the target update conditions, or
+    #              :target_changed when the target no longer satisfies the
+    #              update conditions (retrying would overwrite a file that
+    #              was updated by someone else).
+    # [:unknown]   The outcome of an interrupted publish could not be
+    #              determined from the facts the server reports.  +reason+
+    #              is :weak_facts when the server cannot report the needed
+    #              facts at all, or :unconfirmed when the reported facts
+    #              contradict both a finished and an unfinished publish.
+    #              The staging file, if any, is left untouched; retrying
+    #              blindly may overwrite a file that was updated later.
+    #
+    class PublishReceipt
+      attr_reader :state, :staging, :target, :reason
+
+      def initialize(state, staging, target, reason = nil) # :nodoc:
+        @state = state
+        @staging = staging
+        @target = target
+        @reason = reason
+      end
+
+      # Whether the target now holds the candidate content.
+      def published?
+        @state == :published
+      end
+
+      # Whether the candidate is still staged on the server, waiting for
+      # the publish to be retried or investigated.
+      def staged?
+        @state == :staged
+      end
+
+      # Whether the publish outcome could not be determined.
+      def unknown?
+        @state == :unknown
+      end
+    end
+
+    #
+    # Publishes +localfile+ under the fixed release name +remotefile+ using
+    # a two-phase "upload then rename" flow:
+    #
+    # 1. The file is uploaded to the staging name (+staging+, default
+    #    <tt>"#{remotefile}.part"</tt>, kept in the same directory so the
+    #    final rename stays on the same server filesystem).
+    # 2. The staged candidate is verified: the server-reported size must
+    #    match the local file.
+    # 3. The target update conditions are checked: if +expected_size+ or
+    #    +expected_mtime+ are given, the current target must still match
+    #    them, so a file that was updated by someone else is not
+    #    overwritten.
+    # 4. The staging file is renamed over +remotefile+.
+    #
+    # Returns a PublishReceipt.  If the server cannot report the facts
+    # needed for step 2 or 3 (plain FTP has no checksums; SIZE/MDTM/MLST
+    # may be unimplemented), the candidate is left staged and a receipt
+    # with state :staged and reason :weak_facts is returned instead of
+    # publishing unverified content.  If the target no longer satisfies
+    # the update conditions, the candidate is left staged and the receipt
+    # has state :staged and reason :target_changed.
+    #
+    # If the connection drops after the rename command was submitted, an
+    # exception is raised and the outcome is unknown: the 250 reply to
+    # RNTO is the only confirmation stock FTP offers.  Reconnect and call
+    # #resume_publish to re-check the remote state instead of blindly
+    # re-uploading, which could overwrite a file that was updated later.
+    #
+    # Note that the condition check and the rename are separate commands;
+    # FTP has no conditional rename, so a target change between the check
+    # and the rename cannot be excluded.  MDTM/MLST mtimes have one-second
+    # resolution and are server-defined UTC.
+    #
+    def publish(localfile, remotefile = File.basename(localfile),
+                staging: nil, expected_size: nil, expected_mtime: nil,
+                blocksize: DEFAULT_BLOCKSIZE, &block)
+      staging ||= "#{remotefile}.part"
+      putbinaryfile(localfile, staging, blocksize, &block)
+      local_size = File.size(localfile)
+      staging_facts = probe_file_facts(staging)
+      staged_size = staging_facts[:size] if staging_facts.is_a?(Hash)
+      unless staged_size
+        return PublishReceipt.new(:staged, staging, remotefile, :weak_facts)
+      end
+      if staged_size != local_size
+        raise FTPError,
+              "staged upload #{staging} has #{staged_size} bytes, " \
+              "expected #{local_size}"
+      end
+      case check_target_conditions(probe_file_facts(remotefile),
+                                   expected_size, expected_mtime)
+      when :changed
+        return PublishReceipt.new(:staged, staging, remotefile,
+                                  :target_changed)
+      when :weak
+        return PublishReceipt.new(:staged, staging, remotefile, :weak_facts)
+      end
+      rename(staging, remotefile)
+      return PublishReceipt.new(:published, staging, remotefile)
+    end
+
+    #
+    # Re-checks the remote state of a staged publish started by #publish,
+    # typically after the connection was lost around the rename.  The
+    # caller must supply the candidate size in bytes, either directly via
+    # +size+ or via +localfile+.  +staging+ must match the staging name
+    # used by the interrupted publish (default
+    # <tt>"#{remotefile}.part"</tt>).
+    #
+    # Returns a PublishReceipt:
+    #
+    # - state :published, reason :already_published: the staging file is
+    #   gone and the target already holds content of the candidate size,
+    #   so the interrupted rename had taken effect.  Nothing is re-sent
+    #   and no rename is retried.
+    # - state :published: the staging file still holds the verified
+    #   candidate and the target satisfies the update conditions, so the
+    #   rename is completed now.
+    # - state :staged, reason :target_changed or :weak_facts: the
+    #   candidate is still staged but the target no longer satisfies the
+    #   update conditions, or the server cannot report the facts needed
+    #   to check them.  The staging file is kept.
+    # - state :unknown, reason :weak_facts or :unconfirmed: the server
+    #   cannot report enough facts to tell whether the rename took
+    #   effect, or the facts contradict both outcomes.  Nothing is
+    #   changed; retrying may overwrite a file that was updated later.
+    #
+    def resume_publish(remotefile, staging: nil, localfile: nil, size: nil,
+                       expected_size: nil, expected_mtime: nil)
+      staging ||= "#{remotefile}.part"
+      size ||= File.size(localfile) if localfile
+      unless size
+        raise ArgumentError, "pass size: or localfile: so the staged " \
+                             "candidate can be verified"
+      end
+      staging_facts = probe_file_facts(staging)
+      target_facts = probe_file_facts(remotefile)
+      staged_size = staging_facts[:size] if staging_facts.is_a?(Hash)
+      target_size = target_facts[:size] if target_facts.is_a?(Hash)
+      if staging_facts == :absent && target_size == size
+        return PublishReceipt.new(:published, staging, remotefile,
+                                  :already_published)
+      end
+      if staged_size == size
+        case check_target_conditions(target_facts,
+                                     expected_size, expected_mtime)
+        when :ok
+          rename(staging, remotefile)
+          return PublishReceipt.new(:published, staging, remotefile)
+        when :changed
+          return PublishReceipt.new(:staged, staging, remotefile,
+                                    :target_changed)
+        else
+          return PublishReceipt.new(:staged, staging, remotefile,
+                                    :weak_facts)
+        end
+      end
+      if staging_facts == :absent && target_size
+        return PublishReceipt.new(:unknown, staging, remotefile,
+                                  :unconfirmed)
+      end
+      if staged_size.nil?
+        return PublishReceipt.new(:unknown, staging, remotefile,
+                                  :weak_facts)
+      end
+      return PublishReceipt.new(:unknown, staging, remotefile,
+                                :unconfirmed)
+    end
+
+    #
+    # Returns the facts the server can report about +pathname+ as a hash
+    # with optional :size and :mtime entries, :absent if the server
+    # reports there is no such file, or nil if the server cannot report
+    # any facts about it.
+    #
+    def probe_file_facts(pathname) # :nodoc:
+      begin
+        entry = mlst(pathname)
+        facts = {}
+        facts[:size] = entry.facts["size"] if entry.facts.key?("size")
+        facts[:mtime] = entry.facts["modify"] if entry.facts.key?("modify")
+        return facts
+      rescue FTPPermError, FTPReplyError => e
+        return :absent if e.message.start_with?("550")
+        # MLST is not implemented; fall back to SIZE and MDTM.
+      end
+      facts = {}
+      resp = probe_command("SIZE #{pathname}")
+      return :absent if resp == :absent
+      facts[:size] = get_body(resp).to_i if resp
+      resp = probe_command("MDTM #{pathname}")
+      return :absent if resp == :absent
+      facts[:mtime] = TIME_PARSER.(get_body(resp)) if resp
+      return facts.empty? ? nil : facts
+    end
+    private :probe_file_facts
+
+    #
+    # Sends +cmd+ and returns the response if it is a 213 reply, :absent
+    # if the server reports there is no such file, or nil if the command
+    # is not implemented or was refused.
+    #
+    def probe_command(cmd) # :nodoc:
+      resp = sendcmd(cmd)
+      return resp.start_with?("213") ? resp : nil
+    rescue FTPPermError => e
+      return e.message.start_with?("550") ? :absent : nil
+    end
+    private :probe_command
+
+    #
+    # Checks +facts+ (as returned by probe_file_facts) against the target
+    # update conditions.  Returns :ok when replacement may proceed,
+    # :changed when the target is known to violate the conditions, or
+    # :weak when the server cannot report the facts needed to decide.
+    #
+    def check_target_conditions(facts, expected_size, expected_mtime)
+      return :ok if expected_size.nil? && expected_mtime.nil?
+      return :changed if facts == :absent
+      return :weak unless facts.is_a?(Hash)
+      if expected_size
+        return :weak unless facts.key?(:size)
+        return :changed if facts[:size] != expected_size
+      end
+      if expected_mtime
+        return :weak unless facts.key?(:mtime)
+        return :changed if facts[:mtime] != expected_mtime
+      end
+      return :ok
+    end
+    private :check_target_conditions
 
     #
     # Sends the ACCT command.

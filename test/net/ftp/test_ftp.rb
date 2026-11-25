@@ -2671,6 +2671,234 @@ EOF
     end
   end
 
+  def test_publish
+    server = InMemoryFTPServer.new(SERVER_ADDR)
+    old_mtime = Time.utc(2026, 11, 25, 3, 0, 0)
+    server.files["nightly.tar.gz"] =
+      InMemoryFTPServer::RemoteFile.new("old archive", old_mtime)
+    begin
+      chdir_to_tmpdir do
+        File.binwrite("nightly-20261126.tar.gz", "new archive content")
+        ftp = Net::FTP.new
+        begin
+          ftp.connect(SERVER_ADDR, server.port)
+          ftp.login
+          receipt = ftp.publish("nightly-20261126.tar.gz", "nightly.tar.gz",
+                                expected_size: "old archive".bytesize,
+                                expected_mtime: old_mtime)
+          assert_equal(true, receipt.published?)
+          assert_equal(:published, receipt.state)
+          assert_equal(nil, receipt.reason)
+          assert_equal("nightly.tar.gz.part", receipt.staging)
+          assert_equal("nightly.tar.gz", receipt.target)
+          # the staging file is replaced by the fixed release name
+          assert_equal(false, server.files.key?("nightly.tar.gz.part"))
+          assert_equal("new archive content",
+                       server.files["nightly.tar.gz"].content)
+          commands = server.connections[0]
+          assert_include(commands, "STOR nightly.tar.gz.part\r\n")
+          assert_include(commands, "RNFR nightly.tar.gz.part\r\n")
+          assert_include(commands, "RNTO nightly.tar.gz\r\n")
+          assert_not_include(commands, "STOR nightly.tar.gz\r\n")
+        ensure
+          ftp.close
+        end
+      end
+    ensure
+      server.close
+    end
+  end
+
+  def test_publish_target_changed
+    server = InMemoryFTPServer.new(SERVER_ADDR)
+    server.files["nightly.tar.gz"] =
+      InMemoryFTPServer::RemoteFile.new("someone else's update",
+                                        Time.utc(2026, 11, 26, 1, 0, 0))
+    begin
+      chdir_to_tmpdir do
+        File.binwrite("nightly-20261126.tar.gz", "new archive content")
+        ftp = Net::FTP.new
+        begin
+          ftp.connect(SERVER_ADDR, server.port)
+          ftp.login
+          # the caller still expects the previous release
+          receipt = ftp.publish("nightly-20261126.tar.gz", "nightly.tar.gz",
+                                expected_size: "old archive".bytesize)
+          assert_equal(true, receipt.staged?)
+          assert_equal(:target_changed, receipt.reason)
+          # the candidate stays staged and the newer target is kept
+          assert_equal("new archive content",
+                       server.files["nightly.tar.gz.part"].content)
+          assert_equal("someone else's update",
+                       server.files["nightly.tar.gz"].content)
+          commands = server.connections[0]
+          assert_equal([], commands.grep(/\ARNTO /))
+        ensure
+          ftp.close
+        end
+      end
+    ensure
+      server.close
+    end
+  end
+
+  def test_publish_weak_facts
+    server = InMemoryFTPServer.new(SERVER_ADDR,
+                                   mlst: false, size: false, mdtm: false)
+    begin
+      chdir_to_tmpdir do
+        File.binwrite("nightly-20261126.tar.gz", "new archive content")
+        ftp = Net::FTP.new
+        begin
+          ftp.connect(SERVER_ADDR, server.port)
+          ftp.login
+          receipt = ftp.publish("nightly-20261126.tar.gz", "nightly.tar.gz")
+          assert_equal(true, receipt.staged?)
+          assert_equal(:weak_facts, receipt.reason)
+          # the unverifiable candidate stays staged, nothing is renamed
+          assert_equal("new archive content",
+                       server.files["nightly.tar.gz.part"].content)
+          assert_equal(false, server.files.key?("nightly.tar.gz"))
+          commands = server.connections[0]
+          assert_equal([], commands.grep(/\ARNTO /))
+        ensure
+          ftp.close
+        end
+      end
+    ensure
+      server.close
+    end
+  end
+
+  def test_publish_rename_receipt_lost
+    server = InMemoryFTPServer.new(SERVER_ADDR, drop_on_rnto: :after)
+    server.files["nightly.tar.gz"] =
+      InMemoryFTPServer::RemoteFile.new("old archive",
+                                        Time.utc(2026, 11, 25, 3, 0, 0))
+    begin
+      chdir_to_tmpdir do
+        File.binwrite("nightly-20261126.tar.gz", "new archive content")
+        ftp = Net::FTP.new
+        begin
+          ftp.connect(SERVER_ADDR, server.port)
+          ftp.login
+          # the connection drops after RNTO is submitted, so the 250
+          # receipt never arrives
+          assert_raise(EOFError, SystemCallError, Net::FTPError) do
+            ftp.publish("nightly-20261126.tar.gz", "nightly.tar.gz",
+                        expected_size: "old archive".bytesize)
+          end
+        ensure
+          ftp.close
+        end
+        # the rename did take effect on the server
+        assert_equal(false, server.files.key?("nightly.tar.gz.part"))
+        assert_equal("new archive content",
+                     server.files["nightly.tar.gz"].content)
+
+        ftp = Net::FTP.new
+        begin
+          ftp.connect(SERVER_ADDR, server.port)
+          ftp.login
+          receipt = ftp.resume_publish("nightly.tar.gz",
+                                       localfile: "nightly-20261126.tar.gz",
+                                       expected_size: "old archive".bytesize)
+          assert_equal(true, receipt.published?)
+          assert_equal(:already_published, receipt.reason)
+        ensure
+          ftp.close
+        end
+        # the re-check must not re-upload or re-rename anything
+        commands = server.connections[1]
+        assert_equal([], commands.grep(/\A(STOR|APPE|RNFR|RNTO|DELE) /))
+        assert_equal(false, server.files.key?("nightly.tar.gz.part"))
+        assert_equal("new archive content",
+                     server.files["nightly.tar.gz"].content)
+      end
+    ensure
+      server.close
+    end
+  end
+
+  def test_publish_rename_lost_before_execute
+    server = InMemoryFTPServer.new(SERVER_ADDR, drop_on_rnto: :before)
+    server.files["nightly.tar.gz"] =
+      InMemoryFTPServer::RemoteFile.new("old archive",
+                                        Time.utc(2026, 11, 25, 3, 0, 0))
+    begin
+      chdir_to_tmpdir do
+        File.binwrite("nightly-20261126.tar.gz", "new archive content")
+        ftp = Net::FTP.new
+        begin
+          ftp.connect(SERVER_ADDR, server.port)
+          ftp.login
+          assert_raise(EOFError, SystemCallError, Net::FTPError) do
+            ftp.publish("nightly-20261126.tar.gz", "nightly.tar.gz",
+                        expected_size: "old archive".bytesize)
+          end
+        ensure
+          ftp.close
+        end
+        # the rename never happened; the candidate is still staged
+        assert_equal("new archive content",
+                     server.files["nightly.tar.gz.part"].content)
+        assert_equal("old archive", server.files["nightly.tar.gz"].content)
+
+        ftp = Net::FTP.new
+        begin
+          ftp.connect(SERVER_ADDR, server.port)
+          ftp.login
+          receipt = ftp.resume_publish("nightly.tar.gz",
+                                       localfile: "nightly-20261126.tar.gz",
+                                       expected_size: "old archive".bytesize)
+          assert_equal(true, receipt.published?)
+          assert_equal(nil, receipt.reason)
+        ensure
+          ftp.close
+        end
+        # the verified candidate is renamed without a re-upload
+        commands = server.connections[1]
+        assert_equal([], commands.grep(/\A(STOR|APPE) /))
+        assert_include(commands, "RNFR nightly.tar.gz.part\r\n")
+        assert_include(commands, "RNTO nightly.tar.gz\r\n")
+        assert_equal(false, server.files.key?("nightly.tar.gz.part"))
+        assert_equal("new archive content",
+                     server.files["nightly.tar.gz"].content)
+      end
+    ensure
+      server.close
+    end
+  end
+
+  def test_resume_publish_unconfirmed
+    server = InMemoryFTPServer.new(SERVER_ADDR)
+    # the staging file is gone and the target holds something else than
+    # the candidate: the interrupted publish cannot be accounted for
+    server.files["nightly.tar.gz"] =
+      InMemoryFTPServer::RemoteFile.new("later update",
+                                        Time.utc(2026, 11, 26, 2, 0, 0))
+    begin
+      ftp = Net::FTP.new
+      begin
+        ftp.connect(SERVER_ADDR, server.port)
+        ftp.login
+        receipt = ftp.resume_publish("nightly.tar.gz",
+                                     size: "new archive content".bytesize)
+        assert_equal(true, receipt.unknown?)
+        assert_equal(:unconfirmed, receipt.reason)
+      ensure
+        ftp.close
+      end
+      # nothing is retried, so the later update is not overwritten
+      commands = server.connections[0]
+      assert_equal([], commands.grep(/\A(STOR|APPE|RNFR|RNTO|DELE) /))
+      assert_equal(false, server.files.key?("nightly.tar.gz.part"))
+      assert_equal("later update", server.files["nightly.tar.gz"].content)
+    ensure
+      server.close
+    end
+  end
+
   private
 
   def create_ftp_server(sleep_time = nil, addr = SERVER_ADDR)
@@ -2776,6 +3004,142 @@ EOF
         yield
       ensure
         Dir.chdir(pwd)
+      end
+    end
+  end
+end
+
+# An in-memory FTP server for the staged publish tests.  Its "filesystem"
+# is a hash that survives across control connections, so a test can drop
+# a connection in the middle of a dialogue and reconnect to observe the
+# same remote state.  +drop_on_rnto+ simulates a lost rename receipt on
+# the first RNTO: :after performs the rename but drops the connection
+# without sending the 250 reply, :before drops the connection without
+# performing the rename.
+class InMemoryFTPServer
+  RemoteFile = Struct.new(:content, :mtime)
+
+  attr_reader :files, :connections
+
+  def initialize(addr, mlst: true, size: true, mdtm: true,
+                 drop_on_rnto: false)
+    @files = {}
+    @connections = []
+    @mlst = mlst
+    @size = size
+    @mdtm = mdtm
+    @drop_on_rnto = drop_on_rnto
+    @server = TCPServer.new(addr, 0)
+    @thread = Thread.start { accept_loop }
+  end
+
+  def port
+    @server.addr[1]
+  end
+
+  def close
+    @server.close
+    @thread.join
+  end
+
+  private
+
+  def accept_loop
+    loop do
+      sock = @server.accept
+      begin
+        handle(sock)
+      ensure
+        sock.close rescue nil
+      end
+    end
+  rescue IOError, Errno::EBADF
+    # the server was closed
+  end
+
+  def handle(sock)
+    commands = []
+    @connections << commands
+    sock.print("220 (in-memory ftp).\r\n")
+    data_addr = nil
+    rnfr = nil
+    while line = sock.gets
+      commands << line
+      case line
+      when /\AUSER /
+        sock.print("331 Please specify the password.\r\n")
+      when /\APASS /
+        sock.print("230 Login successful.\r\n")
+      when /\ATYPE /
+        sock.print("200 Type set.\r\n")
+      when /\APORT (.*)/
+        args = $1.chomp.split(",")
+        data_addr = [args[0, 4].join("."),
+                     args[4, 2].map(&:to_i).inject { |x, y| (x << 8) + y }]
+        sock.print("200 PORT command successful.\r\n")
+      when /\AEPRT \|.\|(.*?)\|(.*?)\|/
+        data_addr = [$1, $2.to_i]
+        sock.print("200 EPRT command successful.\r\n")
+      when /\ASTOR (.+)\r\n/
+        name = $1
+        sock.print("150 Opening data connection.\r\n")
+        conn = TCPSocket.new(*data_addr)
+        content = conn.read
+        conn.close
+        @files[name] = RemoteFile.new(content, Time.now.utc)
+        sock.print("226 Transfer complete.\r\n")
+      when /\AMLST (.+)\r\n/
+        name = $1
+        if !@mlst
+          sock.print("502 MLST not implemented.\r\n")
+        elsif (entry = @files[name])
+          sock.print("250- Listing #{name}\r\n")
+          sock.printf(" Type=file;Size=%d;Modify=%s; %s\r\n",
+                      entry.content.bytesize,
+                      entry.mtime.strftime("%Y%m%d%H%M%S"), name)
+          sock.print("250 End\r\n")
+        else
+          sock.print("550 No such file.\r\n")
+        end
+      when /\ASIZE (.+)\r\n/
+        if !@size
+          sock.print("502 SIZE not implemented.\r\n")
+        elsif (entry = @files[$1])
+          sock.print("213 #{entry.content.bytesize}\r\n")
+        else
+          sock.print("550 No such file.\r\n")
+        end
+      when /\AMDTM (.+)\r\n/
+        if !@mdtm
+          sock.print("502 MDTM not implemented.\r\n")
+        elsif (entry = @files[$1])
+          sock.print("213 #{entry.mtime.strftime("%Y%m%d%H%M%S")}\r\n")
+        else
+          sock.print("550 No such file.\r\n")
+        end
+      when /\ARNFR (.+)\r\n/
+        if @files.key?($1)
+          rnfr = $1
+          sock.print("350 File exists, ready for destination.\r\n")
+        else
+          sock.print("550 No such file.\r\n")
+        end
+      when /\ARNTO (.+)\r\n/
+        if @drop_on_rnto == :before
+          @drop_on_rnto = false
+          return
+        end
+        @files[$1] = @files.delete(rnfr)
+        if @drop_on_rnto == :after
+          @drop_on_rnto = false
+          return
+        end
+        sock.print("250 Rename successful.\r\n")
+      when /\AQUIT/
+        sock.print("221 Goodbye.\r\n")
+        return
+      else
+        sock.print("502 Command not implemented.\r\n")
       end
     end
   end
