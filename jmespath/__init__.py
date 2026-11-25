@@ -1,4 +1,11 @@
 from jmespath import parser
+from jmespath import restricted
+from jmespath.restricted import (
+    VisibilityPolicy,
+    compile_restricted,
+    redact,
+    restricted_search,
+)
 from jmespath.visitor import Options
 
 __version__ = '1.1.0'

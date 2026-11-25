@@ -101,6 +101,37 @@ of your dict keys.  To do this you can use either of these options:
     ...               jmespath.Options(dict_cls=collections.OrderedDict))
 
 
+Restricted Queries
+~~~~~~~~~~~~~~~~~~
+
+When users are allowed to author their own JMESPath views, visibility has to
+follow the *source fields* rather than the names an expression projects.
+``jmespath.restricted_search`` provides an independent entry point for this.
+You describe the restricted source fields with a ``VisibilityPolicy``; each
+restricted field is substituted with JSON ``null`` on a deep copy of the data
+before the expression is evaluated by the normal interpreter.
+
+Because the substitution is a constant independent of the real value, two
+documents that differ only in their restricted fields return identical
+results.  A restricted field can therefore still be used in a filter or as a
+sort key without its value being inferred from which rows appear or from
+their order, while an expression that only touches public fields behaves
+exactly like the regular ``search``.
+
+.. code:: python
+
+    >>> import jmespath
+    >>> policy = jmespath.VisibilityPolicy(['employees.salary'])
+    >>> data = {'employees': [{'name': 'ada', 'salary': 150000}]}
+    >>> jmespath.restricted_search(
+    ...     'employees[*].{who: name, pay: salary}', data, policy)
+    [{'who': 'ada', 'pay': None}]
+
+Compile once and reuse with ``jmespath.compile_restricted``, or apply just the
+substitution with ``jmespath.redact``.  Restricted paths are dotted source
+fields; list indices are implicit and a parent path hides the whole subtree.
+
+
 Custom Functions
 ~~~~~~~~~~~~~~~~
 
