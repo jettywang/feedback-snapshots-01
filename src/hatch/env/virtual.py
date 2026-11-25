@@ -253,7 +253,7 @@ class VirtualEnvironment(EnvironmentInterface):
             workspace_names = {dep.name.lower() for dep in self.local_dependencies_complex if dep.path}
 
             if self.locked:
-                from hatch.env.lock import apply_lock_with_locker, resolve_lockfile_path
+                from hatch.env.lock import apply_lockfile_to_environment, resolve_lockfile_path
 
                 lockfile_path = resolve_lockfile_path(self)
                 if lockfile_path.is_file():
@@ -268,7 +268,7 @@ class VirtualEnvironment(EnvironmentInterface):
                         all_install_args = list(self.get_source_install_args(self.all_dependencies_complex))
                         all_install_args.extend(workspace_install_args)
                         self.platform.check_command(self.construct_pip_install_command(all_install_args))
-                    apply_lock_with_locker(self, lockfile_path)
+                    apply_lockfile_to_environment(self, lockfile_path)
                     return
 
             # If we do not have missing dependencies we should not sync

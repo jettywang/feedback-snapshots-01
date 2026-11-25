@@ -10,13 +10,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from hatch.utils.fs import Path
+
 if TYPE_CHECKING:
     from collections.abc import Callable
 
     from hatch.env.lockers.interface import LockerInterface
     from hatch.env.plugin.interface import EnvironmentInterface
     from hatch.project.core import Project
-    from hatch.utils.fs import Path
 
 
 class LockerNotFoundError(Exception):
@@ -165,6 +166,17 @@ def generate_lockfile(
         lock_groups=state.lock_groups,
     )
 
+    from hatch.env.switch_state import record_generation_for_environment
+
+    record_generation_for_environment(
+        environment,
+        output_path,
+        generation_state=state,
+        upgrade=upgrade,
+        upgrade_packages=upgrade_packages,
+        deps_override=deps_override,
+    )
+
 
 def lockfile_in_sync(
     environment: EnvironmentInterface,
@@ -209,9 +221,108 @@ def apply_lock_with_locker(environment: EnvironmentInterface, lock_path: Path) -
 
 
 def apply_lockfile_to_environment(environment: EnvironmentInterface, lock_path: Path | None = None) -> None:
-    """Same as :func:`apply_lock_with_locker` using ``lock_path`` or :func:`resolve_lockfile_path`."""
+    """Apply a lockfile, resuming a bound archived candidate when possible.
+
+    A shared on-disk lock path is not treated as identity.  If Hatch has a
+    target-bound candidate whose inputs and last verified result still match,
+    its content-addressed archive is applied instead.  The active result only
+    advances after the locker and installed dependencies verify successfully.
+    """
     path = resolve_lockfile_path(environment) if lock_path is None else lock_path
-    apply_lock_with_locker(environment, path)
+
+    from hatch.env.switch_state import (
+        ACTION_RESUME_CANDIDATE,
+        LockVerificationError,
+        SwitchStateStore,
+        digest_file,
+        target_for_environment,
+    )
+
+    store = SwitchStateStore.for_project(environment.root)
+    target = target_for_environment(environment)
+    recovery = store.retry_plan(target)
+
+    candidate_id: str | None = None
+    apply_path = path
+    use_bound_candidate = (
+        recovery.action == ACTION_RESUME_CANDIDATE
+        and recovery.candidate_id is not None
+        and recovery.trusted_lock_path is not None
+        and recovery.shared_lock_path is not None
+        and Path(recovery.shared_lock_path) == Path(path).expanduser().resolve()
+    )
+    if use_bound_candidate:
+        assert recovery.candidate_id is not None
+        assert recovery.trusted_lock_path is not None
+        candidate_id = recovery.candidate_id
+        apply_path = Path(recovery.trusted_lock_path)
+        store.begin_apply(candidate_id)
+
+    try:
+        apply_lock_with_locker(environment, apply_path)
+    except BaseException as exc:
+        if candidate_id is not None:
+            store.record_apply_failure(
+                candidate_id,
+                exc,
+                interrupted=isinstance(exc, KeyboardInterrupt),
+            )
+        raise
+
+    if candidate_id is None:
+        return
+
+    try:
+        verified, evidence, fingerprint = verify_applied_lock(environment, apply_path)
+    except Exception as exc:
+        store.record_apply_failure(candidate_id, f"verification error: {exc}")
+        raise
+
+    if not verified:
+        store.record_apply_failure(
+            candidate_id,
+            LockVerificationError("applied lock did not verify"),
+            evidence=evidence,
+        )
+        msg = f"Applied lock failed verification: {apply_path}"
+        raise LockVerificationError(msg)
+
+    store.record_verification_passed(
+        candidate_id,
+        verifier="hatch.locker+installed-dependencies",
+        installation_fingerprint=fingerprint,
+        evidence=evidence | {"applied_lock_hash": digest_file(apply_path)},
+    )
+
+
+def verify_applied_lock(environment: EnvironmentInterface, lock_path: Path) -> tuple[bool, dict, dict]:
+    """Check locker lock correspondence and the environment's dependencies."""
+    locker_cls = get_locker_plugin_class(environment.app.project, environment)
+    lock_matches = locker_cls.install_matches_lock(environment, lock_path)
+
+    for attribute in ("distributions", "missing_dependencies"):
+        vars(environment).pop(attribute, None)
+
+    missing_dependencies = getattr(environment, "missing_dependencies", [])
+    dependency_matches = not missing_dependencies
+
+    packages: dict[str, str] = {}
+    distributions = getattr(environment, "distributions", None)
+    all_dependencies = getattr(environment, "all_dependencies_complex", ())
+    if distributions is not None:
+        for dependency in all_dependencies:
+            distribution = distributions[dependency.name]
+            if distribution is not None:
+                packages[dependency.name] = distribution.version
+
+    evidence = {
+        "lock_matches": lock_matches,
+        "dependency_matches": dependency_matches,
+        "missing_dependencies": [str(dependency) for dependency in missing_dependencies],
+        "packages": packages,
+    }
+    fingerprint = {"lock_path": str(lock_path), "packages": packages}
+    return lock_matches and dependency_matches, evidence, fingerprint
 
 
 def merge_environment_lock_inputs(
