@@ -1,0 +1,48 @@
+# Role handover example: a shared platform role stands by while the on-call engineer
+# temporarily operates ONE approved project during a bounded window.
+#
+# The top-level CRUD section is the role's FORMAL (standing) permission. It is the only
+# thing that remains after the handover ends. The `handover` section is TEMPORARY and is
+# only effective while the approval names `project-alpha` AND the requested time falls
+# inside the approved window.
+#
+# Both declarations reference the shared `shared-policies/team/` prefix, but the review
+# output keeps their contributions separate so an approver can tell which declaration
+# granted each action/resource pair.
+mode: crud
+name: 'SharedPlatformOnCallRole'
+# Standing permission: review and audit artifacts in the shared team prefix.
+read:
+- 'arn:aws:s3:::shared-policies/team/*'
+handover:
+  # Exactly one project is approved. Temporary access applies only when the project name
+  # in this approval matches one of the projects below AND the time is inside the window.
+  approval:
+    project: 'project-alpha'
+    # Window is [start, end): start inclusive, end exclusive, UTC.
+    start: '2026-12-01T00:00:00Z'
+    end: '2026-12-02T00:00:00Z'
+  # The operator may be handed any of these projects; only the approved one is effective.
+  projects:
+  - name: 'project-alpha'
+    description: 'On-call engineer operates project alpha during the approved window'
+    access:
+      read:
+      - 'arn:aws:s3:::shared-policies/team/*'
+      - 'arn:aws:s3:::project-alpha/artifacts/*'
+      write:
+      - 'arn:aws:s3:::shared-policies/team/*'
+      - 'arn:aws:s3:::project-alpha/artifacts/*'
+      list:
+      - 'arn:aws:s3:::project-alpha/artifacts/*'
+  - name: 'project-beta'
+    description: 'Not approved for this handover - must add no permission during the window'
+    access:
+      read:
+      - 'arn:aws:s3:::shared-policies/team/*'
+      - 'arn:aws:s3:::project-beta/artifacts/*'
+      write:
+      - 'arn:aws:s3:::shared-policies/team/*'
+      - 'arn:aws:s3:::project-beta/artifacts/*'
+      list:
+      - 'arn:aws:s3:::project-beta/artifacts/*'

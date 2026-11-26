@@ -37,6 +37,46 @@ def check(conf_schema: Schema, conf: dict[str, Any]) -> bool:
         return False
 
 
+WILDCARD_ONLY_SCHEMA = {
+    Optional("single-actions"): [str],
+    Optional("service-read"): [str],
+    Optional("service-write"): [str],
+    Optional("service-list"): [str],
+    Optional("service-tagging"): [str],
+    Optional("service-permissions-management"): [str],
+}
+
+STS_SCHEMA = {And(Use(str), Regex(r"^assume-role(-with-)*(saml|web-identity)*$")): [str]}  # ty: ignore[invalid-argument-type]
+
+# A project grant reuses the CRUD vocabulary, but only inside a handover project.
+PROJECT_ACCESS_SCHEMA = {
+    Optional("effect"): And(Use(str), lambda s: s in ("Allow", "Deny")),  # ty: ignore[invalid-argument-type]
+    Optional("read"): [str],
+    Optional("write"): [str],
+    Optional("list"): [str],
+    Optional("permissions-management"): [str],
+    Optional("tagging"): [str],
+    Optional("wildcard-only"): WILDCARD_ONLY_SCHEMA,
+    Optional("skip-resource-constraints"): [str],
+    Optional("exclude-actions"): [str],
+    Optional("sts"): STS_SCHEMA,
+}
+
+HANDOVER_SCHEMA = {
+    Optional("approval"): {
+        Optional("project"): str,
+        Optional("start"): str,
+        Optional("end"): str,
+    },
+    "projects": [
+        {
+            "name": And(Use(str)),  # ty: ignore[invalid-argument-type]
+            Optional("description"): And(Use(str)),  # ty: ignore[invalid-argument-type]
+            "access": PROJECT_ACCESS_SCHEMA,
+        }
+    ],
+}
+
 CRUD_SCHEMA = Schema(
     {
         "mode": "crud",
@@ -47,17 +87,11 @@ CRUD_SCHEMA = Schema(
         Optional("list"): [str],
         Optional("permissions-management"): [str],
         Optional("tagging"): [str],
-        Optional("wildcard-only"): {
-            Optional("single-actions"): [str],
-            Optional("service-read"): [str],
-            Optional("service-write"): [str],
-            Optional("service-list"): [str],
-            Optional("service-tagging"): [str],
-            Optional("service-permissions-management"): [str],
-        },
+        Optional("wildcard-only"): WILDCARD_ONLY_SCHEMA,
         Optional("skip-resource-constraints"): [str],
         Optional("exclude-actions"): [str],
-        Optional("sts"): {And(Use(str), Regex(r"^assume-role(-with-)*(saml|web-identity)*$")): [str]},  # ty: ignore[invalid-argument-type]
+        Optional("sts"): STS_SCHEMA,
+        Optional("handover"): HANDOVER_SCHEMA,
     }
 )
 
@@ -98,6 +132,21 @@ def check_crud_schema(cfg: dict[str, Any]) -> bool:
         "The provided template does not match the required schema for CRUD mode. "
         "Please use the create-template command to generate a valid YML template that "
         "Policy Sentry will accept."
+    )
+
+
+def check_handover_schema(cfg: dict[str, Any]) -> bool:
+    """
+    Determines whether the user-provided config matches the required schema for a role handover under CRUD mode.
+    """
+    result = check(CRUD_SCHEMA, cfg)
+    if result is True:
+        return result
+
+    raise Exception(
+        "The provided template does not match the required schema for a CRUD mode role handover. "
+        "Please use the create-template command to generate a valid YML template with a `handover` "
+        "section that Policy Sentry will accept."
     )
 
 

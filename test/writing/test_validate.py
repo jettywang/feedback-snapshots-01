@@ -1,5 +1,5 @@
 import unittest
-from policy_sentry.writing.validate import check_actions_schema, check_crud_schema
+from policy_sentry.writing.validate import check_actions_schema, check_crud_schema, check_handover_schema
 
 valid_cfg_for_crud = {
     "mode": "crud",
@@ -89,3 +89,62 @@ class YMLSchemaTestCase(unittest.TestCase):
             check_crud_schema(invalid_crud_with_mispelled_category)
         with self.assertRaises(Exception):
             check_crud_schema(invalid_crud_with_invalid_sts_action)
+
+
+valid_cfg_for_handover = {
+    "mode": "crud",
+    "name": "RoleWithHandover",
+    "read": ["arn:aws:s3:::shared-policies/team/*"],
+    "handover": {
+        "approval": {
+            "project": "project-alpha",
+            "start": "2026-12-01T00:00:00Z",
+            "end": "2026-12-02T00:00:00Z",
+        },
+        "projects": [
+            {
+                "name": "project-alpha",
+                "description": "Temporary operator",
+                "access": {"read": ["arn:aws:s3:::project-alpha/artifacts/*"]},
+            }
+        ],
+    },
+}
+
+invalid_cfg_for_handover_without_project_name = {
+    "mode": "crud",
+    "handover": {
+        "approval": {"project": "project-alpha", "start": "2026-12-01T00:00:00Z", "end": "2026-12-02T00:00:00Z"},
+        "projects": [{"access": {"read": ["arn:aws:s3:::project-alpha/artifacts/*"]}}],
+    },
+}
+
+invalid_cfg_for_handover_without_projects = {
+    "mode": "crud",
+    "handover": {
+        "approval": {"project": "project-alpha", "start": "2026-12-01T00:00:00Z", "end": "2026-12-02T00:00:00Z"},
+    },
+}
+
+
+class HandoverSchemaTestCase(unittest.TestCase):
+    def test_handover_schema(self):
+        self.assertTrue(check_handover_schema(valid_cfg_for_handover))
+        self.assertTrue(check_crud_schema(valid_cfg_for_handover))
+        with self.assertRaises(Exception):
+            check_handover_schema(invalid_cfg_for_handover_without_project_name)
+        with self.assertRaises(Exception):
+            check_handover_schema(invalid_cfg_for_handover_without_projects)
+
+    def test_plain_crud_template_has_no_handover(self):
+        from policy_sentry.writing.template import create_crud_template
+
+        self.assertNotIn("handover:", create_crud_template())
+
+    def test_handover_template_includes_crud_and_handover(self):
+        from policy_sentry.writing.template import create_crud_template
+
+        template = create_crud_template(with_handover=True)
+        self.assertIn("mode: crud", template)
+        self.assertIn("handover:", template)
+        self.assertIn("approval:", template)

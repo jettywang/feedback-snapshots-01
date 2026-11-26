@@ -4,6 +4,7 @@ These can be used for generating policies
 
 from __future__ import annotations
 
+import copy
 from typing import Any
 
 ACTIONS_TEMPLATE = """mode: actions
@@ -60,6 +61,49 @@ sts:
     - ''
 """
 
+# Optional role handover section. It is appended to the CRUD template only on request so that
+# templates without a handover keep their existing shape.
+CRUD_HANDOVER_TEMPLATE = """# Optional role handover: a colleague temporarily operates ONE approved project.
+# The block above is the role's formal/standing permission. The approvals below are temporary.
+# Temporary access only applies while BOTH the approving project name and the time window match
+# a `policy_sentry handover --at <timestamp>` evaluation. Removing the temporary approval must never remove
+# the formal permission declared above.
+handover:
+  # The single project approved for the handover. Required when projects are declared.
+  approval:
+    project: 'project-alpha'
+    # ISO-8601 timestamps. The window is [start, end): start is inclusive, end is exclusive.
+    start: '2026-12-01T00:00:00Z'
+    end: '2026-12-02T00:00:00Z'
+  # Projects the temporary operator may act on during the approved window.
+  projects:
+  - name: 'project-alpha'
+    description: 'Temporary operator on the approved project only'
+    access:
+      read:
+      - 'arn:aws:s3:::project-alpha/artifacts/*'
+      write:
+      - 'arn:aws:s3:::project-alpha/artifacts/*'
+"""
+
+CRUD_HANDOVER_TEMPLATE_DICT = {
+    "approval": {
+        "project": "project-alpha",
+        "start": "2026-12-01T00:00:00Z",
+        "end": "2026-12-02T00:00:00Z",
+    },
+    "projects": [
+        {
+            "name": "project-alpha",
+            "description": "Temporary operator on the approved project only",
+            "access": {
+                "read": ["arn:aws:s3:::project-alpha/artifacts/*"],
+                "write": ["arn:aws:s3:::project-alpha/artifacts/*"],
+            },
+        }
+    ],
+}
+
 CRUD_TEMPLATE_DICT = {
     "mode": "crud",
     "name": "",
@@ -88,8 +132,10 @@ CRUD_TEMPLATE_DICT = {
 ACTIONS_TEMPLATE_DICT = {"mode": "actions", "name": "", "actions": []}
 
 
-def create_crud_template() -> str:
+def create_crud_template(with_handover: bool = False) -> str:
     """Generate the CRUD YML Template"""
+    if with_handover:
+        return CRUD_TEMPLATE + CRUD_HANDOVER_TEMPLATE
     return CRUD_TEMPLATE
 
 
@@ -98,8 +144,12 @@ def create_actions_template() -> str:
     return ACTIONS_TEMPLATE
 
 
-def get_crud_template_dict() -> dict[str, Any]:
+def get_crud_template_dict(with_handover: bool = False) -> dict[str, Any]:
     """Generate the CRUD template in dict format"""
+    if with_handover:
+        template = copy.deepcopy(CRUD_TEMPLATE_DICT)
+        template["handover"] = copy.deepcopy(CRUD_HANDOVER_TEMPLATE_DICT)
+        return template
     return CRUD_TEMPLATE_DICT
 
 

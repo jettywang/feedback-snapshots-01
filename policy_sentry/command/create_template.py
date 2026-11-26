@@ -31,9 +31,9 @@ logger = logging.getLogger(__name__)
 @click.option(
     "--template-type",
     "-t",
-    type=click.Choice(["actions", "crud"], case_sensitive=False),
+    type=click.Choice(["actions", "crud", "handover"], case_sensitive=False),
     required=True,
-    help="Type of write_policy template to create - actions or CRUD. Case insensitive.",
+    help="Type of write_policy template to create - actions, CRUD, or handover (CRUD plus a role handover). Case insensitive.",
 )
 @click.option(
     "--verbose",
@@ -50,10 +50,13 @@ def create_template(output_file: str | Path, template_type: str, verbose: str) -
         log_level = getattr(logging, verbose.upper())
         set_stream_logger(level=log_level)
 
+    template_type = template_type.lower()
     if template_type == "actions":
         template = create_actions_template()
     elif template_type == "crud":
         template = create_crud_template()
+    elif template_type == "handover":
+        template = create_crud_template(with_handover=True)
     else:
         print(f"Unknown template type: {template_type}")
         sys.exit()

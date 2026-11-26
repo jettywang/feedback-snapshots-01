@@ -469,6 +469,12 @@ class SidGroup:
 
         cfg_mode = cfg.get("mode")
         if cfg_mode == "crud":
+            if isinstance(cfg.get("handover"), dict):
+                raise ValueError(
+                    "This CRUD template declares a role handover. Use `policy_sentry handover` to review the "
+                    "standing and temporary permissions separately; write-policy cannot merge them without "
+                    "losing the approval boundary."
+                )
             logger.debug("CRUD mode selected")
             check_crud_schema(cfg)
             # EXCLUDE ACTIONS
