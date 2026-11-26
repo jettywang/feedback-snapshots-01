@@ -82,10 +82,15 @@ class _Aggregation(ABC, Generic[_DataPointVarT]):
         self,
         attributes: Attributes,
         reservoir_builder: ExemplarReservoirBuilder,
+        exemplar_attribute_keys: frozenset[str] | None = None,
     ):
         self._lock = Lock()
         self._attributes = attributes
-        self._reservoir = reservoir_builder()
+        self._exemplar_attribute_keys = exemplar_attribute_keys
+        if exemplar_attribute_keys is None:
+            self._reservoir = reservoir_builder()
+        else:
+            self._reservoir = reservoir_builder(attribute_keys=exemplar_attribute_keys)
         self._previous_point = None
 
     @abstractmethod
@@ -151,8 +156,9 @@ class _SumAggregation(_Aggregation[Sum]):
         instrument_aggregation_temporality: AggregationTemporality,
         start_time_unix_nano: int,
         reservoir_builder: ExemplarReservoirBuilder,
+        exemplar_attribute_keys: frozenset[str] | None = None,
     ):
-        super().__init__(attributes, reservoir_builder)
+        super().__init__(attributes, reservoir_builder, exemplar_attribute_keys)
 
         self._start_time_unix_nano = start_time_unix_nano
         self._instrument_aggregation_temporality = instrument_aggregation_temporality
@@ -371,8 +377,9 @@ class _LastValueAggregation(_Aggregation[GaugePoint]):
         attributes: Attributes,
         reservoir_builder: ExemplarReservoirBuilder,
         instrument_is_synchronous: bool,
+        exemplar_attribute_keys: frozenset[str] | None = None,
     ):
-        super().__init__(attributes, reservoir_builder)
+        super().__init__(attributes, reservoir_builder, exemplar_attribute_keys)
         self._instrument_is_synchronous = instrument_is_synchronous
         self._value = None
 
@@ -449,6 +456,7 @@ class _ExplicitBucketHistogramAggregation(_Aggregation[HistogramPoint]):
         reservoir_builder: ExemplarReservoirBuilder,
         boundaries: Sequence[float] | None = None,
         record_min_max: bool = True,
+        exemplar_attribute_keys: frozenset[str] | None = None,
     ):
         if boundaries is None:
             boundaries = _DEFAULT_EXPLICIT_BUCKET_HISTOGRAM_AGGREGATION_BOUNDARIES
@@ -460,7 +468,8 @@ class _ExplicitBucketHistogramAggregation(_Aggregation[HistogramPoint]):
                     raise ValueError("boundaries must be strictly increasing")
         super().__init__(
             attributes,
-            reservoir_builder=partial(reservoir_builder, boundaries=boundaries),
+            partial(reservoir_builder, boundaries=boundaries),
+            exemplar_attribute_keys,
         )
 
         self._instrument_aggregation_temporality = instrument_aggregation_temporality
@@ -602,6 +611,7 @@ class _ExponentialBucketHistogramAggregation(_Aggregation[HistogramPoint]):
         max_size: int = 160,
         max_scale: int = 20,
         record_min_max: bool = True,
+        exemplar_attribute_keys: frozenset[str] | None = None,
     ):
         # max_size is the maximum capacity of the positive and negative
         # buckets.
@@ -632,7 +642,8 @@ class _ExponentialBucketHistogramAggregation(_Aggregation[HistogramPoint]):
 
         super().__init__(
             attributes,
-            reservoir_builder=partial(reservoir_builder, size=min(20, max_size)),
+            partial(reservoir_builder, size=min(20, max_size)),
+            exemplar_attribute_keys,
         )
 
         self._instrument_aggregation_temporality = instrument_aggregation_temporality
@@ -1108,6 +1119,7 @@ class Aggregation(ABC):
         attributes: Attributes,
         reservoir_factory: Callable[[type[_Aggregation]], ExemplarReservoirBuilder],
         start_time_unix_nano: int,
+        exemplar_attribute_keys: frozenset[str] | None = None,
     ) -> _Aggregation:
         """Creates an aggregation"""
 
@@ -1137,6 +1149,7 @@ class DefaultAggregation(Aggregation):
         attributes: Attributes,
         reservoir_factory: Callable[[type[_Aggregation]], ExemplarReservoirBuilder],
         start_time_unix_nano: int,
+        exemplar_attribute_keys: frozenset[str] | None = None,
     ) -> _Aggregation:
         # pylint: disable=too-many-return-statements
         if isinstance(instrument, Counter):
@@ -1146,6 +1159,7 @@ class DefaultAggregation(Aggregation):
                 instrument_is_monotonic=True,
                 instrument_aggregation_temporality=(AggregationTemporality.DELTA),
                 start_time_unix_nano=start_time_unix_nano,
+                exemplar_attribute_keys=exemplar_attribute_keys,
             )
         if isinstance(instrument, UpDownCounter):
             return _SumAggregation(
@@ -1154,6 +1168,7 @@ class DefaultAggregation(Aggregation):
                 instrument_is_monotonic=False,
                 instrument_aggregation_temporality=(AggregationTemporality.DELTA),
                 start_time_unix_nano=start_time_unix_nano,
+                exemplar_attribute_keys=exemplar_attribute_keys,
             )
 
         if isinstance(instrument, ObservableCounter):
@@ -1163,6 +1178,7 @@ class DefaultAggregation(Aggregation):
                 instrument_is_monotonic=True,
                 instrument_aggregation_temporality=(AggregationTemporality.CUMULATIVE),
                 start_time_unix_nano=start_time_unix_nano,
+                exemplar_attribute_keys=exemplar_attribute_keys,
             )
 
         if isinstance(instrument, ObservableUpDownCounter):
@@ -1172,6 +1188,7 @@ class DefaultAggregation(Aggregation):
                 instrument_is_monotonic=False,
                 instrument_aggregation_temporality=(AggregationTemporality.CUMULATIVE),
                 start_time_unix_nano=start_time_unix_nano,
+                exemplar_attribute_keys=exemplar_attribute_keys,
             )
 
         if isinstance(instrument, Histogram):
@@ -1182,6 +1199,7 @@ class DefaultAggregation(Aggregation):
                 instrument_aggregation_temporality=(AggregationTemporality.DELTA),
                 boundaries=boundaries,
                 start_time_unix_nano=start_time_unix_nano,
+                exemplar_attribute_keys=exemplar_attribute_keys,
             )
 
         if isinstance(instrument, ObservableGauge):
@@ -1189,6 +1207,7 @@ class DefaultAggregation(Aggregation):
                 attributes,
                 reservoir_builder=reservoir_factory(_LastValueAggregation),
                 instrument_is_synchronous=False,
+                exemplar_attribute_keys=exemplar_attribute_keys,
             )
 
         if isinstance(instrument, _Gauge):
@@ -1196,6 +1215,7 @@ class DefaultAggregation(Aggregation):
                 attributes,
                 reservoir_builder=reservoir_factory(_LastValueAggregation),
                 instrument_is_synchronous=True,
+                exemplar_attribute_keys=exemplar_attribute_keys,
             )
 
         # pylint: disable=broad-exception-raised
@@ -1232,6 +1252,7 @@ class ExponentialBucketHistogramAggregation(Aggregation):
         attributes: Attributes,
         reservoir_factory: Callable[[type[_Aggregation]], ExemplarReservoirBuilder],
         start_time_unix_nano: int,
+        exemplar_attribute_keys: frozenset[str] | None = None,
     ) -> _Aggregation:
         instrument_aggregation_temporality = AggregationTemporality.UNSPECIFIED
         if isinstance(instrument, Synchronous):
@@ -1247,6 +1268,7 @@ class ExponentialBucketHistogramAggregation(Aggregation):
             max_size=self._max_size,
             max_scale=self._max_scale,
             record_min_max=self._record_min_max,
+            exemplar_attribute_keys=exemplar_attribute_keys,
         )
 
 
@@ -1278,6 +1300,7 @@ class ExplicitBucketHistogramAggregation(Aggregation):
         attributes: Attributes,
         reservoir_factory: Callable[[type[_Aggregation]], ExemplarReservoirBuilder],
         start_time_unix_nano: int,
+        exemplar_attribute_keys: frozenset[str] | None = None,
     ) -> _Aggregation:
         instrument_aggregation_temporality = AggregationTemporality.UNSPECIFIED
         if isinstance(instrument, Synchronous):
@@ -1297,6 +1320,7 @@ class ExplicitBucketHistogramAggregation(Aggregation):
             reservoir_factory(_ExplicitBucketHistogramAggregation),
             boundaries,
             self._record_min_max,
+            exemplar_attribute_keys=exemplar_attribute_keys,
         )
 
 
@@ -1312,6 +1336,7 @@ class SumAggregation(Aggregation):
         attributes: Attributes,
         reservoir_factory: Callable[[type[_Aggregation]], ExemplarReservoirBuilder],
         start_time_unix_nano: int,
+        exemplar_attribute_keys: frozenset[str] | None = None,
     ) -> _Aggregation:
         instrument_aggregation_temporality = AggregationTemporality.UNSPECIFIED
         if isinstance(instrument, Synchronous):
@@ -1325,6 +1350,7 @@ class SumAggregation(Aggregation):
             instrument_aggregation_temporality,
             start_time_unix_nano,
             reservoir_factory(_SumAggregation),
+            exemplar_attribute_keys=exemplar_attribute_keys,
         )
 
 
@@ -1342,11 +1368,13 @@ class LastValueAggregation(Aggregation):
         attributes: Attributes,
         reservoir_factory: Callable[[type[_Aggregation]], ExemplarReservoirBuilder],
         start_time_unix_nano: int,
+        exemplar_attribute_keys: frozenset[str] | None = None,
     ) -> _Aggregation:
         return _LastValueAggregation(
             attributes,
             reservoir_builder=reservoir_factory(_LastValueAggregation),
             instrument_is_synchronous=isinstance(instrument, Synchronous),
+            exemplar_attribute_keys=exemplar_attribute_keys,
         )
 
 
@@ -1359,5 +1387,10 @@ class DropAggregation(Aggregation):
         attributes: Attributes,
         reservoir_factory: Callable[[type[_Aggregation]], ExemplarReservoirBuilder],
         start_time_unix_nano: int,
+        exemplar_attribute_keys: frozenset[str] | None = None,
     ) -> _Aggregation:
-        return _DropAggregation(attributes, reservoir_factory(_DropAggregation))
+        return _DropAggregation(
+            attributes,
+            reservoir_factory(_DropAggregation),
+            exemplar_attribute_keys=exemplar_attribute_keys,
+        )

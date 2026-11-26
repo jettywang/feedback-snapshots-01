@@ -81,6 +81,7 @@ class _ViewInstrumentMatch:
         instrument_class_aggregation: dict[type, Aggregation],
         cardinality_limit: int = _DEFAULT_CARDINALITY_LIMIT,
         reset_on_collect: bool = False,
+        exemplar_attribute_keys: frozenset[str] | None = None,
     ):
         self._view = view
         self._cardinality_limit = cardinality_limit
@@ -91,6 +92,7 @@ class _ViewInstrumentMatch:
         self._attributes_aggregation: dict[_HashedAttributes, _Aggregation] = {}
         self._lock = Lock()
         self._instrument_class_aggregation = instrument_class_aggregation
+        self._exemplar_attribute_keys = exemplar_attribute_keys
         self._name = self._view._name or self._instrument.name
         self._description = self._view._description or self._instrument.description
         # A view that specifies attribute keys takes precedence over the
@@ -107,6 +109,7 @@ class _ViewInstrumentMatch:
                 None,
                 self._view._exemplar_reservoir_factory,
                 0,
+                self._exemplar_attribute_keys,
             )
         else:
             self._aggregation = self._instrument_class_aggregation[self._instrument.__class__]._create_aggregation(
@@ -114,6 +117,7 @@ class _ViewInstrumentMatch:
                 None,
                 self._view._exemplar_reservoir_factory,
                 0,
+                self._exemplar_attribute_keys,
             )
 
     def conflicts(self, other: "_ViewInstrumentMatch") -> bool:
@@ -192,6 +196,7 @@ class _ViewInstrumentMatch:
                 attributes,
                 self._view._exemplar_reservoir_factory,
                 start_time_unix_nano,
+                self._exemplar_attribute_keys,
             )
         else:
             aggregation = self._instrument_class_aggregation[self._instrument.__class__]._create_aggregation(
@@ -199,6 +204,7 @@ class _ViewInstrumentMatch:
                 attributes,
                 self._view._exemplar_reservoir_factory,
                 start_time_unix_nano,
+                self._exemplar_attribute_keys,
             )
         self._attributes_aggregation[aggr_key] = aggregation
         return aggregation

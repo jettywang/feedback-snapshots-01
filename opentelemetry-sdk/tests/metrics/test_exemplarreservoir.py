@@ -105,6 +105,52 @@ class TestSimpleFixedSizeExemplarReservoir(TestCase):
         self.assertEqual(new_exemplars[0].value, 4.0)
         self.assertEqual(new_exemplars[1].value, 5.0)
 
+    def test_attribute_keys_restrict_filtered_attributes(self):
+        span_context = SpanContext(
+            trace_id=self.TRACE_ID,
+            span_id=self.SPAN_ID,
+            is_remote=False,
+            trace_flags=TraceFlags(TraceFlags.SAMPLED),
+            trace_state={},
+        )
+        span = trace.NonRecordingSpan(span_context)
+        ctx = trace.set_span_in_context(span)
+
+        for attribute_keys in (frozenset({"allowed"}), {"allowed"}):
+            with self.subTest(attribute_keys=attribute_keys):
+                reservoir = SimpleFixedSizeExemplarReservoir(1, attribute_keys=attribute_keys)
+                reservoir.offer(
+                    1,
+                    time_ns(),
+                    {"allowed": "yes", "blocked": "no"},
+                    ctx,
+                )
+                exemplars = reservoir.collect({})
+                self.assertEqual(len(exemplars), 1)
+                self.assertEqual(exemplars[0].filtered_attributes, {"allowed": "yes"})
+                # The visibility policy must not touch trace correlation.
+                self.assertEqual(exemplars[0].trace_id, self.TRACE_ID)
+                self.assertEqual(exemplars[0].span_id, self.SPAN_ID)
+
+    def test_empty_attribute_keys_expose_no_attributes(self):
+        reservoir = SimpleFixedSizeExemplarReservoir(1, attribute_keys=frozenset())
+        reservoir.offer(1, time_ns(), {"allowed": "yes"}, Context())
+        exemplars = reservoir.collect({})
+        self.assertEqual(len(exemplars), 1)
+        self.assertEqual(exemplars[0].filtered_attributes, {})
+
+    def test_attribute_keys_apply_after_point_attribute_filtering(self):
+        reservoir = SimpleFixedSizeExemplarReservoir(1, attribute_keys=frozenset({"allowed"}))
+        reservoir.offer(
+            1,
+            time_ns(),
+            {"allowed": "yes", "point": "kept"},
+            Context(),
+        )
+        exemplars = reservoir.collect({"point": "kept"})
+        self.assertEqual(len(exemplars), 1)
+        self.assertEqual(exemplars[0].filtered_attributes, {"allowed": "yes"})
+
 
 class TestAlignedHistogramBucketExemplarReservoir(TestCase):
     TRACE_ID = int("d4cda95b652f4a1592b449d5929fda1b", 16)
@@ -159,6 +205,29 @@ class TestAlignedHistogramBucketExemplarReservoir(TestCase):
         self.assertEqual(exemplars[0].value, 2)
         self.assertEqual(exemplars[1].value, 8)
         self.assertEqual(exemplars[2].value, 15)
+
+    def test_attribute_keys_restrict_filtered_attributes(self):
+        reservoir = AlignedHistogramBucketExemplarReservoir(
+            [0, 5, 10, 25],
+            attribute_keys=frozenset({"allowed"}),
+        )
+        span_context = SpanContext(
+            trace_id=self.TRACE_ID,
+            span_id=self.SPAN_ID,
+            is_remote=False,
+            trace_flags=TraceFlags(TraceFlags.SAMPLED),
+            trace_state={},
+        )
+        span = trace.NonRecordingSpan(span_context)
+        ctx = trace.set_span_in_context(span)
+
+        reservoir.offer(2, time_ns(), {"allowed": "yes", "blocked": "no"}, ctx)
+
+        exemplars = reservoir.collect({})
+        self.assertEqual(len(exemplars), 1)
+        self.assertEqual(exemplars[0].filtered_attributes, {"allowed": "yes"})
+        self.assertEqual(exemplars[0].trace_id, self.TRACE_ID)
+        self.assertEqual(exemplars[0].span_id, self.SPAN_ID)
 
 
 class TestExemplarReservoirFactory(TestCase):

@@ -409,6 +409,7 @@ class Test_ViewInstrumentMatch(TestCase):  # pylint: disable=invalid-name
             {"foo": "bar0"},
             _default_reservoir_factory,
             start_time_unix_nano,
+            None,
         )
         collection_start_time_unix_nano = time_ns()
         collected_data_points = view_instrument_match.collect(
@@ -428,7 +429,7 @@ class Test_ViewInstrumentMatch(TestCase):  # pylint: disable=invalid-name
             )
         )
         view_instrument_match._view._aggregation._create_aggregation.assert_called_with(
-            instrument, {"foo": "bar1"}, _default_reservoir_factory, 1
+            instrument, {"foo": "bar1"}, _default_reservoir_factory, 1, None
         )
         collection_start_time_unix_nano = time_ns()
         collected_data_points = view_instrument_match.collect(
@@ -450,7 +451,7 @@ class Test_ViewInstrumentMatch(TestCase):  # pylint: disable=invalid-name
             )
         )
         view_instrument_match._view._aggregation._create_aggregation.assert_called_with(
-            instrument, {"foo": "bar"}, _default_reservoir_factory, 2
+            instrument, {"foo": "bar"}, _default_reservoir_factory, 2, None
         )
         # No new calls to _create_aggregation because attributes remain the same
         view_instrument_match.consume_measurement(

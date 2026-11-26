@@ -70,13 +70,18 @@ class ExemplarReservoir(ABC):
 
 
 class ExemplarBucket:
-    def __init__(self) -> None:
+    def __init__(self, attribute_keys: frozenset[str] | None = None) -> None:
         self.__value: int | float = 0
         self.__attributes: Attributes = None
         self.__time_unix_nano: int = 0
         self.__span_id: int | None = None
         self.__trace_id: int | None = None
         self.__offered: bool = False
+        # When ``None`` every measurement attribute is eligible for the
+        # exemplar, otherwise only the attributes whose key is in the set are
+        # exposed. This lets each metric reader enforce its own audience-level
+        # visibility policy without affecting the aggregated data points.
+        self.__attribute_keys = attribute_keys
 
     def offer(
         self,
@@ -112,9 +117,14 @@ class ExemplarBucket:
         # filters out attributes from the measurement that are already included in the metric data point
         # See the specification for more details:
         # https://github.com/open-telemetry/opentelemetry-specification/blob/main/specification/metrics/sdk.md#exemplar
-        filtered_attributes = (
-            {k: v for k, v in self.__attributes.items() if k not in point_attributes} if self.__attributes else None
-        )
+        filtered_attributes = None
+        if self.__attributes:
+            filtered_attributes = {
+                key: value
+                for key, value in self.__attributes.items()
+                if key not in point_attributes
+                and (self.__attribute_keys is None or key in self.__attribute_keys)
+            }
 
         exemplar = Exemplar(
             filtered_attributes,
@@ -143,10 +153,13 @@ class BucketIndexError(ValueError):
 class FixedSizeExemplarReservoirABC(ExemplarReservoir):
     """Abstract class for a reservoir with fixed size."""
 
-    def __init__(self, size: int, **kwargs) -> None:
+    def __init__(self, size: int, attribute_keys: frozenset[str] | None = None, **kwargs) -> None:
         super().__init__(**kwargs)
         self._size: int = size
-        self._reservoir_storage: Mapping[int, ExemplarBucket] = defaultdict(ExemplarBucket)
+        self._attribute_keys: frozenset[str] | None = attribute_keys
+        self._reservoir_storage: Mapping[int, ExemplarBucket] = defaultdict(
+            lambda: ExemplarBucket(attribute_keys=self._attribute_keys)
+        )
         self._lock = Lock()
 
     def collect(self, point_attributes: Attributes) -> list[Exemplar]:
@@ -232,8 +245,13 @@ class SimpleFixedSizeExemplarReservoir(FixedSizeExemplarReservoirABC):
         https://github.com/open-telemetry/opentelemetry-specification/blob/main/specification/metrics/sdk.md#simplefixedsizeexemplarreservoir
     """
 
-    def __init__(self, size: int = 1, **kwargs) -> None:
-        super().__init__(size, **kwargs)
+    def __init__(
+        self,
+        size: int = 1,
+        attribute_keys: frozenset[str] | None = None,
+        **kwargs,
+    ) -> None:
+        super().__init__(size, attribute_keys, **kwargs)
         self._measurements_seen: int = 0
 
     def _reset(self) -> None:
@@ -268,8 +286,13 @@ class AlignedHistogramBucketExemplarReservoir(FixedSizeExemplarReservoirABC):
         https://github.com/open-telemetry/opentelemetry-specification/blob/main/specification/metrics/sdk.md#alignedhistogrambucketexemplarreservoir
     """
 
-    def __init__(self, boundaries: Sequence[float], **kwargs) -> None:
-        super().__init__(len(boundaries) + 1, **kwargs)
+    def __init__(
+        self,
+        boundaries: Sequence[float],
+        attribute_keys: frozenset[str] | None = None,
+        **kwargs,
+    ) -> None:
+        super().__init__(len(boundaries) + 1, attribute_keys, **kwargs)
         self._boundaries: Sequence[float] = boundaries
 
     def _find_bucket_index(

@@ -58,11 +58,13 @@ class SynchronousMeasurementConsumer(MeasurementConsumer):
         self._lock = Lock()
         self._sdk_config = sdk_config
         self._reader_storages: Mapping[opentelemetry.sdk.metrics.export.MetricReader, MetricReaderStorage] = {
+            # pylint: disable=protected-access
             reader: MetricReaderStorage(
                 sdk_config,
                 reader._instrument_class_temporality,
                 reader._instrument_class_aggregation,
                 reader._instrument_class_cardinality_limit,
+                reader._exemplar_attribute_keys,
             )
             for reader in metric_readers
         }
@@ -207,6 +209,8 @@ class SynchronousMeasurementConsumer(MeasurementConsumer):
                 metric_reader._instrument_class_aggregation,
                 # pylint: disable-next=protected-access
                 metric_reader._instrument_class_cardinality_limit,
+                # pylint: disable-next=protected-access
+                metric_reader._exemplar_attribute_keys,
             )
             self._reader_storages = new_reader_storages
 

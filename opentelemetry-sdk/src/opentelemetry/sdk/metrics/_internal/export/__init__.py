@@ -206,6 +206,22 @@ def _validate_cardinality_limit(typ: type, limit: int) -> type:
     return _CARDINALITY_INSTRUMENT_CLASSES[typ]
 
 
+def _validate_exemplar_attribute_keys(
+    exemplar_attribute_keys: frozenset[str] | set[str] | None,
+) -> frozenset[str] | None:
+    """Return a frozen copy of the exemplar attribute allow-list after validation."""
+    if exemplar_attribute_keys is None:
+        return None
+    if not isinstance(exemplar_attribute_keys, (frozenset, set)) or any(
+        not isinstance(key, str) for key in exemplar_attribute_keys
+    ):
+        raise ValueError(
+            "exemplar_attribute_keys must be a set (or frozenset) of strings, "
+            f"got {exemplar_attribute_keys!r}"
+        )
+    return frozenset(exemplar_attribute_keys)
+
+
 class MetricProducer(ABC):
     """Interface bridging third-party metric sources into a :class:`MetricReader`.
 
@@ -271,6 +287,16 @@ class MetricReader(ABC):
             takes precedence. Measurements with further attribute sets are
             aggregated into one additional point identified by the attribute
             ``otel.metric.overflow=true``.
+        exemplar_attribute_keys: An optional set of attribute keys that
+            restricts which measurement attributes are exported on exemplars
+            collected by this reader. When ``None`` (the default) every
+            attribute that is not already part of the metric data point is
+            exposed, which preserves the previous behavior. When provided,
+            exemplars only expose attributes whose key is in the set. The
+            policy is scoped to this reader, so different readers (for example
+            an internal and a public one) can apply different policies to the
+            same measurements. It never affects aggregation, bucket counts or
+            the exemplar ``trace_id``/``span_id`` correlation fields.
 
     .. document protected _receive_metrics which is a intended to be overridden by subclass
     .. automethod:: _receive_metrics
@@ -281,6 +307,7 @@ class MetricReader(ABC):
         preferred_temporality: dict[type, AggregationTemporality] | None = None,
         preferred_aggregation: dict[type, opentelemetry.sdk.metrics.view.Aggregation] | None = None,
         cardinality_limits: CardinalityLimits | None = None,
+        exemplar_attribute_keys: frozenset[str] | set[str] | None = None,
         *,
         metric_producers: Sequence[MetricProducer] = (),
         otel_component_type: OtelComponentTypeValues | None = None,
@@ -378,6 +405,8 @@ class MetricReader(ABC):
             for typ, limit in cardinality_limits.items():
                 self._instrument_class_cardinality_limit[_validate_cardinality_limit(typ, limit)] = limit
 
+        self._exemplar_attribute_keys = _validate_exemplar_attribute_keys(exemplar_attribute_keys)
+
         self._otel_component_type = otel_component_type.value if otel_component_type else type(self).__qualname__
         self._metrics = create_metric_reader_metrics(
             self._otel_component_type,
@@ -474,6 +503,7 @@ class InMemoryMetricReader(MetricReader):
         preferred_temporality: dict[type, AggregationTemporality] | None = None,
         preferred_aggregation: dict[type, opentelemetry.sdk.metrics.view.Aggregation] | None = None,
         cardinality_limits: CardinalityLimits | None = None,
+        exemplar_attribute_keys: frozenset[str] | set[str] | None = None,
         *,
         metric_producers: Sequence[MetricProducer] = (),
     ) -> None:
@@ -481,6 +511,7 @@ class InMemoryMetricReader(MetricReader):
             preferred_temporality=preferred_temporality,
             preferred_aggregation=preferred_aggregation,
             cardinality_limits=cardinality_limits,
+            exemplar_attribute_keys=exemplar_attribute_keys,
             metric_producers=metric_producers,
         )
         self._lock = RLock()
@@ -525,6 +556,7 @@ class PeriodicExportingMetricReader(MetricReader):
         export_interval_millis: float | None = None,
         export_timeout_millis: float | None = None,
         cardinality_limits: CardinalityLimits | None = None,
+        exemplar_attribute_keys: frozenset[str] | set[str] | None = None,
         *,
         metric_producers: Sequence[MetricProducer] = (),
     ) -> None:
@@ -533,6 +565,7 @@ class PeriodicExportingMetricReader(MetricReader):
             preferred_temporality=exporter._preferred_temporality,
             preferred_aggregation=exporter._preferred_aggregation,
             cardinality_limits=cardinality_limits,
+            exemplar_attribute_keys=exemplar_attribute_keys,
             metric_producers=metric_producers,
             otel_component_type=OtelComponentTypeValues.PERIODIC_METRIC_READER,
         )

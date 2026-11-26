@@ -60,6 +60,7 @@ class MetricReaderStorage:
         instrument_class_temporality: dict[type, AggregationTemporality],
         instrument_class_aggregation: dict[type, Aggregation],
         instrument_class_cardinality_limit: dict[type, int] | None = None,
+        exemplar_attribute_keys: frozenset[str] | None = None,
     ) -> None:
         self._lock = RLock()
         self._sdk_config = sdk_config
@@ -67,6 +68,7 @@ class MetricReaderStorage:
         self._instrument_class_temporality = instrument_class_temporality
         self._instrument_class_aggregation = instrument_class_aggregation
         self._instrument_class_cardinality_limit = instrument_class_cardinality_limit or {}
+        self._exemplar_attribute_keys = exemplar_attribute_keys
 
     def _new_view_instrument_match(self, view: View, instrument: _Instrument) -> _ViewInstrumentMatch:
         # pylint: disable=protected-access
@@ -90,6 +92,7 @@ class MetricReaderStorage:
             instrument_class_aggregation=self._instrument_class_aggregation,
             cardinality_limit=cardinality_limit,
             reset_on_collect=reset_on_collect,
+            exemplar_attribute_keys=self._exemplar_attribute_keys,
         )
 
     def _get_or_init_view_instrument_match(self, instrument: _Instrument) -> list[_ViewInstrumentMatch]:

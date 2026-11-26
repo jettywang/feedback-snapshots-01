@@ -187,3 +187,28 @@ class TestInMemoryMetricReaderCardinalityLimits(TestCase):
     def test_invalid_instrument_class(self):
         with self.assertRaises(ValueError):
             InMemoryMetricReader(cardinality_limits={int: 5})
+
+
+class TestInMemoryMetricReaderExemplarAttributeKeys(TestCase):
+    def test_default_is_unrestricted(self):
+        reader = InMemoryMetricReader()
+        self.assertIsNone(reader._exemplar_attribute_keys)
+
+    def test_keys_are_stored_as_frozenset(self):
+        reader = InMemoryMetricReader(exemplar_attribute_keys={"allowed"})
+        self.assertEqual(reader._exemplar_attribute_keys, frozenset({"allowed"}))
+        self.assertIsInstance(reader._exemplar_attribute_keys, frozenset)
+
+    def test_frozenset_is_accepted(self):
+        reader = InMemoryMetricReader(exemplar_attribute_keys=frozenset({"allowed"}))
+        self.assertEqual(reader._exemplar_attribute_keys, frozenset({"allowed"}))
+
+    def test_empty_set_is_restrictive(self):
+        reader = InMemoryMetricReader(exemplar_attribute_keys=set())
+        self.assertEqual(reader._exemplar_attribute_keys, frozenset())
+
+    def test_invalid_keys(self):
+        for invalid_keys in (["allowed"], ("allowed",), {"allowed": True}, "allowed", {1}):
+            with self.subTest(invalid_keys=invalid_keys):
+                with self.assertRaises(ValueError):
+                    InMemoryMetricReader(exemplar_attribute_keys=invalid_keys)

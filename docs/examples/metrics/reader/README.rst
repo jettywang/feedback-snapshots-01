@@ -6,6 +6,7 @@ These examples show how to customize the metrics that are output by the SDK usin
 * :scm_web:`preferred_aggregation.py <docs/examples/metrics/reader/preferred_aggregation.py>`: Shows how to configure the preferred aggregation for metric instrument types.
 * :scm_web:`preferred_temporality.py <docs/examples/metrics/reader/preferred_temporality.py>`: Shows how to configure the preferred temporality for metric instrument types.
 * :scm_web:`preferred_exemplarfilter.py <docs/examples/metrics/reader/preferred_exemplarfilter.py>`: Shows how to configure the exemplar filter.
+* :scm_web:`exemplar_attribute_visibility.py <docs/examples/metrics/reader/exemplar_attribute_visibility.py>`: Shows how to restrict the attributes exposed on exemplars per reader for different audiences while keeping trace correlation.
 * :scm_web:`synchronous_gauge_read.py <docs/examples/metrics/reader/synchronous_gauge_read.py>`: Shows how to use `PeriodicExportingMetricReader` in a synchronous manner to explicitly control the collection of metrics.
 
 The source files of these examples are available :scm_web:`here <docs/examples/metrics/reader/>`.
