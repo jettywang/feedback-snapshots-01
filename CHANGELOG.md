@@ -13,6 +13,9 @@ versioned together, so those entries cover all of them.
 
 ## [Unreleased]
 
+### Added
+- Let a strategy ask for an optional approval to share data for specific purposes, separate from the login. The request phase calls `request_consent(key, purposes)` with the key it gives `remember_sign_in`, and overrides `consent_decision` to return the provider's answer in the callback. The default callback puts a receipt in `env['omniauth.consent']`, or a strategy that overrides `callback_phase` can pass `consent_receipt` itself. The receipt answers whether the identity is confirmed (`identity_confirmed?`) separately from which purposes are `approved`, still `pending`, and `cancelled`, and which requested claims each purpose approved or declined. A claim is approved only when it was both requested at the start and returned as approved, attributed to the provider that registered the request, so the callback can't widen the sharing. The purposes live in the keyed sign-in, so a callback gets only its own request's purposes when several sign-ins are in progress, and an ordinary login has no receipt. See [the README](README.md#optional-consent).
+
 ## [2.4.2] - 2026-11-18
 
 ### Added

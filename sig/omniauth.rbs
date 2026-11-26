@@ -168,6 +168,52 @@ module OmniAuth
     end
   end
 
+  # The outcome of a strategy's optional request to share data for one or
+  # more purposes, in env['omniauth.consent'] on the callback.
+  class ConsentReceipt
+    type purpose_entry = Hash[String, untyped]
+
+    attr_reader provider: String
+    attr_reader uid: String?
+    attr_reader purposes: Hash[String, purpose_entry]
+
+    def initialize: (provider: String, uid: String?, identity_confirmed: bool, purposes: Hash[String, purpose_entry]) -> void
+
+    def identity_confirmed?: () -> bool
+
+    alias confirmed? identity_confirmed?
+
+    def approved: () -> Hash[String, Hash[String, untyped]]
+
+    def pending: () -> Array[String]
+
+    def cancelled: () -> Array[String]
+
+    def status_for: (String | Symbol purpose) -> String?
+
+    def claims_for: (String | Symbol purpose) -> Array[String]
+
+    def declined_claims_for: (String | Symbol purpose) -> Array[String]
+
+    def pending_claims_for: (String | Symbol purpose) -> Array[String]
+
+    def approved?: (String | Symbol purpose) -> bool
+
+    def cancelled?: (String | Symbol purpose) -> bool
+
+    def pending?: (String | Symbol purpose) -> bool
+
+    def statuses: () -> Hash[String, String]
+
+    def to_hash: () -> Hash[String, untyped]
+
+    alias to_h to_hash
+
+    private
+
+    def purpose_entry: (String | Symbol purpose) -> purpose_entry
+  end
+
   # Raises AuthenticityError unless the request has a valid CSRF token.
   class AuthenticityTokenProtection < Rack::Protection::AuthenticityToken
     def initialize: (?Hash[Symbol, untyped] options) -> void
@@ -275,6 +321,7 @@ module OmniAuth
 
   # The mixin every OmniAuth strategy includes.
   module Strategy
+    include Consent
     include Fetchers
     include Hosts
     include Paths
@@ -460,6 +507,46 @@ module OmniAuth
       def warn_if_using_request_host: () -> void
 
       def invalid_host!: () -> rack_response
+    end
+
+    # An optional approval for sharing data for one or more purposes,
+    # separate from the sign-in itself.
+    module Consent : _Core
+      APPROVED: String
+      PENDING: String
+      CANCELLED: String
+      STATUSES: Array[String]
+
+      # Registers the purposes and their requested claims under the sign-in
+      # keyed by key.
+      def request_consent: (String key, Hash[untyped, untyped] | Array[untyped] purposes, ?Hash[String, untyped]? data) -> void
+
+      # The provider's answer in the callback, overridden by a strategy that
+      # requests consent.
+      def consent_decision: () -> Hash[untyped, untyped]
+
+      # The receipt for this callback's consent request, or nil.
+      def consent_receipt: () -> ConsentReceipt?
+
+      private
+
+      def build_consent_receipt: (Hash[String, untyped] consent) -> ConsentReceipt
+
+      def normalize_consent_purposes: (Hash[untyped, untyped] | Array[untyped] purposes) -> Hash[String, Array[String]]
+
+      def normalize_consent_decision: (Hash[String, Array[String]] requested, untyped decision) -> Hash[String, Hash[String, untyped]]
+
+      def consent_value: (Hash[untyped, untyped] hash, String key) -> untyped
+
+      def normalize_consent_entry: (untyped raw) -> Hash[String, untyped]
+
+      def normalize_consent_status: (untyped status) -> String
+
+      def consent_claims_for: (String status, Hash[String, untyped] entry, Array[String] requested) -> [Array[String], Array[String]]
+
+      def consent_approved_claims: (untyped claims, Array[String] requested) -> Array[String]
+
+      def normalize_consent_claims: (untyped claims) -> Array[String]
     end
 
     # Keeps the origin and params of several sign-ins in progress at once.

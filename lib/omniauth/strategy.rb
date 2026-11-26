@@ -1,6 +1,8 @@
 require 'cgi/escape'
 require 'omniauth/key_store'
+require 'omniauth/consent_receipt'
 require 'omniauth/strategy/class_methods'
+require 'omniauth/strategy/consent'
 require 'omniauth/strategy/fetchers'
 require 'omniauth/strategy/hosts'
 require 'omniauth/strategy/paths'
@@ -15,6 +17,7 @@ module OmniAuth
   # OmniAuth includes this mixin to gain the default functionality
   # necessary to be compatible with the OmniAuth library.
   module Strategy # rubocop:disable Metrics/ModuleLength
+    include Consent
     include Fetchers
     include Hosts
     include Paths
@@ -227,6 +230,8 @@ module OmniAuth
       return invalid_host! unless allowed_host?
 
       sign_in = recall_sign_in
+      @consent_request = sign_in['consent']
+      @consent_receipt = nil
       origin = sign_in['origin']
       env['omniauth.origin'] = (origin unless origin.eql?(''))
       env['omniauth.params'] = sign_in['params'] || {}
@@ -263,6 +268,8 @@ module OmniAuth
 
     def callback_phase
       env['omniauth.auth'] = auth_hash
+      receipt = consent_receipt
+      env['omniauth.consent'] = receipt if receipt
       call_app!
     end
 

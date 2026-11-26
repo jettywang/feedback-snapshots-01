@@ -428,6 +428,69 @@ end
 The keys `origin` and `params` are OmniAuth's, so a strategy shouldn't
 use them.
 
+## Optional Consent
+Some providers ask the user, during sign-in, to approve sharing extra
+data for a specific purpose. That approval is separate from the login:
+the user can sign in and decline it, or sign in and leave it unanswered.
+OmniAuth keeps the two apart so the app can tell an identity that is
+confirmed apart from the purposes that are approved, still pending, or
+cancelled.
+
+A strategy opts in by calling `request_consent` from its request phase
+with the same key it gives `remember_sign_in`, and by overriding
+`consent_decision` to return the provider's answer in the callback:
+
+```ruby
+def request_phase
+  state = SecureRandom.hex(24)
+  remember_sign_in(state)
+  request_consent(state, 'directory' => %w[organization_name contact_email])
+  redirect authorize_url(state)
+end
+
+def consent_decision
+  # Whatever the provider sent back, such as a signed consent token.
+  # Here, a hash from purpose to its decision.
+  {'directory' => {'status' => 'approved',
+                   'claims' => ['organization_name'],
+                   'declined_claims' => ['contact_email']}}
+end
+```
+
+The default `callback_phase` then puts a receipt in
+`env['omniauth.consent']`. A strategy that overrides `callback_phase` can
+pass `consent_receipt` to the app itself. A sign-in that doesn't call
+`request_consent` has no receipt, so an ordinary login is unchanged.
+
+The receipt answers each question separately:
+
+- `identity_confirmed?` is true when the callback's auth hash has the
+  provider that registered the request and a uid. The identity can be
+  confirmed while every purpose is still pending.
+- `approved` maps each approved purpose to its `provider` and the
+  `claims` it approved. A claim is approved only when it was requested
+  at the start and the provider approved it, so the callback can't widen
+  the approval.
+- `pending` lists the purposes the provider didn't answer, and
+  `pending_claims_for(purpose)` the claims still waiting.
+- `cancelled` lists the purposes the user declined. A purpose can be
+  approved while still declining some of its claims, as when the user
+  allows an organization name but not contact details; those are in
+  `declined_claims_for(purpose)` and never in `claims_for(purpose)`.
+- `status_for(purpose)`, `approved?(purpose)`, `pending?(purpose)`, and
+  `cancelled?(purpose)` answer for a single purpose, and `to_hash` gives
+  the whole receipt for logging.
+
+The purposes live in the keyed sign-in from the previous section, so a
+callback gets only the purposes requested by the request it completes.
+When several sign-ins are in progress, each callback's receipt describes
+its own request, never another's.
+
+A decision is a status, an array of approved claims, or a hash. Any
+status other than `approved`, `pending`, or `cancelled` is treated as
+`pending`, the conservative choice: nothing is shared until the provider
+clearly approves it.
+
 ## Resources
 The [OmniAuth Wiki](https://github.com/omniauth/omniauth/wiki) has
 actively maintained in-depth documentation for OmniAuth. It should be
