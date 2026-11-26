@@ -1,0 +1,1 @@
+`opentelemetry-sdk`: add `BatchingMemoryExporter`, an in-memory exporter with a bounded blocking queue that collects offline per-entry and per-batch evidence and delivers per-entry receipts (received, confirmed, evicted, failed) to a user supplied receiver.
