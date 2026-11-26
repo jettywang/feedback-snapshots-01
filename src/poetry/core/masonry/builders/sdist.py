@@ -64,43 +64,49 @@ class SdistBuilder(Builder):
         logger.info("Building <info>sdist</info>")
         target_dir = target_dir or self.default_target_dir
 
-        if not target_dir.exists():
-            target_dir.mkdir(parents=True)
-
         name = distribution_name(self._package.name)
         target = target_dir / f"{name}-{self._meta.version}.tar.gz"
-        gz = GzipFile(target.as_posix(), mode="wb", mtime=self._archive_mtime)
-        tar = tarfile.TarFile(
-            target.as_posix(), mode="w", fileobj=gz, format=tarfile.PAX_FORMAT
-        )
 
-        try:
-            tar_dir = f"{name}-{self._meta.version}"
+        with self._staging_directory(target_dir) as staging_dir:
+            staged = staging_dir / target.name
+            gz = GzipFile(staged.as_posix(), mode="wb", mtime=self._archive_mtime)
+            tar = tarfile.TarFile(
+                staged.as_posix(), mode="w", fileobj=gz, format=tarfile.PAX_FORMAT
+            )
 
-            files_to_add = self.find_files_to_add(exclude_build=False)
+            try:
+                tar_dir = f"{name}-{self._meta.version}"
 
-            for file in sorted(files_to_add, key=lambda x: x.relative_to_source_root()):
-                tar_info = tar.gettarinfo(
-                    str(file.path),
-                    arcname=pjoin(tar_dir, str(file.relative_to_source_root())),
-                )
-                tar_info = self.clean_tarinfo(tar_info)
+                files_to_add = self.find_files_to_add(exclude_build=False)
 
-                if tar_info.isreg():
-                    with file.path.open("rb") as f:
-                        tar.addfile(tar_info, f)
-                else:
-                    tar.addfile(tar_info)  # Symlinks & ?
+                for file in sorted(
+                    files_to_add, key=lambda x: x.relative_to_source_root()
+                ):
+                    tar_info = tar.gettarinfo(
+                        str(file.path),
+                        arcname=pjoin(
+                            tar_dir, str(file.relative_to_source_root())
+                        ),
+                    )
+                    tar_info = self.clean_tarinfo(tar_info)
 
-            if self._poetry.package.build_should_generate_setup():
-                setup = self.build_setup()
-                self.add_file_to_tar(tar, pjoin(tar_dir, "setup.py"), setup)
+                    if tar_info.isreg():
+                        with file.path.open("rb") as f:
+                            tar.addfile(tar_info, f)
+                    else:
+                        tar.addfile(tar_info)  # Symlinks & ?
 
-            pkg_info = self.build_pkg_info()
-            self.add_file_to_tar(tar, pjoin(tar_dir, "PKG-INFO"), pkg_info)
-        finally:
-            tar.close()
-            gz.close()
+                if self._poetry.package.build_should_generate_setup():
+                    setup = self.build_setup()
+                    self.add_file_to_tar(tar, pjoin(tar_dir, "setup.py"), setup)
+
+                pkg_info = self.build_pkg_info()
+                self.add_file_to_tar(tar, pjoin(tar_dir, "PKG-INFO"), pkg_info)
+            finally:
+                tar.close()
+                gz.close()
+
+            self._publish_artifact(staged, target)
 
         logger.info(f"Built <comment>{target.name}</comment>")
         return target

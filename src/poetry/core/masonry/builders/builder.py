@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import contextlib
 import logging
+import os
+import shutil
 import sys
+import tempfile
 import textwrap
 
 from functools import cached_property
@@ -11,6 +15,8 @@ from typing import Any
 
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
+
     from poetry.core.masonry.utils.module import Module
     from poetry.core.poetry import Poetry
 
@@ -81,6 +87,36 @@ class Builder:
     @property
     def default_target_dir(self) -> Path:
         return self._path / "dist"
+
+    @contextlib.contextmanager
+    def _staging_directory(self, target_dir: Path) -> Iterator[Path]:
+        """
+        Provide a private staging directory inside the target directory.
+
+        Archives are written here first, so an interrupted or failed build never
+        exposes a partially written artifact under its final name. The directory
+        lives next to the target to keep the subsequent publication on the same
+        filesystem and is removed again when the context is left, regardless of
+        whether the build succeeded.
+        """
+        target_dir.mkdir(parents=True, exist_ok=True)
+        staging_dir = Path(
+            tempfile.mkdtemp(prefix=".poetry-build-", dir=target_dir)
+        )
+        try:
+            yield staging_dir
+        finally:
+            shutil.rmtree(staging_dir, ignore_errors=True)
+
+    def _publish_artifact(self, staged: Path, target: Path) -> Path:
+        """
+        Publish a complete artifact under its final name in one atomic step.
+
+        ``os.replace`` is atomic, so observers either see the previous artifact
+        or the newly built one, never a partially written file.
+        """
+        os.replace(staged, target)
+        return target
 
     def _apply_local_version_label(self) -> None:
         """Apply local version label from config settings to the poetry package version if present."""

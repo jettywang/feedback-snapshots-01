@@ -108,47 +108,44 @@ class WheelBuilder(Builder):
         logger.info("Building wheel")
 
         target_dir = target_dir or self.default_target_dir
-        if not target_dir.exists():
-            target_dir.mkdir(parents=True)
 
-        fd, temp = tempfile.mkstemp(suffix=".whl")
+        with self._staging_directory(target_dir) as staging_dir:
+            fd, temp = tempfile.mkstemp(suffix=".whl", dir=staging_dir)
 
-        temp_path = Path(temp)
-        st_mode = temp_path.stat().st_mode
-        new_mode = normalize_file_permissions(st_mode)
-        temp_path.chmod(new_mode)
+            temp_path = Path(temp)
+            st_mode = temp_path.stat().st_mode
+            new_mode = normalize_file_permissions(st_mode)
+            temp_path.chmod(new_mode)
 
-        with (
-            os.fdopen(fd, "w+b") as fd_file,
-            zipfile.ZipFile(
-                fd_file, mode="w", compression=zipfile.ZIP_DEFLATED
-            ) as zip_file,
-        ):
-            if self._editable:
-                self._build(zip_file)
-                self._add_pth(zip_file)
-            elif self._poetry.package.build_should_generate_setup():
-                self._copy_module(zip_file)
-                self._build(zip_file)
-            else:
-                self._build(zip_file)
-                self._copy_module(zip_file)
+            with (
+                os.fdopen(fd, "w+b") as fd_file,
+                zipfile.ZipFile(
+                    fd_file, mode="w", compression=zipfile.ZIP_DEFLATED
+                ) as zip_file,
+            ):
+                if self._editable:
+                    self._build(zip_file)
+                    self._add_pth(zip_file)
+                elif self._poetry.package.build_should_generate_setup():
+                    self._copy_module(zip_file)
+                    self._build(zip_file)
+                else:
+                    self._build(zip_file)
+                    self._copy_module(zip_file)
 
-            self._copy_file_scripts(zip_file)
+                self._copy_file_scripts(zip_file)
 
-            if self._metadata_directory is None:
-                with TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:
-                    metadata_directory = self.prepare_metadata(Path(temp_dir))
-                    self._copy_dist_info(zip_file, metadata_directory)
-            else:
-                self._copy_dist_info(zip_file, self._metadata_directory)
+                if self._metadata_directory is None:
+                    with TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:
+                        metadata_directory = self.prepare_metadata(Path(temp_dir))
+                        self._copy_dist_info(zip_file, metadata_directory)
+                else:
+                    self._copy_dist_info(zip_file, self._metadata_directory)
 
-            self._write_record(zip_file)
+                self._write_record(zip_file)
 
-        wheel_path = target_dir / self.wheel_filename
-        if wheel_path.exists():
-            wheel_path.unlink()
-        shutil.move(str(temp_path), str(wheel_path))
+            wheel_path = target_dir / self.wheel_filename
+            self._publish_artifact(temp_path, wheel_path)
 
         logger.info(f"Built {self.wheel_filename}")
         return wheel_path

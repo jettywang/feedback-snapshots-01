@@ -1,6 +1,16 @@
 # Change Log
 
 
+## Unreleased
+
+### Fixed
+
+- Build wheels and sdists into a private staging directory and publish them
+  atomically, so interrupted builds can no longer expose partially written
+  artifacts under their final names and existing artifacts remain available
+  until the new build completes.
+
+
 ## [2.5.0] - 2026-09-19
 
 ### Added
