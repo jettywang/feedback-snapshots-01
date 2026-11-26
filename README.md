@@ -262,6 +262,50 @@ OmniAuth.config.allowed_hosts = ['example.com', /[a-z0-9-]+\.example\.com/]
 Until one of these is set, OmniAuth logs a warning at the start of every
 request phase.
 
+## Receiver Restrictions
+Two gateways can present the same public host name while only one is a
+managed entry point. A trusted gateway adapter can identify the receiver in a
+Rack environment value that external clients cannot set directly. Declare the
+receiver identifiers allowed for a callback strategy:
+
+```ruby
+provider :corporate,
+  allowed_receivers: %w[managed-gateway],
+  receiver_env_key: 'myapp.gateway_receiver'
+```
+
+The gateway or an outer Rack middleware sets that value after verifying the
+connection:
+
+```ruby
+class GatewayReceiver
+  def initialize(app, receiver_id)
+    @app = app
+    @receiver_id = receiver_id
+  end
+
+  def call(env)
+    env['myapp.gateway_receiver'] = @receiver_id
+    @app.call(env)
+  end
+end
+```
+
+A missing or mismatching receiver stops the callback before OmniAuth reads or
+deletes the in-progress sign-in and before `before_callback_phase` or the
+strategy's `callback_phase` runs. The Rack response is `403`,
+`omniauth.error.type` is `:invalid_receiver`, and
+`omniauth.receiver.reason` is `:missing` or `:mismatch`. Because the session
+record is retained, the same callback can still succeed when retried through
+the managed receiver. Strategies without `allowed_receivers` keep working on
+either entry point.
+
+For dynamic lookup, pass `receiver:` a callable that receives the Rack env, or
+set `OmniAuth.config.receiver_resolver`. If no key or callable is configured,
+OmniAuth checks `omniauth.receiver` and several equivalent
+`receiver`/`ingress`/`listener` Rack keys. Callback URL generation continues to
+use `full_host` and the request's `SCRIPT_NAME`, including nested mounts.
+
 ## Origin Param
 The `origin` parameter is typically used to inform where a user came from
 and where, should you choose to use it, they'd want to return to. Send it in

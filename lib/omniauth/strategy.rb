@@ -4,6 +4,7 @@ require 'omniauth/strategy/class_methods'
 require 'omniauth/strategy/fetchers'
 require 'omniauth/strategy/hosts'
 require 'omniauth/strategy/paths'
+require 'omniauth/strategy/receivers'
 require 'omniauth/strategy/sign_ins'
 require 'omniauth/strategy/test_mode'
 
@@ -18,6 +19,7 @@ module OmniAuth
     include Fetchers
     include Hosts
     include Paths
+    include Receivers
     include SignIns
     include TestMode
 
@@ -105,6 +107,8 @@ module OmniAuth
       warn_if_using_get_on_request_path
 
       env['omniauth.strategy'] = self if on_auth_path?
+
+      return invalid_receiver! if on_callback_path? && !allowed_receiver?
 
       return mock_call!(env) if OmniAuth.config.test_mode
 
@@ -222,6 +226,8 @@ module OmniAuth
 
     # Performs the steps necessary to run the callback phase of a strategy.
     def callback_call
+      return invalid_receiver! unless allowed_receiver?
+
       setup_phase
       log :debug, 'Callback phase initiated.'
       return invalid_host! unless allowed_host?

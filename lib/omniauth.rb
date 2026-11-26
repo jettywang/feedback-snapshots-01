@@ -4,6 +4,8 @@ require 'logger'
 
 module OmniAuth
   class Error < StandardError; end
+  class ReceiverError < Error; end
+  class InvalidReceiverError < ReceiverError; end
 
   module Strategies
     autoload :Developer, 'omniauth/strategies/developer'
@@ -151,7 +153,7 @@ module OmniAuth
     attr_writer :on_failure, :before_callback_phase, :before_options_phase, :before_request_phase, :after_request_phase, :request_validation_phase
     attr_accessor :failure_raise_out_environments, :path_prefix, :allowed_request_methods, :form_css,
                   :test_mode, :mock_auth, :full_host, :camelizations, :logger, :silence_get_warning,
-                  :allowed_hosts
+                  :allowed_hosts, :allowed_receivers, :receiver_resolver, :receiver_env_key
   end
 
   def self.config

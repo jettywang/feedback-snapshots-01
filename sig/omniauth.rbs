@@ -19,6 +19,12 @@ module OmniAuth
   class Error < StandardError
   end
 
+  class ReceiverError < Error
+  end
+
+  class InvalidReceiverError < ReceiverError
+  end
+
   class NoSessionError < StandardError
   end
 
@@ -99,6 +105,9 @@ module OmniAuth
     attr_accessor logger: Logger
     attr_accessor silence_get_warning: bool
     attr_accessor allowed_hosts: Array[String | Regexp]?
+    attr_accessor allowed_receivers: untyped
+    attr_accessor receiver_resolver: _EnvCallable?
+    attr_accessor receiver_env_key: String?
   end
 
   module Utils

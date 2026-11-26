@@ -8,6 +8,8 @@ module OmniAuth
   class FailureEndpoint
     attr_reader :env
 
+    RECEIVER_ERROR_TYPES = %i[invalid_receiver missing_receiver receiver_mismatch receiver_not_allowed].freeze
+
     def self.call(env)
       new(env).call
     end
@@ -18,11 +20,22 @@ module OmniAuth
 
     def call
       raise_out! if OmniAuth.config.failure_raise_out_environments.include?(ENV['RACK_ENV'].to_s)
+      return receiver_rejected if receiver_rejection?
+
       redirect_to_failure
     end
 
     def raise_out!
       raise(env['omniauth.error'] || Error.new(env['omniauth.error.type']))
+    end
+
+    def receiver_rejection?
+      env['omniauth.receiver.authorized'].eql?(false) ||
+        RECEIVER_ERROR_TYPES.include?(env['omniauth.error.type'])
+    end
+
+    def receiver_rejected
+      Rack::Response.new(['403 Forbidden'], 403, 'content-type' => 'text/plain').finish
     end
 
     def redirect_to_failure
