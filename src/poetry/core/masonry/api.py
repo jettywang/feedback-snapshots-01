@@ -46,6 +46,27 @@ def prepare_metadata_for_build_wheel(
     return dist_info.name
 
 
+def record_wheel_approval(
+    metadata_directory: str, config_settings: dict[str, Any] | None = None
+) -> str:
+    """Record a release approval in a prepared ``.dist-info`` directory.
+
+    ``metadata_directory`` is the same directory handed to
+    :func:`prepare_metadata_for_build_wheel` (which contains the generated
+    ``.dist-info``). The front-end calls this after reviewing the prepared
+    metadata. The resulting ``approval.json`` travels with the metadata
+    directory and is checked again by :func:`build_wheel` /
+    :func:`build_editable` when approval mode is enabled.
+    """
+    from poetry.core.masonry.approval import write_approval
+
+    poetry = Factory().create_poetry(Path.cwd(), with_groups=False)
+    builder = WheelBuilder(poetry, config_settings=config_settings)
+    dist_info = Path(metadata_directory) / builder.dist_info
+    write_approval(dist_info)
+    return dist_info.name
+
+
 def build_wheel(
     wheel_directory: str,
     config_settings: dict[str, Any] | None = None,

@@ -1,0 +1,13 @@
+[tool.poetry]
+name = "approval-package"
+version = "1.0.0"
+description = "Original summary."
+authors = ["Approver <approver@example.com>"]
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = "^3.11"
+cleo = "^2.0"
+
+[tool.poetry.scripts]
+approved-script = "approval_package:main"

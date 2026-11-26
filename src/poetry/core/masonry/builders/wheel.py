@@ -108,6 +108,9 @@ class WheelBuilder(Builder):
         logger.info("Building wheel")
 
         target_dir = target_dir or self.default_target_dir
+
+        self._verify_release_approval()
+
         if not target_dir.exists():
             target_dir.mkdir(parents=True)
 
@@ -152,6 +155,41 @@ class WheelBuilder(Builder):
 
         logger.info(f"Built {self.wheel_filename}")
         return wheel_path
+
+    def _verify_release_approval(self) -> None:
+        from poetry.core.masonry.approval import APPROVAL_METADATA_SETTING
+        from poetry.core.masonry.approval import APPROVAL_MODE_SETTING
+        from poetry.core.masonry.approval import approval_enabled
+        from poetry.core.masonry.approval import approved_dist_info
+        from poetry.core.masonry.approval import description_change_allowed
+        from poetry.core.masonry.approval import verify_approval
+
+        if not approval_enabled(self._config_settings):
+            return
+
+        if self._metadata_directory is None and not self._config_settings.get(
+            APPROVAL_METADATA_SETTING
+        ):
+            raise RuntimeError(
+                f"Approval mode is enabled ('{APPROVAL_MODE_SETTING}') but no prepared"
+                " metadata directory was passed to the build. Run"
+                " prepare_metadata_for_build_wheel first and record the release"
+                " approval in the returned .dist-info directory."
+            )
+
+        dist_info = (
+            approved_dist_info(self._config_settings, self._metadata_directory)
+            if self._metadata_directory is not None
+            else Path(self._config_settings[APPROVAL_METADATA_SETTING])
+        )
+        verify_approval(
+            self,
+            dist_info,
+            allow_description_change=description_change_allowed(
+                self._config_settings
+            ),
+        )
+        logger.info("Release approval verified for %s", dist_info.name)
 
     def _add_pth(self, wheel: zipfile.ZipFile) -> None:
         paths = set()
