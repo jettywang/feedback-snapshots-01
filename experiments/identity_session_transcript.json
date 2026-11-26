@@ -1,0 +1,1678 @@
+{
+  "keystoneauth_version": "0.1.0.dev2011",
+  "git_revision": "c3e4666",
+  "python": "3.12.11",
+  "credential_material": "none; all identity headers are ph-token-* placeholders",
+  "all_checks_passed": true,
+  "failed_check_count": 0,
+  "scenarios": [
+    {
+      "id": "shared_session/adapter_auth",
+      "topology": "shared_session_with_runtime_session_auth_switch",
+      "identity_entry": "adapter_auth",
+      "sent_identity_placeholders": [
+        "ph-token-A-v1",
+        "ph-token-A-v2",
+        "ph-token-A-v2"
+      ],
+      "plugin_invalidations": [
+        {
+          "identity": "A",
+          "had_cached_token": true,
+          "returned": true
+        }
+      ],
+      "discovery_cache_results": [
+        "miss",
+        "hit"
+      ],
+      "checks": [
+        {
+          "name": "first_operation_succeeds_after_one_retry",
+          "ok": true,
+          "expected": 200,
+          "observed": 200
+        },
+        {
+          "name": "second_operation_succeeds",
+          "ok": true,
+          "expected": 200,
+          "observed": 200
+        },
+        {
+          "name": "sent_identity_placeholders",
+          "ok": true,
+          "expected": [
+            "ph-token-A-v1",
+            "ph-token-A-v2",
+            "ph-token-A-v2"
+          ],
+          "observed": [
+            "ph-token-A-v1",
+            "ph-token-A-v2",
+            "ph-token-A-v2"
+          ]
+        },
+        {
+          "name": "invalidated_plugin_identity",
+          "ok": true,
+          "expected": [
+            "A"
+          ],
+          "observed": [
+            "A"
+          ]
+        },
+        {
+          "name": "same_service_region_discovery_cache",
+          "ok": true,
+          "expected": [
+            "miss",
+            "hit"
+          ],
+          "observed": [
+            "miss",
+            "hit"
+          ]
+        }
+      ],
+      "passed": true,
+      "events": [
+        {
+          "seq": 1,
+          "scenario": "shared_session/adapter_auth",
+          "phase": "setup",
+          "kind": "plugin_get_auth_ref",
+          "identity": "A",
+          "token_cache": "miss",
+          "sent_token": "ph-token-A-v1"
+        },
+        {
+          "seq": 2,
+          "scenario": "shared_session/adapter_auth",
+          "phase": "setup",
+          "kind": "plugin_get_headers",
+          "identity": "A",
+          "token_cache": "miss",
+          "sent_token": "ph-token-A-v1"
+        },
+        {
+          "seq": 3,
+          "scenario": "shared_session/adapter_auth",
+          "phase": "setup",
+          "kind": "plugin_get_auth_ref",
+          "identity": "B",
+          "token_cache": "miss",
+          "sent_token": "ph-token-B-v1"
+        },
+        {
+          "seq": 4,
+          "scenario": "shared_session/adapter_auth",
+          "phase": "setup",
+          "kind": "plugin_get_headers",
+          "identity": "B",
+          "token_cache": "miss",
+          "sent_token": "ph-token-B-v1"
+        },
+        {
+          "seq": 5,
+          "scenario": "shared_session/adapter_auth",
+          "phase": "setup",
+          "kind": "plugin_get_auth_ref",
+          "identity": "O",
+          "token_cache": "miss",
+          "sent_token": "ph-token-O-v1"
+        },
+        {
+          "seq": 6,
+          "scenario": "shared_session/adapter_auth",
+          "phase": "setup",
+          "kind": "plugin_get_headers",
+          "identity": "O",
+          "token_cache": "miss",
+          "sent_token": "ph-token-O-v1"
+        },
+        {
+          "seq": 7,
+          "scenario": "shared_session/adapter_auth",
+          "phase": "initiation",
+          "kind": "plugin_get_headers",
+          "identity": "A",
+          "token_cache": "hit",
+          "sent_token": "ph-token-A-v1"
+        },
+        {
+          "seq": 8,
+          "scenario": "shared_session/adapter_auth",
+          "phase": "discovery",
+          "kind": "catalog_lookup",
+          "identity": "A",
+          "selection": {
+            "service_type": "block-storage",
+            "service_name": null,
+            "interface": "public",
+            "region_name": "RegionOne"
+          },
+          "catalog_url": "http://block-storage.region-one.example/"
+        },
+        {
+          "seq": 9,
+          "scenario": "shared_session/adapter_auth",
+          "phase": "discovery",
+          "kind": "wire_send",
+          "endpoint_kind": "discovery",
+          "method": "GET",
+          "path": "/",
+          "sent_token": null
+        },
+        {
+          "seq": 10,
+          "scenario": "shared_session/adapter_auth",
+          "phase": "discovery",
+          "kind": "discovery_cache",
+          "identity": "A",
+          "result": "miss",
+          "discovery_http_requests": 1,
+          "endpoint_url": "http://block-storage.region-one.example/v3/",
+          "api_version": "3.0",
+          "session_cache_size": 1,
+          "plugin_cache_size": 1
+        },
+        {
+          "seq": 11,
+          "scenario": "shared_session/adapter_auth",
+          "phase": "initiation",
+          "kind": "wire_send",
+          "endpoint_kind": "operation",
+          "method": "GET",
+          "path": "/v3/op-401",
+          "sent_token": "ph-token-A-v1",
+          "response_status": 401
+        },
+        {
+          "seq": 12,
+          "scenario": "shared_session/adapter_auth",
+          "phase": "response",
+          "kind": "response_received",
+          "status_code": 401,
+          "path": "/v3/op-401"
+        },
+        {
+          "seq": 13,
+          "scenario": "shared_session/adapter_auth",
+          "phase": "response",
+          "kind": "session_default_switch",
+          "old_default_identity": "A",
+          "new_default_identity": "B",
+          "trigger": "experiment changes session.auth after 401"
+        },
+        {
+          "seq": 14,
+          "scenario": "shared_session/adapter_auth",
+          "phase": "invalidate",
+          "kind": "plugin_invalidate",
+          "identity": "A",
+          "had_cached_token": true,
+          "returned": true
+        },
+        {
+          "seq": 15,
+          "scenario": "shared_session/adapter_auth",
+          "phase": "retry",
+          "kind": "plugin_get_auth_ref",
+          "identity": "A",
+          "token_cache": "miss",
+          "sent_token": "ph-token-A-v2"
+        },
+        {
+          "seq": 16,
+          "scenario": "shared_session/adapter_auth",
+          "phase": "retry",
+          "kind": "plugin_get_headers",
+          "identity": "A",
+          "token_cache": "miss",
+          "sent_token": "ph-token-A-v2"
+        },
+        {
+          "seq": 17,
+          "scenario": "shared_session/adapter_auth",
+          "phase": "retry",
+          "kind": "wire_send",
+          "endpoint_kind": "operation",
+          "method": "GET",
+          "path": "/v3/op-401",
+          "sent_token": "ph-token-A-v2",
+          "response_status": 200
+        },
+        {
+          "seq": 18,
+          "scenario": "shared_session/adapter_auth",
+          "phase": "follow_up",
+          "kind": "plugin_get_headers",
+          "identity": "A",
+          "token_cache": "hit",
+          "sent_token": "ph-token-A-v2"
+        },
+        {
+          "seq": 19,
+          "scenario": "shared_session/adapter_auth",
+          "phase": "discovery",
+          "kind": "catalog_lookup",
+          "identity": "A",
+          "selection": {
+            "service_type": "block-storage",
+            "service_name": null,
+            "interface": "public",
+            "region_name": "RegionOne"
+          },
+          "catalog_url": "http://block-storage.region-one.example/"
+        },
+        {
+          "seq": 20,
+          "scenario": "shared_session/adapter_auth",
+          "phase": "discovery",
+          "kind": "discovery_cache",
+          "identity": "A",
+          "result": "hit",
+          "discovery_http_requests": 0,
+          "endpoint_url": "http://block-storage.region-one.example/v3/",
+          "api_version": "3.0",
+          "session_cache_size": 1,
+          "plugin_cache_size": 1
+        },
+        {
+          "seq": 21,
+          "scenario": "shared_session/adapter_auth",
+          "phase": "follow_up",
+          "kind": "wire_send",
+          "endpoint_kind": "operation",
+          "method": "GET",
+          "path": "/v3/op-cache",
+          "sent_token": "ph-token-A-v2",
+          "response_status": 200
+        }
+      ]
+    },
+    {
+      "id": "shared_session/session_default",
+      "topology": "shared_session_with_runtime_session_auth_switch",
+      "identity_entry": "session_default",
+      "sent_identity_placeholders": [
+        "ph-token-A-v1",
+        "ph-token-B-v2",
+        "ph-token-B-v2"
+      ],
+      "plugin_invalidations": [
+        {
+          "identity": "B",
+          "had_cached_token": true,
+          "returned": true
+        }
+      ],
+      "discovery_cache_results": [
+        "miss",
+        "hit"
+      ],
+      "checks": [
+        {
+          "name": "first_operation_succeeds_after_one_retry",
+          "ok": true,
+          "expected": 200,
+          "observed": 200
+        },
+        {
+          "name": "second_operation_succeeds",
+          "ok": true,
+          "expected": 200,
+          "observed": 200
+        },
+        {
+          "name": "sent_identity_placeholders",
+          "ok": true,
+          "expected": [
+            "ph-token-A-v1",
+            "ph-token-B-v2",
+            "ph-token-B-v2"
+          ],
+          "observed": [
+            "ph-token-A-v1",
+            "ph-token-B-v2",
+            "ph-token-B-v2"
+          ]
+        },
+        {
+          "name": "invalidated_plugin_identity",
+          "ok": true,
+          "expected": [
+            "B"
+          ],
+          "observed": [
+            "B"
+          ]
+        },
+        {
+          "name": "same_service_region_discovery_cache",
+          "ok": true,
+          "expected": [
+            "miss",
+            "hit"
+          ],
+          "observed": [
+            "miss",
+            "hit"
+          ]
+        }
+      ],
+      "passed": true,
+      "events": [
+        {
+          "seq": 1,
+          "scenario": "shared_session/session_default",
+          "phase": "setup",
+          "kind": "plugin_get_auth_ref",
+          "identity": "A",
+          "token_cache": "miss",
+          "sent_token": "ph-token-A-v1"
+        },
+        {
+          "seq": 2,
+          "scenario": "shared_session/session_default",
+          "phase": "setup",
+          "kind": "plugin_get_headers",
+          "identity": "A",
+          "token_cache": "miss",
+          "sent_token": "ph-token-A-v1"
+        },
+        {
+          "seq": 3,
+          "scenario": "shared_session/session_default",
+          "phase": "setup",
+          "kind": "plugin_get_auth_ref",
+          "identity": "B",
+          "token_cache": "miss",
+          "sent_token": "ph-token-B-v1"
+        },
+        {
+          "seq": 4,
+          "scenario": "shared_session/session_default",
+          "phase": "setup",
+          "kind": "plugin_get_headers",
+          "identity": "B",
+          "token_cache": "miss",
+          "sent_token": "ph-token-B-v1"
+        },
+        {
+          "seq": 5,
+          "scenario": "shared_session/session_default",
+          "phase": "setup",
+          "kind": "plugin_get_auth_ref",
+          "identity": "O",
+          "token_cache": "miss",
+          "sent_token": "ph-token-O-v1"
+        },
+        {
+          "seq": 6,
+          "scenario": "shared_session/session_default",
+          "phase": "setup",
+          "kind": "plugin_get_headers",
+          "identity": "O",
+          "token_cache": "miss",
+          "sent_token": "ph-token-O-v1"
+        },
+        {
+          "seq": 7,
+          "scenario": "shared_session/session_default",
+          "phase": "initiation",
+          "kind": "plugin_get_headers",
+          "identity": "A",
+          "token_cache": "hit",
+          "sent_token": "ph-token-A-v1"
+        },
+        {
+          "seq": 8,
+          "scenario": "shared_session/session_default",
+          "phase": "discovery",
+          "kind": "catalog_lookup",
+          "identity": "A",
+          "selection": {
+            "service_type": "block-storage",
+            "service_name": null,
+            "interface": "public",
+            "region_name": "RegionOne"
+          },
+          "catalog_url": "http://block-storage.region-one.example/"
+        },
+        {
+          "seq": 9,
+          "scenario": "shared_session/session_default",
+          "phase": "discovery",
+          "kind": "wire_send",
+          "endpoint_kind": "discovery",
+          "method": "GET",
+          "path": "/",
+          "sent_token": null
+        },
+        {
+          "seq": 10,
+          "scenario": "shared_session/session_default",
+          "phase": "discovery",
+          "kind": "discovery_cache",
+          "identity": "A",
+          "result": "miss",
+          "discovery_http_requests": 1,
+          "endpoint_url": "http://block-storage.region-one.example/v3/",
+          "api_version": "3.0",
+          "session_cache_size": 1,
+          "plugin_cache_size": 1
+        },
+        {
+          "seq": 11,
+          "scenario": "shared_session/session_default",
+          "phase": "initiation",
+          "kind": "wire_send",
+          "endpoint_kind": "operation",
+          "method": "GET",
+          "path": "/v3/op-401",
+          "sent_token": "ph-token-A-v1",
+          "response_status": 401
+        },
+        {
+          "seq": 12,
+          "scenario": "shared_session/session_default",
+          "phase": "response",
+          "kind": "response_received",
+          "status_code": 401,
+          "path": "/v3/op-401"
+        },
+        {
+          "seq": 13,
+          "scenario": "shared_session/session_default",
+          "phase": "response",
+          "kind": "session_default_switch",
+          "old_default_identity": "A",
+          "new_default_identity": "B",
+          "trigger": "experiment changes session.auth after 401"
+        },
+        {
+          "seq": 14,
+          "scenario": "shared_session/session_default",
+          "phase": "invalidate",
+          "kind": "plugin_invalidate",
+          "identity": "B",
+          "had_cached_token": true,
+          "returned": true
+        },
+        {
+          "seq": 15,
+          "scenario": "shared_session/session_default",
+          "phase": "retry",
+          "kind": "plugin_get_auth_ref",
+          "identity": "B",
+          "token_cache": "miss",
+          "sent_token": "ph-token-B-v2"
+        },
+        {
+          "seq": 16,
+          "scenario": "shared_session/session_default",
+          "phase": "retry",
+          "kind": "plugin_get_headers",
+          "identity": "B",
+          "token_cache": "miss",
+          "sent_token": "ph-token-B-v2"
+        },
+        {
+          "seq": 17,
+          "scenario": "shared_session/session_default",
+          "phase": "retry",
+          "kind": "wire_send",
+          "endpoint_kind": "operation",
+          "method": "GET",
+          "path": "/v3/op-401",
+          "sent_token": "ph-token-B-v2",
+          "response_status": 200
+        },
+        {
+          "seq": 18,
+          "scenario": "shared_session/session_default",
+          "phase": "follow_up",
+          "kind": "plugin_get_headers",
+          "identity": "B",
+          "token_cache": "hit",
+          "sent_token": "ph-token-B-v2"
+        },
+        {
+          "seq": 19,
+          "scenario": "shared_session/session_default",
+          "phase": "discovery",
+          "kind": "catalog_lookup",
+          "identity": "B",
+          "selection": {
+            "service_type": "block-storage",
+            "service_name": null,
+            "interface": "public",
+            "region_name": "RegionOne"
+          },
+          "catalog_url": "http://block-storage.region-one.example/"
+        },
+        {
+          "seq": 20,
+          "scenario": "shared_session/session_default",
+          "phase": "discovery",
+          "kind": "discovery_cache",
+          "identity": "B",
+          "result": "hit",
+          "discovery_http_requests": 0,
+          "endpoint_url": "http://block-storage.region-one.example/v3/",
+          "api_version": "3.0",
+          "session_cache_size": 1,
+          "plugin_cache_size": 1
+        },
+        {
+          "seq": 21,
+          "scenario": "shared_session/session_default",
+          "phase": "follow_up",
+          "kind": "wire_send",
+          "endpoint_kind": "operation",
+          "method": "GET",
+          "path": "/v3/op-cache",
+          "sent_token": "ph-token-B-v2",
+          "response_status": 200
+        }
+      ]
+    },
+    {
+      "id": "shared_session/request_override",
+      "topology": "shared_session_with_runtime_session_auth_switch",
+      "identity_entry": "request_override",
+      "sent_identity_placeholders": [
+        "ph-token-O-v1",
+        "ph-token-O-v2",
+        "ph-token-O-v2"
+      ],
+      "plugin_invalidations": [
+        {
+          "identity": "O",
+          "had_cached_token": true,
+          "returned": true
+        }
+      ],
+      "discovery_cache_results": [
+        "miss",
+        "hit"
+      ],
+      "checks": [
+        {
+          "name": "first_operation_succeeds_after_one_retry",
+          "ok": true,
+          "expected": 200,
+          "observed": 200
+        },
+        {
+          "name": "second_operation_succeeds",
+          "ok": true,
+          "expected": 200,
+          "observed": 200
+        },
+        {
+          "name": "sent_identity_placeholders",
+          "ok": true,
+          "expected": [
+            "ph-token-O-v1",
+            "ph-token-O-v2",
+            "ph-token-O-v2"
+          ],
+          "observed": [
+            "ph-token-O-v1",
+            "ph-token-O-v2",
+            "ph-token-O-v2"
+          ]
+        },
+        {
+          "name": "invalidated_plugin_identity",
+          "ok": true,
+          "expected": [
+            "O"
+          ],
+          "observed": [
+            "O"
+          ]
+        },
+        {
+          "name": "same_service_region_discovery_cache",
+          "ok": true,
+          "expected": [
+            "miss",
+            "hit"
+          ],
+          "observed": [
+            "miss",
+            "hit"
+          ]
+        }
+      ],
+      "passed": true,
+      "events": [
+        {
+          "seq": 1,
+          "scenario": "shared_session/request_override",
+          "phase": "setup",
+          "kind": "plugin_get_auth_ref",
+          "identity": "A",
+          "token_cache": "miss",
+          "sent_token": "ph-token-A-v1"
+        },
+        {
+          "seq": 2,
+          "scenario": "shared_session/request_override",
+          "phase": "setup",
+          "kind": "plugin_get_headers",
+          "identity": "A",
+          "token_cache": "miss",
+          "sent_token": "ph-token-A-v1"
+        },
+        {
+          "seq": 3,
+          "scenario": "shared_session/request_override",
+          "phase": "setup",
+          "kind": "plugin_get_auth_ref",
+          "identity": "B",
+          "token_cache": "miss",
+          "sent_token": "ph-token-B-v1"
+        },
+        {
+          "seq": 4,
+          "scenario": "shared_session/request_override",
+          "phase": "setup",
+          "kind": "plugin_get_headers",
+          "identity": "B",
+          "token_cache": "miss",
+          "sent_token": "ph-token-B-v1"
+        },
+        {
+          "seq": 5,
+          "scenario": "shared_session/request_override",
+          "phase": "setup",
+          "kind": "plugin_get_auth_ref",
+          "identity": "O",
+          "token_cache": "miss",
+          "sent_token": "ph-token-O-v1"
+        },
+        {
+          "seq": 6,
+          "scenario": "shared_session/request_override",
+          "phase": "setup",
+          "kind": "plugin_get_headers",
+          "identity": "O",
+          "token_cache": "miss",
+          "sent_token": "ph-token-O-v1"
+        },
+        {
+          "seq": 7,
+          "scenario": "shared_session/request_override",
+          "phase": "initiation",
+          "kind": "plugin_get_headers",
+          "identity": "O",
+          "token_cache": "hit",
+          "sent_token": "ph-token-O-v1"
+        },
+        {
+          "seq": 8,
+          "scenario": "shared_session/request_override",
+          "phase": "discovery",
+          "kind": "catalog_lookup",
+          "identity": "O",
+          "selection": {
+            "service_type": "block-storage",
+            "service_name": null,
+            "interface": "public",
+            "region_name": "RegionOne"
+          },
+          "catalog_url": "http://block-storage.region-one.example/"
+        },
+        {
+          "seq": 9,
+          "scenario": "shared_session/request_override",
+          "phase": "discovery",
+          "kind": "wire_send",
+          "endpoint_kind": "discovery",
+          "method": "GET",
+          "path": "/",
+          "sent_token": null
+        },
+        {
+          "seq": 10,
+          "scenario": "shared_session/request_override",
+          "phase": "discovery",
+          "kind": "discovery_cache",
+          "identity": "O",
+          "result": "miss",
+          "discovery_http_requests": 1,
+          "endpoint_url": "http://block-storage.region-one.example/v3/",
+          "api_version": "3.0",
+          "session_cache_size": 1,
+          "plugin_cache_size": 1
+        },
+        {
+          "seq": 11,
+          "scenario": "shared_session/request_override",
+          "phase": "initiation",
+          "kind": "wire_send",
+          "endpoint_kind": "operation",
+          "method": "GET",
+          "path": "/v3/op-401",
+          "sent_token": "ph-token-O-v1",
+          "response_status": 401
+        },
+        {
+          "seq": 12,
+          "scenario": "shared_session/request_override",
+          "phase": "response",
+          "kind": "response_received",
+          "status_code": 401,
+          "path": "/v3/op-401"
+        },
+        {
+          "seq": 13,
+          "scenario": "shared_session/request_override",
+          "phase": "response",
+          "kind": "session_default_switch",
+          "old_default_identity": "A",
+          "new_default_identity": "B",
+          "trigger": "experiment changes session.auth after 401"
+        },
+        {
+          "seq": 14,
+          "scenario": "shared_session/request_override",
+          "phase": "invalidate",
+          "kind": "plugin_invalidate",
+          "identity": "O",
+          "had_cached_token": true,
+          "returned": true
+        },
+        {
+          "seq": 15,
+          "scenario": "shared_session/request_override",
+          "phase": "retry",
+          "kind": "plugin_get_auth_ref",
+          "identity": "O",
+          "token_cache": "miss",
+          "sent_token": "ph-token-O-v2"
+        },
+        {
+          "seq": 16,
+          "scenario": "shared_session/request_override",
+          "phase": "retry",
+          "kind": "plugin_get_headers",
+          "identity": "O",
+          "token_cache": "miss",
+          "sent_token": "ph-token-O-v2"
+        },
+        {
+          "seq": 17,
+          "scenario": "shared_session/request_override",
+          "phase": "retry",
+          "kind": "wire_send",
+          "endpoint_kind": "operation",
+          "method": "GET",
+          "path": "/v3/op-401",
+          "sent_token": "ph-token-O-v2",
+          "response_status": 200
+        },
+        {
+          "seq": 18,
+          "scenario": "shared_session/request_override",
+          "phase": "follow_up",
+          "kind": "plugin_get_headers",
+          "identity": "O",
+          "token_cache": "hit",
+          "sent_token": "ph-token-O-v2"
+        },
+        {
+          "seq": 19,
+          "scenario": "shared_session/request_override",
+          "phase": "discovery",
+          "kind": "catalog_lookup",
+          "identity": "O",
+          "selection": {
+            "service_type": "block-storage",
+            "service_name": null,
+            "interface": "public",
+            "region_name": "RegionOne"
+          },
+          "catalog_url": "http://block-storage.region-one.example/"
+        },
+        {
+          "seq": 20,
+          "scenario": "shared_session/request_override",
+          "phase": "discovery",
+          "kind": "discovery_cache",
+          "identity": "O",
+          "result": "hit",
+          "discovery_http_requests": 0,
+          "endpoint_url": "http://block-storage.region-one.example/v3/",
+          "api_version": "3.0",
+          "session_cache_size": 1,
+          "plugin_cache_size": 1
+        },
+        {
+          "seq": 21,
+          "scenario": "shared_session/request_override",
+          "phase": "follow_up",
+          "kind": "wire_send",
+          "endpoint_kind": "operation",
+          "method": "GET",
+          "path": "/v3/op-cache",
+          "sent_token": "ph-token-O-v2",
+          "response_status": 200
+        }
+      ]
+    },
+    {
+      "id": "shared_session/session_default_cold_replacement",
+      "topology": "shared_session_with_cold_default_replacement",
+      "identity_entry": "session_default",
+      "sent_identity_placeholders": [
+        "ph-token-A-v1",
+        "ph-token-B-cold-v1"
+      ],
+      "plugin_invalidations": [
+        {
+          "identity": "B-cold",
+          "had_cached_token": false,
+          "returned": false
+        }
+      ],
+      "discovery_cache_results": [
+        "miss",
+        "hit"
+      ],
+      "checks": [
+        {
+          "name": "cold_replacement_does_not_retry",
+          "ok": true,
+          "expected": 401,
+          "observed": 401
+        },
+        {
+          "name": "original_and_followup_tokens",
+          "ok": true,
+          "expected": [
+            "ph-token-A-v1",
+            "ph-token-B-cold-v1"
+          ],
+          "observed": [
+            "ph-token-A-v1",
+            "ph-token-B-cold-v1"
+          ]
+        },
+        {
+          "name": "invalidation_returns_false",
+          "ok": true,
+          "expected": "one false B-cold invalidation",
+          "observed": [
+            {
+              "identity": "B-cold",
+              "had_cached_token": false,
+              "returned": false
+            }
+          ]
+        },
+        {
+          "name": "followup_uses_shared_discovery_cache",
+          "ok": true,
+          "expected": [
+            "miss",
+            "hit"
+          ],
+          "observed": [
+            "miss",
+            "hit"
+          ]
+        },
+        {
+          "name": "followup_succeeds_after_cold_mint",
+          "ok": true,
+          "expected": 200,
+          "observed": 200
+        }
+      ],
+      "passed": true,
+      "events": [
+        {
+          "seq": 1,
+          "scenario": "shared_session/session_default_cold_replacement",
+          "phase": "setup",
+          "kind": "plugin_get_auth_ref",
+          "identity": "A",
+          "token_cache": "miss",
+          "sent_token": "ph-token-A-v1"
+        },
+        {
+          "seq": 2,
+          "scenario": "shared_session/session_default_cold_replacement",
+          "phase": "setup",
+          "kind": "plugin_get_headers",
+          "identity": "A",
+          "token_cache": "miss",
+          "sent_token": "ph-token-A-v1"
+        },
+        {
+          "seq": 3,
+          "scenario": "shared_session/session_default_cold_replacement",
+          "phase": "initiation",
+          "kind": "plugin_get_headers",
+          "identity": "A",
+          "token_cache": "hit",
+          "sent_token": "ph-token-A-v1"
+        },
+        {
+          "seq": 4,
+          "scenario": "shared_session/session_default_cold_replacement",
+          "phase": "discovery",
+          "kind": "catalog_lookup",
+          "identity": "A",
+          "selection": {
+            "service_type": "block-storage",
+            "service_name": null,
+            "interface": "public",
+            "region_name": "RegionOne"
+          },
+          "catalog_url": "http://block-storage.region-one.example/"
+        },
+        {
+          "seq": 5,
+          "scenario": "shared_session/session_default_cold_replacement",
+          "phase": "discovery",
+          "kind": "wire_send",
+          "endpoint_kind": "discovery",
+          "method": "GET",
+          "path": "/",
+          "sent_token": null
+        },
+        {
+          "seq": 6,
+          "scenario": "shared_session/session_default_cold_replacement",
+          "phase": "discovery",
+          "kind": "discovery_cache",
+          "identity": "A",
+          "result": "miss",
+          "discovery_http_requests": 1,
+          "endpoint_url": "http://block-storage.region-one.example/v3/",
+          "api_version": "3.0",
+          "session_cache_size": 1,
+          "plugin_cache_size": 1
+        },
+        {
+          "seq": 7,
+          "scenario": "shared_session/session_default_cold_replacement",
+          "phase": "initiation",
+          "kind": "wire_send",
+          "endpoint_kind": "operation",
+          "method": "GET",
+          "path": "/v3/op-401",
+          "sent_token": "ph-token-A-v1",
+          "response_status": 401
+        },
+        {
+          "seq": 8,
+          "scenario": "shared_session/session_default_cold_replacement",
+          "phase": "response",
+          "kind": "response_received",
+          "status_code": 401,
+          "path": "/v3/op-401"
+        },
+        {
+          "seq": 9,
+          "scenario": "shared_session/session_default_cold_replacement",
+          "phase": "response",
+          "kind": "session_default_switch",
+          "old_default_identity": "A",
+          "new_default_identity": "B-cold",
+          "trigger": "replacement plugin has no cached auth_ref"
+        },
+        {
+          "seq": 10,
+          "scenario": "shared_session/session_default_cold_replacement",
+          "phase": "invalidate",
+          "kind": "plugin_invalidate",
+          "identity": "B-cold",
+          "had_cached_token": false,
+          "returned": false
+        },
+        {
+          "seq": 11,
+          "scenario": "shared_session/session_default_cold_replacement",
+          "phase": "follow_up",
+          "kind": "plugin_get_auth_ref",
+          "identity": "B-cold",
+          "token_cache": "miss",
+          "sent_token": "ph-token-B-cold-v1"
+        },
+        {
+          "seq": 12,
+          "scenario": "shared_session/session_default_cold_replacement",
+          "phase": "follow_up",
+          "kind": "plugin_get_headers",
+          "identity": "B-cold",
+          "token_cache": "miss",
+          "sent_token": "ph-token-B-cold-v1"
+        },
+        {
+          "seq": 13,
+          "scenario": "shared_session/session_default_cold_replacement",
+          "phase": "discovery",
+          "kind": "catalog_lookup",
+          "identity": "B-cold",
+          "selection": {
+            "service_type": "block-storage",
+            "service_name": null,
+            "interface": "public",
+            "region_name": "RegionOne"
+          },
+          "catalog_url": "http://block-storage.region-one.example/"
+        },
+        {
+          "seq": 14,
+          "scenario": "shared_session/session_default_cold_replacement",
+          "phase": "discovery",
+          "kind": "discovery_cache",
+          "identity": "B-cold",
+          "result": "hit",
+          "discovery_http_requests": 0,
+          "endpoint_url": "http://block-storage.region-one.example/v3/",
+          "api_version": "3.0",
+          "session_cache_size": 1,
+          "plugin_cache_size": 1
+        },
+        {
+          "seq": 15,
+          "scenario": "shared_session/session_default_cold_replacement",
+          "phase": "follow_up",
+          "kind": "wire_send",
+          "endpoint_kind": "operation",
+          "method": "GET",
+          "path": "/v3/op-cache",
+          "sent_token": "ph-token-B-cold-v1",
+          "response_status": 200
+        }
+      ]
+    },
+    {
+      "id": "identity_sessions/two_identities_shared_discovery_cache",
+      "topology": "one_session_per_identity_with_explicit_shared_discovery_cache",
+      "identity_entry": "session_default_on_each_identity_session",
+      "sent_identity_placeholders": [
+        "ph-token-A-v1",
+        "ph-token-A-v2",
+        "ph-token-B-v1"
+      ],
+      "plugin_invalidations": [
+        {
+          "identity": "A",
+          "had_cached_token": true,
+          "returned": true
+        }
+      ],
+      "discovery_cache_results": [
+        "miss",
+        "hit"
+      ],
+      "shared_discovery_cache_keys": 1,
+      "checks": [
+        {
+          "name": "a_retries_with_a_and_b_uses_b",
+          "ok": true,
+          "expected": [
+            "A v1",
+            "A v2",
+            "B v1"
+          ],
+          "observed": [
+            "ph-token-A-v1",
+            "ph-token-A-v2",
+            "ph-token-B-v1"
+          ]
+        },
+        {
+          "name": "only_a_is_invalidated",
+          "ok": true,
+          "expected": [
+            "A"
+          ],
+          "observed": [
+            {
+              "identity": "A",
+              "had_cached_token": true,
+              "returned": true
+            }
+          ]
+        },
+        {
+          "name": "b_reuses_discovery_cache",
+          "ok": true,
+          "expected": [
+            "miss",
+            "hit"
+          ],
+          "observed": [
+            "miss",
+            "hit"
+          ]
+        },
+        {
+          "name": "sessions_keep_identity_bindings",
+          "ok": true,
+          "expected": true,
+          "observed": {
+            "session_a_auth": "A",
+            "session_b_auth": "B"
+          }
+        },
+        {
+          "name": "shared_cache_contains_one_key",
+          "ok": true,
+          "expected": 1,
+          "observed": 1
+        },
+        {
+          "name": "both_http_calls_succeed",
+          "ok": true,
+          "expected": [
+            200,
+            200
+          ],
+          "observed": [
+            200,
+            200
+          ]
+        }
+      ],
+      "passed": true,
+      "events": [
+        {
+          "seq": 1,
+          "scenario": "identity_sessions/two_identities_shared_discovery_cache",
+          "phase": "setup",
+          "kind": "plugin_get_auth_ref",
+          "identity": "A",
+          "token_cache": "miss",
+          "sent_token": "ph-token-A-v1"
+        },
+        {
+          "seq": 2,
+          "scenario": "identity_sessions/two_identities_shared_discovery_cache",
+          "phase": "setup",
+          "kind": "plugin_get_headers",
+          "identity": "A",
+          "token_cache": "miss",
+          "sent_token": "ph-token-A-v1"
+        },
+        {
+          "seq": 3,
+          "scenario": "identity_sessions/two_identities_shared_discovery_cache",
+          "phase": "setup",
+          "kind": "plugin_get_auth_ref",
+          "identity": "B",
+          "token_cache": "miss",
+          "sent_token": "ph-token-B-v1"
+        },
+        {
+          "seq": 4,
+          "scenario": "identity_sessions/two_identities_shared_discovery_cache",
+          "phase": "setup",
+          "kind": "plugin_get_headers",
+          "identity": "B",
+          "token_cache": "miss",
+          "sent_token": "ph-token-B-v1"
+        },
+        {
+          "seq": 5,
+          "scenario": "identity_sessions/two_identities_shared_discovery_cache",
+          "phase": "initiation",
+          "kind": "plugin_get_headers",
+          "identity": "A",
+          "token_cache": "hit",
+          "sent_token": "ph-token-A-v1"
+        },
+        {
+          "seq": 6,
+          "scenario": "identity_sessions/two_identities_shared_discovery_cache",
+          "phase": "discovery",
+          "kind": "catalog_lookup",
+          "identity": "A",
+          "selection": {
+            "service_type": "block-storage",
+            "service_name": null,
+            "interface": "public",
+            "region_name": "RegionOne"
+          },
+          "catalog_url": "http://block-storage.region-one.example/"
+        },
+        {
+          "seq": 7,
+          "scenario": "identity_sessions/two_identities_shared_discovery_cache",
+          "phase": "discovery",
+          "kind": "wire_send",
+          "endpoint_kind": "discovery",
+          "method": "GET",
+          "path": "/",
+          "sent_token": null
+        },
+        {
+          "seq": 8,
+          "scenario": "identity_sessions/two_identities_shared_discovery_cache",
+          "phase": "discovery",
+          "kind": "discovery_cache",
+          "identity": "A",
+          "result": "miss",
+          "discovery_http_requests": 1,
+          "endpoint_url": "http://block-storage.region-one.example/v3/",
+          "api_version": "3.0",
+          "session_cache_size": 1,
+          "plugin_cache_size": 1
+        },
+        {
+          "seq": 9,
+          "scenario": "identity_sessions/two_identities_shared_discovery_cache",
+          "phase": "initiation",
+          "kind": "wire_send",
+          "endpoint_kind": "operation",
+          "method": "GET",
+          "path": "/v3/op-401",
+          "sent_token": "ph-token-A-v1",
+          "response_status": 401
+        },
+        {
+          "seq": 10,
+          "scenario": "identity_sessions/two_identities_shared_discovery_cache",
+          "phase": "response",
+          "kind": "response_received",
+          "status_code": 401,
+          "path": "/v3/op-401"
+        },
+        {
+          "seq": 11,
+          "scenario": "identity_sessions/two_identities_shared_discovery_cache",
+          "phase": "response",
+          "kind": "isolation_decision",
+          "action": "keep session_a.auth=A; use session_b for B operation"
+        },
+        {
+          "seq": 12,
+          "scenario": "identity_sessions/two_identities_shared_discovery_cache",
+          "phase": "invalidate",
+          "kind": "plugin_invalidate",
+          "identity": "A",
+          "had_cached_token": true,
+          "returned": true
+        },
+        {
+          "seq": 13,
+          "scenario": "identity_sessions/two_identities_shared_discovery_cache",
+          "phase": "retry",
+          "kind": "plugin_get_auth_ref",
+          "identity": "A",
+          "token_cache": "miss",
+          "sent_token": "ph-token-A-v2"
+        },
+        {
+          "seq": 14,
+          "scenario": "identity_sessions/two_identities_shared_discovery_cache",
+          "phase": "retry",
+          "kind": "plugin_get_headers",
+          "identity": "A",
+          "token_cache": "miss",
+          "sent_token": "ph-token-A-v2"
+        },
+        {
+          "seq": 15,
+          "scenario": "identity_sessions/two_identities_shared_discovery_cache",
+          "phase": "retry",
+          "kind": "wire_send",
+          "endpoint_kind": "operation",
+          "method": "GET",
+          "path": "/v3/op-401",
+          "sent_token": "ph-token-A-v2",
+          "response_status": 200
+        },
+        {
+          "seq": 16,
+          "scenario": "identity_sessions/two_identities_shared_discovery_cache",
+          "phase": "follow_up",
+          "kind": "plugin_get_headers",
+          "identity": "B",
+          "token_cache": "hit",
+          "sent_token": "ph-token-B-v1"
+        },
+        {
+          "seq": 17,
+          "scenario": "identity_sessions/two_identities_shared_discovery_cache",
+          "phase": "discovery",
+          "kind": "catalog_lookup",
+          "identity": "B",
+          "selection": {
+            "service_type": "block-storage",
+            "service_name": null,
+            "interface": "public",
+            "region_name": "RegionOne"
+          },
+          "catalog_url": "http://block-storage.region-one.example/"
+        },
+        {
+          "seq": 18,
+          "scenario": "identity_sessions/two_identities_shared_discovery_cache",
+          "phase": "discovery",
+          "kind": "discovery_cache",
+          "identity": "B",
+          "result": "hit",
+          "discovery_http_requests": 0,
+          "endpoint_url": "http://block-storage.region-one.example/v3/",
+          "api_version": "3.0",
+          "session_cache_size": 1,
+          "plugin_cache_size": 1
+        },
+        {
+          "seq": 19,
+          "scenario": "identity_sessions/two_identities_shared_discovery_cache",
+          "phase": "follow_up",
+          "kind": "wire_send",
+          "endpoint_kind": "operation",
+          "method": "GET",
+          "path": "/v3/op-cache",
+          "sent_token": "ph-token-B-v1",
+          "response_status": 200
+        }
+      ]
+    },
+    {
+      "id": "discovery_conditions/share_cache=true/second_region=same",
+      "share_session_discovery_cache": true,
+      "same_service_region_interface": true,
+      "discovery_cache_results": [
+        "miss",
+        "hit"
+      ],
+      "checks": [
+        {
+          "name": "second_discovery_cache_result",
+          "ok": true,
+          "expected": [
+            "miss",
+            "hit"
+          ],
+          "observed": [
+            "miss",
+            "hit"
+          ]
+        }
+      ],
+      "passed": true,
+      "events": [
+        {
+          "seq": 1,
+          "scenario": "discovery_conditions/share_cache=true/second_region=same",
+          "phase": "discovery",
+          "kind": "catalog_lookup",
+          "identity": "probe-A",
+          "selection": {
+            "service_type": "block-storage",
+            "service_name": null,
+            "interface": "public",
+            "region_name": "RegionOne"
+          },
+          "catalog_url": "http://block-storage.region-one.example/"
+        },
+        {
+          "seq": 2,
+          "scenario": "discovery_conditions/share_cache=true/second_region=same",
+          "phase": "discovery",
+          "kind": "wire_send",
+          "endpoint_kind": "discovery",
+          "method": "GET",
+          "path": "/",
+          "sent_token": null
+        },
+        {
+          "seq": 3,
+          "scenario": "discovery_conditions/share_cache=true/second_region=same",
+          "phase": "discovery",
+          "kind": "discovery_cache",
+          "identity": "probe-A",
+          "result": "miss",
+          "discovery_http_requests": 1,
+          "endpoint_url": "http://block-storage.region-one.example/v3/",
+          "api_version": "3.0",
+          "session_cache_size": 1,
+          "plugin_cache_size": 1
+        },
+        {
+          "seq": 4,
+          "scenario": "discovery_conditions/share_cache=true/second_region=same",
+          "phase": "discovery",
+          "kind": "catalog_lookup",
+          "identity": "probe-B",
+          "selection": {
+            "service_type": "block-storage",
+            "service_name": null,
+            "interface": "public",
+            "region_name": "RegionOne"
+          },
+          "catalog_url": "http://block-storage.region-one.example/"
+        },
+        {
+          "seq": 5,
+          "scenario": "discovery_conditions/share_cache=true/second_region=same",
+          "phase": "discovery",
+          "kind": "discovery_cache",
+          "identity": "probe-B",
+          "result": "hit",
+          "discovery_http_requests": 0,
+          "endpoint_url": "http://block-storage.region-one.example/v3/",
+          "api_version": "3.0",
+          "session_cache_size": 1,
+          "plugin_cache_size": 1
+        }
+      ]
+    },
+    {
+      "id": "discovery_conditions/share_cache=false/second_region=same",
+      "share_session_discovery_cache": false,
+      "same_service_region_interface": true,
+      "discovery_cache_results": [
+        "miss",
+        "miss"
+      ],
+      "checks": [
+        {
+          "name": "second_discovery_cache_result",
+          "ok": true,
+          "expected": [
+            "miss",
+            "miss"
+          ],
+          "observed": [
+            "miss",
+            "miss"
+          ]
+        }
+      ],
+      "passed": true,
+      "events": [
+        {
+          "seq": 1,
+          "scenario": "discovery_conditions/share_cache=false/second_region=same",
+          "phase": "discovery",
+          "kind": "catalog_lookup",
+          "identity": "probe-A",
+          "selection": {
+            "service_type": "block-storage",
+            "service_name": null,
+            "interface": "public",
+            "region_name": "RegionOne"
+          },
+          "catalog_url": "http://block-storage.region-one.example/"
+        },
+        {
+          "seq": 2,
+          "scenario": "discovery_conditions/share_cache=false/second_region=same",
+          "phase": "discovery",
+          "kind": "wire_send",
+          "endpoint_kind": "discovery",
+          "method": "GET",
+          "path": "/",
+          "sent_token": null
+        },
+        {
+          "seq": 3,
+          "scenario": "discovery_conditions/share_cache=false/second_region=same",
+          "phase": "discovery",
+          "kind": "discovery_cache",
+          "identity": "probe-A",
+          "result": "miss",
+          "discovery_http_requests": 1,
+          "endpoint_url": "http://block-storage.region-one.example/v3/",
+          "api_version": "3.0",
+          "session_cache_size": 1,
+          "plugin_cache_size": 1
+        },
+        {
+          "seq": 4,
+          "scenario": "discovery_conditions/share_cache=false/second_region=same",
+          "phase": "discovery",
+          "kind": "catalog_lookup",
+          "identity": "probe-B",
+          "selection": {
+            "service_type": "block-storage",
+            "service_name": null,
+            "interface": "public",
+            "region_name": "RegionOne"
+          },
+          "catalog_url": "http://block-storage.region-one.example/"
+        },
+        {
+          "seq": 5,
+          "scenario": "discovery_conditions/share_cache=false/second_region=same",
+          "phase": "discovery",
+          "kind": "wire_send",
+          "endpoint_kind": "discovery",
+          "method": "GET",
+          "path": "/",
+          "sent_token": null
+        },
+        {
+          "seq": 6,
+          "scenario": "discovery_conditions/share_cache=false/second_region=same",
+          "phase": "discovery",
+          "kind": "discovery_cache",
+          "identity": "probe-B",
+          "result": "miss",
+          "discovery_http_requests": 1,
+          "endpoint_url": "http://block-storage.region-one.example/v3/",
+          "api_version": "3.0",
+          "session_cache_size": 1,
+          "plugin_cache_size": 1
+        }
+      ]
+    },
+    {
+      "id": "discovery_conditions/share_cache=true/second_region=different",
+      "share_session_discovery_cache": true,
+      "same_service_region_interface": false,
+      "discovery_cache_results": [
+        "miss",
+        "miss"
+      ],
+      "checks": [
+        {
+          "name": "second_discovery_cache_result",
+          "ok": true,
+          "expected": [
+            "miss",
+            "miss"
+          ],
+          "observed": [
+            "miss",
+            "miss"
+          ]
+        }
+      ],
+      "passed": true,
+      "events": [
+        {
+          "seq": 1,
+          "scenario": "discovery_conditions/share_cache=true/second_region=different",
+          "phase": "discovery",
+          "kind": "catalog_lookup",
+          "identity": "probe-A",
+          "selection": {
+            "service_type": "block-storage",
+            "service_name": null,
+            "interface": "public",
+            "region_name": "RegionOne"
+          },
+          "catalog_url": "http://block-storage.region-one.example/"
+        },
+        {
+          "seq": 2,
+          "scenario": "discovery_conditions/share_cache=true/second_region=different",
+          "phase": "discovery",
+          "kind": "wire_send",
+          "endpoint_kind": "discovery",
+          "method": "GET",
+          "path": "/",
+          "sent_token": null
+        },
+        {
+          "seq": 3,
+          "scenario": "discovery_conditions/share_cache=true/second_region=different",
+          "phase": "discovery",
+          "kind": "discovery_cache",
+          "identity": "probe-A",
+          "result": "miss",
+          "discovery_http_requests": 1,
+          "endpoint_url": "http://block-storage.region-one.example/v3/",
+          "api_version": "3.0",
+          "session_cache_size": 1,
+          "plugin_cache_size": 1
+        },
+        {
+          "seq": 4,
+          "scenario": "discovery_conditions/share_cache=true/second_region=different",
+          "phase": "discovery",
+          "kind": "catalog_lookup",
+          "identity": "probe-B",
+          "selection": {
+            "service_type": "block-storage",
+            "service_name": null,
+            "interface": "public",
+            "region_name": "RegionTwo"
+          },
+          "catalog_url": "http://block-storage.region-two.example/"
+        },
+        {
+          "seq": 5,
+          "scenario": "discovery_conditions/share_cache=true/second_region=different",
+          "phase": "discovery",
+          "kind": "wire_send",
+          "endpoint_kind": "discovery",
+          "method": "GET",
+          "path": "/",
+          "sent_token": null
+        },
+        {
+          "seq": 6,
+          "scenario": "discovery_conditions/share_cache=true/second_region=different",
+          "phase": "discovery",
+          "kind": "discovery_cache",
+          "identity": "probe-B",
+          "result": "miss",
+          "discovery_http_requests": 1,
+          "endpoint_url": "http://block-storage.region-two.example/v3/",
+          "api_version": "3.0",
+          "session_cache_size": 2,
+          "plugin_cache_size": 1
+        }
+      ]
+    }
+  ]
+}
