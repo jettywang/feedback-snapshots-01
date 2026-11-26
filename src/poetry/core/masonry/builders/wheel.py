@@ -73,6 +73,12 @@ class WheelBuilder(Builder):
         self._editable = editable
         self._metadata_directory = metadata_directory
 
+        safe_build = self._config_settings.get("safe-build", False)
+        if isinstance(safe_build, str):
+            safe_build = safe_build.lower() in {"1", "true", "yes", "on"}
+        self._safe_build = bool(safe_build)
+        self._build_tree_snapshot: dict[Path, tuple[int, int]] | None = None
+
     @classmethod
     def make_in(
         cls,
@@ -111,44 +117,48 @@ class WheelBuilder(Builder):
         if not target_dir.exists():
             target_dir.mkdir(parents=True)
 
-        fd, temp = tempfile.mkstemp(suffix=".whl")
+        fd, temp = tempfile.mkstemp(suffix=".whl", dir=target_dir)
 
         temp_path = Path(temp)
         st_mode = temp_path.stat().st_mode
         new_mode = normalize_file_permissions(st_mode)
         temp_path.chmod(new_mode)
 
-        with (
-            os.fdopen(fd, "w+b") as fd_file,
-            zipfile.ZipFile(
-                fd_file, mode="w", compression=zipfile.ZIP_DEFLATED
-            ) as zip_file,
-        ):
-            if self._editable:
-                self._build(zip_file)
-                self._add_pth(zip_file)
-            elif self._poetry.package.build_should_generate_setup():
-                self._copy_module(zip_file)
-                self._build(zip_file)
-            else:
-                self._build(zip_file)
-                self._copy_module(zip_file)
+        try:
+            with (
+                os.fdopen(fd, "w+b") as fd_file,
+                zipfile.ZipFile(
+                    fd_file, mode="w", compression=zipfile.ZIP_DEFLATED
+                ) as zip_file,
+            ):
+                if self._editable:
+                    self._build(zip_file)
+                    self._add_pth(zip_file)
+                elif self._poetry.package.build_should_generate_setup():
+                    self._copy_module(zip_file)
+                    self._build(zip_file)
+                else:
+                    self._build(zip_file)
+                    self._copy_module(zip_file)
 
-            self._copy_file_scripts(zip_file)
+                self._copy_file_scripts(zip_file)
 
-            if self._metadata_directory is None:
-                with TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:
-                    metadata_directory = self.prepare_metadata(Path(temp_dir))
-                    self._copy_dist_info(zip_file, metadata_directory)
-            else:
-                self._copy_dist_info(zip_file, self._metadata_directory)
+                if self._metadata_directory is None:
+                    with TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:
+                        metadata_directory = self.prepare_metadata(Path(temp_dir))
+                        self._copy_dist_info(zip_file, metadata_directory)
+                else:
+                    self._copy_dist_info(zip_file, self._metadata_directory)
 
-            self._write_record(zip_file)
+                self._write_record(zip_file)
+        except BaseException:
+            # A failed build must not leave a partial wheel behind nor
+            # replace an already completed one in the target directory.
+            temp_path.unlink(missing_ok=True)
+            raise
 
         wheel_path = target_dir / self.wheel_filename
-        if wheel_path.exists():
-            wheel_path.unlink()
-        shutil.move(str(temp_path), str(wheel_path))
+        os.replace(temp_path, wheel_path)
 
         logger.info(f"Built {self.wheel_filename}")
         return wheel_path
@@ -185,6 +195,9 @@ class WheelBuilder(Builder):
                     os.chdir(current_path)
             else:
                 with SdistBuilder(poetry=self._poetry).setup_py() as setup:
+                    if self._safe_build:
+                        self._build_tree_snapshot = self._snapshot_build_tree()
+
                     # We need to place ourselves in the temporary
                     # directory in order to build the package
                     current_path = Path.cwd()
@@ -208,6 +221,10 @@ class WheelBuilder(Builder):
 
                     for pkg in sorted(lib.glob("**/*")):
                         if pkg.is_dir() or self.is_excluded(pkg):
+                            continue
+
+                        if not self._is_fresh_build_artifact(pkg):
+                            logger.debug(f"Skipping stale build artifact: {pkg}")
                             continue
 
                         rel_path = pkg.relative_to(lib)
@@ -264,6 +281,35 @@ print(sysconfig.get_platform(), sys.implementation.cache_tag, sep='-')
         elif build_purelib.exists():
             return build_purelib
         return None
+
+    def _snapshot_build_tree(self) -> dict[Path, tuple[int, int]]:
+        """Record the state of pre-existing files in the build directory.
+
+        Used in safe-build mode to tell artifacts left behind by previous
+        builds apart from the ones produced by the current build.
+        """
+        snapshot = {}
+        build_dir = self._path / "build"
+        if build_dir.is_dir():
+            for file in build_dir.glob("**/*"):
+                if file.is_file():
+                    stat_result = file.stat()
+                    snapshot[file] = (stat_result.st_mtime_ns, stat_result.st_size)
+        return snapshot
+
+    def _is_fresh_build_artifact(self, path: Path) -> bool:
+        """Check whether a build artifact was created or updated by this build.
+
+        Without a snapshot (safe-build mode disabled), every artifact is
+        considered fresh, preserving the default behavior.
+        """
+        if self._build_tree_snapshot is None:
+            return True
+        previous = self._build_tree_snapshot.get(path)
+        if previous is None:
+            return True
+        stat_result = path.stat()
+        return (stat_result.st_mtime_ns, stat_result.st_size) != previous
 
     def _copy_file_scripts(self, wheel: zipfile.ZipFile) -> None:
         file_scripts = self.convert_script_files()

@@ -5,6 +5,7 @@ import logging
 import os
 import re
 import shutil
+import subprocess
 import zipfile
 
 from pathlib import Path
@@ -621,3 +622,88 @@ def test_dist_info_date_time_value_from_envvar_older_than_1980(
         "zipinfo date can't be earlier than 1980,"
         f" setting zipinfo date to default={default_date_time}"
     ) in caplog.messages
+
+
+def build_channel_ext(
+    monkeypatch: MonkeyPatch, channel: str, safe_build: bool = True
+) -> None:
+    monkeypatch.setenv("CHANNEL", channel)
+    config_settings = {"safe-build": "true"} if safe_build else None
+    WheelBuilder.make_in(
+        Factory().create_poetry(fixtures_dir / "channel_ext"),
+        config_settings=config_settings,
+    )
+
+
+def channel_ext_wheel() -> Path:
+    return next((fixtures_dir / "channel_ext" / "dist").glob("channel_ext-0.1-*.whl"))
+
+
+def channel_ext_wheel_names(whl: Path) -> list[str]:
+    with zipfile.ZipFile(str(whl)) as z:
+        return z.namelist()
+
+
+def test_safe_build_isolates_channel_artifacts(monkeypatch: MonkeyPatch) -> None:
+    """With safe-build enabled, a wheel only contains the artifacts produced by
+    its own build, leftovers from previous builds stay on disk untouched, and a
+    failing build never replaces the last completed wheel.
+    """
+    root = fixtures_dir / "channel_ext"
+    build_channel_ext(monkeypatch, "a")
+
+    whl = channel_ext_wheel()
+    names = channel_ext_wheel_names(whl)
+    assert "channel_ext/__init__.py" in names
+    assert "channel_ext/channel_a.py" in names
+
+    # A second build for another channel only generates channel B.
+    build_channel_ext(monkeypatch, "b")
+
+    whl = channel_ext_wheel()
+    names = channel_ext_wheel_names(whl)
+    assert "channel_ext/__init__.py" in names
+    assert "channel_ext/channel_b.py" in names
+    assert "channel_ext/channel_a.py" not in names
+
+    # The leftover from the previous build is kept on disk for inspection.
+    assert list((root / "build").glob("lib*/channel_ext/channel_a.py"))
+
+    # A third build fails after writing its artifact to the build directory.
+    monkeypatch.setenv("FAIL_AFTER_WRITE", "1")
+    completed_wheel = whl.read_bytes()
+    with pytest.raises(subprocess.CalledProcessError):
+        build_channel_ext(monkeypatch, "c")
+
+    # The completed wheel is neither replaced nor removed.
+    assert whl.read_bytes() == completed_wheel
+    assert [p.name for p in (root / "dist").iterdir()] == [whl.name]
+    names = channel_ext_wheel_names(whl)
+    assert "channel_ext/channel_b.py" in names
+    assert "channel_ext/channel_c.py" not in names
+
+    # The failed build's artifact stays on disk for debugging.
+    assert list((root / "build").glob("lib*/channel_ext/channel_c.py"))
+
+    # Rebuilding a channel regenerates its artifact, which is fresh again.
+    monkeypatch.delenv("FAIL_AFTER_WRITE")
+    build_channel_ext(monkeypatch, "a")
+
+    names = channel_ext_wheel_names(channel_ext_wheel())
+    assert "channel_ext/channel_a.py" in names
+    assert "channel_ext/channel_b.py" not in names
+    assert "channel_ext/channel_c.py" not in names
+
+
+def test_default_build_includes_stale_build_artifacts(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    """Without safe-build, artifacts left behind by previous builds are
+    included in the wheel, preserving the historic default behavior.
+    """
+    build_channel_ext(monkeypatch, "a", safe_build=False)
+    build_channel_ext(monkeypatch, "b", safe_build=False)
+
+    names = channel_ext_wheel_names(channel_ext_wheel())
+    assert "channel_ext/channel_a.py" in names
+    assert "channel_ext/channel_b.py" in names
