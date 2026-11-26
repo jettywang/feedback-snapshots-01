@@ -35,6 +35,11 @@ from .oauth2cli.oidc import Prompt, IdTokenError
 from .sku import __version__
 from .token_cache import TokenCache, SerializableTokenCache
 from .auth_scheme import PopAuthScheme
+from .scope_policy import (
+    StrictScopePolicy,
+    StrictScopesPolicy,
+    ExactScopePolicy,
+)
 from .managed_identity import (
     SystemAssignedManagedIdentity, UserAssignedManagedIdentity,
     ManagedIdentityClient,

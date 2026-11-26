@@ -470,6 +470,14 @@ class TokenCache(object):
                     # So that we won't accidentally store a user's password etc.
                     "key_id",  # It happens in SSH-cert or POP scenario
                 }})
+                for source_key in (
+                        "approval_source", "approved_source", "source"):
+                    source_value = (
+                        event.get(source_key)
+                        or response.get(source_key)
+                        or data.get(source_key))
+                    if source_value:
+                        at[source_key] = source_value
                 # Compute and store extended cache key for cache isolation
                 # (e.g., different FMI paths should have separate cache entries)
                 ext_cache_key = _compute_ext_cache_key(data)

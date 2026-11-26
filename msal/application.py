@@ -29,6 +29,12 @@ from .throttled_http_client import ThrottledHttpClient
 from .cloudshell import _is_running_in_cloud_shell
 from .sku import SKU, __version__
 from .oauth2cli.authcode import is_wsl
+from .scope_policy import (
+    StrictScopePolicy,
+    coerce_scope_policy,
+    pop_scope_policy_kwargs,
+    strict_policy_error,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -169,6 +175,25 @@ def _clean_up(result):
             return_value["refresh_on"] = int(time.time() + result["refresh_in"])
         return return_value
     return result  # It could be None
+
+
+def _resolve_call_scope_policy(
+        scope_policy, strict_scopes, approved_sources, kwargs):
+    """Resolve documented params and compatibility aliases once per call."""
+    alias_policy = pop_scope_policy_kwargs(kwargs)
+    primary_policy = coerce_scope_policy(
+        scope_policy,
+        strict=bool(strict_scopes),
+        approved_sources=approved_sources)
+    if primary_policy is None:
+        return alias_policy
+    if alias_policy is None:
+        return primary_policy
+    return StrictScopePolicy(
+        set(primary_policy.approved_sources) | set(alias_policy.approved_sources),
+        approved_environments=primary_policy.approved_environments,
+        include_reserved_scopes=primary_policy.include_reserved_scopes,
+    )
 
 
 def _preferred_browser():
@@ -1564,6 +1589,9 @@ The reserved list: {}""".format(list(scope_set), list(reserved_scope)))
             claims_challenge=None,
             forwarded_client_claims=None,
             auth_scheme=None,
+            scope_policy=None,
+            strict_scopes=False,
+            approved_sources=None,
             **kwargs):
         """Acquire an access token for given account, without user interaction.
 
@@ -1582,12 +1610,15 @@ The reserved list: {}""".format(list(scope_set), list(reserved_scope)))
         """
         if not account:
             return None  # A backward-compatible NO-OP to drop the account=None usage
+        scope_policy = _resolve_call_scope_policy(
+            scope_policy, strict_scopes, approved_sources, kwargs)
         if forwarded_client_claims is not None:
             kwargs["data"] = kwargs.get("data", {})
             _stash_client_claims(forwarded_client_claims, kwargs["data"])
         result = _clean_up(self._acquire_token_silent_with_error(
             scopes, account, authority=authority, force_refresh=force_refresh,
-            claims_challenge=claims_challenge, auth_scheme=auth_scheme, **kwargs))
+            claims_challenge=claims_challenge, auth_scheme=auth_scheme,
+            scope_policy=scope_policy, **kwargs))
         return result if result and "error" not in result else None
 
     def acquire_token_silent_with_error(
@@ -1599,6 +1630,9 @@ The reserved list: {}""".format(list(scope_set), list(reserved_scope)))
             claims_challenge=None,
             forwarded_client_claims=None,
             auth_scheme=None,
+            scope_policy=None,
+            strict_scopes=False,
+            approved_sources=None,
             **kwargs):
         """Acquire an access token for given account, without user interaction.
 
@@ -1641,6 +1675,15 @@ The reserved list: {}""".format(list(scope_set), list(reserved_scope)))
             so that MSAL will get a Proof-of-Possession (POP) token for you.
 
             New in version 1.26.0.
+        :param scope_policy:
+            Optional scope reuse policy. Pass
+            :class:`msal.StrictScopePolicy` (or the string ``"strict"``) to
+            require exact business-scope equivalence and an approved source
+            before a token is returned from cache, refresh, broker, or an
+            authority-alias lookup. The convenience ``strict_scopes=True``
+            and ``approved_sources=[...]`` parameters are also supported.
+            Ordinary calls omit this parameter and retain subset-scope cache
+            reuse.
 
         :return:
             - A dict containing no "error" key,
@@ -1651,12 +1694,15 @@ The reserved list: {}""".format(list(scope_set), list(reserved_scope)))
         """
         if not account:
             return None  # A backward-compatible NO-OP to drop the account=None usage
+        scope_policy = _resolve_call_scope_policy(
+            scope_policy, strict_scopes, approved_sources, kwargs)
         if forwarded_client_claims is not None:
             kwargs["data"] = kwargs.get("data", {})
             _stash_client_claims(forwarded_client_claims, kwargs["data"])
         return _clean_up(self._acquire_token_silent_with_error(
             scopes, account, authority=authority, force_refresh=force_refresh,
-            claims_challenge=claims_challenge, auth_scheme=auth_scheme, **kwargs))
+            claims_challenge=claims_challenge, auth_scheme=auth_scheme,
+            scope_policy=scope_policy, **kwargs))
 
     def _acquire_token_silent_with_error(
             self,
@@ -1666,8 +1712,11 @@ The reserved list: {}""".format(list(scope_set), list(reserved_scope)))
             force_refresh=False,  # type: Optional[boolean]
             claims_challenge=None,
             auth_scheme=None,
+            scope_policy=None,
             **kwargs):
         assert isinstance(scopes, list), "Invalid parameter type"
+        scope_policy = _resolve_call_scope_policy(
+            scope_policy, False, None, kwargs)
         self._validate_ssh_cert_input_data(kwargs.get("data", {}))
         correlation_id = msal.telemetry._get_new_correlation_id()
         if authority:
@@ -1682,6 +1731,7 @@ The reserved list: {}""".format(list(scope_set), list(reserved_scope)))
             claims_challenge=claims_challenge,
             correlation_id=correlation_id,
             auth_scheme=auth_scheme,
+            scope_policy=scope_policy,
             **kwargs)
         if result and "error" not in result:
             return result
@@ -1705,6 +1755,7 @@ The reserved list: {}""".format(list(scope_set), list(reserved_scope)))
                 claims_challenge=claims_challenge,
                 correlation_id=correlation_id,
                 auth_scheme=auth_scheme,
+                scope_policy=scope_policy,
                 **kwargs)
             if result:
                 if "error" not in result:
@@ -1730,10 +1781,13 @@ The reserved list: {}""".format(list(scope_set), list(reserved_scope)))
             correlation_id=None,
             http_exceptions=None,
             auth_scheme=None,
+            scope_policy=None,
             **kwargs):
         # This internal method has two calling patterns:
         # it accepts a non-empty account to find token for a user,
         # and accepts account=None to find a token for the current app.
+        scope_policy = _resolve_call_scope_policy(
+            scope_policy, False, None, kwargs)
         access_token_from_cache = None
         if not (force_refresh or claims_challenge or auth_scheme):  # Then attempt AT cache
             query={
@@ -1762,6 +1816,14 @@ The reserved list: {}""".format(list(scope_set), list(reserved_scope)))
                 if expires_in < 5*60:  # Then consider it expired
                     refresh_reason = msal.telemetry.AT_EXPIRED
                     continue  # Removal is not necessary, it will be overwritten
+                if scope_policy is not None:
+                    policy_allows, policy_reason = \
+                        scope_policy.evaluate_cache_entry(entry, scopes)
+                    if not policy_allows:
+                        logger.debug(
+                            "Strict scope policy skipped a cache entry: %s",
+                            policy_reason)
+                        continue
                 logger.debug("Cache hit an AT")
                 access_token_from_cache = {  # Mimic a real response
                     "access_token": entry["secret"],
@@ -1769,6 +1831,12 @@ The reserved list: {}""".format(list(scope_set), list(reserved_scope)))
                     "expires_in": int(expires_in),  # OAuth2 specs defines it as int
                     self._TOKEN_SOURCE: self._TOKEN_SOURCE_CACHE,
                     }
+                if scope_policy is not None:
+                    access_token_from_cache["scope"] = entry.get("target", "")
+                    access_token_from_cache["strict_scope_match"] = True
+                    access_token_from_cache["approval_source"] = \
+                        scope_policy.source_from(
+                            entry, self._TOKEN_SOURCE_CACHE)
                 if "refresh_on" in entry:
                     access_token_from_cache["refresh_on"] = int(entry["refresh_on"])
                     if int(entry["refresh_on"]) < now:  # aging
@@ -1788,7 +1856,15 @@ The reserved list: {}""".format(list(scope_set), list(reserved_scope)))
             if account and account.get("authority_type") == _AUTHORITY_TYPE_CLOUDSHELL:
                 if auth_scheme:
                     raise ValueError("auth_scheme is not supported in Cloud Shell")
-                return self._acquire_token_by_cloud_shell(scopes, data=data)
+                response = self._acquire_token_by_cloud_shell(scopes, data=data)
+                if scope_policy is not None and "error" not in response:
+                    allows, reason = scope_policy.evaluate_token_response(
+                        response, scopes,
+                        source=self._TOKEN_SOURCE_BROKER,
+                        environment=authority.instance)
+                    if not allows:
+                        return strict_policy_error(reason)
+                return response
 
             is_ssh_cert_or_pop_request = _is_ssh_cert_or_pop_request(data.get("token_type"), auth_scheme)
 
@@ -1808,10 +1884,25 @@ The reserved list: {}""".format(list(scope_set), list(reserved_scope)))
                     auth_scheme=auth_scheme,
                     **data)
                 if response:  # Broker provides a decisive outcome
+                    strict_broker_rejection = False
+                    if scope_policy is not None and "error" not in response:
+                        broker_allows, broker_reason = \
+                            scope_policy.evaluate_token_response(
+                                response, scopes,
+                                source=self._TOKEN_SOURCE_BROKER,
+                                environment=self.authority.instance)
+                        if not broker_allows:
+                            response = strict_policy_error(broker_reason)
+                            strict_broker_rejection = True
+                            logger.debug(
+                                "Strict scope policy rejected broker response: %s",
+                                broker_reason)
                     account_was_established_by_broker = account.get(
                         "account_source") == _GRANT_TYPE_BROKER
                     broker_attempt_succeeded_just_now = "error" not in response
-                    if account_was_established_by_broker or broker_attempt_succeeded_just_now:
+                    if not strict_broker_rejection and (
+                            account_was_established_by_broker
+                            or broker_attempt_succeeded_just_now):
                         return self._process_broker_response(response, scopes, data)
 
             if auth_scheme:
@@ -1821,6 +1912,7 @@ The reserved list: {}""".format(list(scope_set), list(reserved_scope)))
                     authority, self._decorate_scope(scopes), account,
                     refresh_reason=refresh_reason, claims_challenge=claims_challenge,
                     correlation_id=correlation_id,
+                    scope_policy=scope_policy,
                     **kwargs)
             else:  # The caller is acquire_token_for_client()
                 result = self._acquire_token_for_client(
@@ -1897,7 +1989,10 @@ The reserved list: {}""".format(list(scope_set), list(reserved_scope)))
             self, authority, scopes, query,
             rt_remover=None, break_condition=lambda response: False,
             refresh_reason=None, correlation_id=None, claims_challenge=None,
+            scope_policy=None,
             **kwargs):
+        scope_policy = _resolve_call_scope_policy(
+            scope_policy, False, None, kwargs)
         matches = list(self.token_cache.search(  # We want a list to test emptiness
             self.token_cache.CredentialType.REFRESH_TOKEN,
             # target=scopes,  # AAD RTs are scope-independent
@@ -1919,6 +2014,24 @@ The reserved list: {}""".format(list(scope_set), list(reserved_scope)))
         # Pop "data" once (rather than per-iteration) so client_claims and any
         # other data fields apply consistently across all candidate RTs.
         _data = kwargs.pop("data", {})
+
+        def on_obtaining_tokens(event):
+            if scope_policy is not None:
+                event_allows, event_reason = scope_policy.evaluate_cache_event(
+                    event, scopes, environment=authority.instance)
+                if not event_allows:
+                    # Do not persist a broader/unapproved token where a strict
+                    # caller could later mistake it for an exact match.
+                    logger.debug(
+                        "Strict scope policy skipped refresh cache write: %s",
+                        event_reason)
+                    return
+            self.token_cache.add(dict(
+                event,
+                environment=authority.instance,
+                skip_account_creation=True,  # Honor concurrent remove_account()
+                ))
+
         for entry in sorted(  # Since unfit RTs would not be aggressively removed,
                               # we start from newer RTs which are more likely fit.
                 matches,
@@ -1934,11 +2047,7 @@ The reserved list: {}""".format(list(scope_set), list(reserved_scope)))
                 on_removing_rt=lambda rt_item: None,  # Disable RT removal,
                     # because an invalid_grant could be caused by new MFA policy,
                     # the RT could still be useful for other MFA-less scope or tenant
-                on_obtaining_tokens=lambda event: self.token_cache.add(dict(
-                    event,
-                    environment=authority.instance,
-                    skip_account_creation=True,  # To honor a concurrent remove_account()
-                    )),
+                on_obtaining_tokens=on_obtaining_tokens,
                 scope=scopes,
                 headers=headers,
                 data=dict(
@@ -1948,6 +2057,24 @@ The reserved list: {}""".format(list(scope_set), list(reserved_scope)))
                             self._client_capabilities, claims_challenge),
                         _data.get("client_claims"))),
                 **kwargs)
+            if scope_policy is not None and "error" not in response:
+                refresh_allows, refresh_reason = \
+                    scope_policy.evaluate_token_response(
+                        response, scopes,
+                        source=self._TOKEN_SOURCE_IDP,
+                        environment=authority.instance)
+                if not refresh_allows:
+                    logger.debug(
+                        "Strict scope policy rejected refresh response: %s",
+                        refresh_reason)
+                    response = strict_policy_error(refresh_reason)
+                else:
+                    if "scope" not in response:
+                        response["scope"] = " ".join(sorted(
+                            scope_policy.scope_key(scopes)))
+                    response["strict_scope_match"] = True
+                    response["approval_source"] = scope_policy.source_from(
+                        response, self._TOKEN_SOURCE_IDP)
             telemetry_context.update_telemetry(response)
             if "error" not in response:
                 return response
