@@ -10,6 +10,8 @@
 # License for the specific language governing permissions and limitations
 # under the License.
 
+from typing import Any
+
 
 __all__ = ('ClientException',)
 
@@ -18,6 +20,11 @@ class ClientException(Exception):
     """The base exception for everything to do with clients."""
 
     message = "ClientException"
+
+    #: A :class:`~keystoneauth1.diagnostics.RequestDiagnostic` for the request
+    #: that produced this exception, when one was being recorded.  It is
+    #: attached by the session and is ``None`` otherwise.
+    diagnostic: Any = None
 
     def __init__(self, message: str | None = None):
         self.message = message or self.message

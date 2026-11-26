@@ -14,6 +14,7 @@ import argparse
 import os
 from typing import Any, TYPE_CHECKING
 
+from keystoneauth1 import diagnostics
 from keystoneauth1.loading import base
 from keystoneauth1 import session
 
@@ -169,6 +170,59 @@ class Session(base._BaseLoader[session.Session]):
             'Defaults to env[OS_TLS_MIN_VERSION].',
         )
 
+        session_group.add_argument(
+            '--diagnostic-show-service-name',
+            default=False,
+            action='store_true',
+            help='Include catalog service names in the shareable '
+            'diagnostic export.',
+        )
+
+        session_group.add_argument(
+            '--diagnostic-show-endpoint',
+            default=False,
+            action='store_true',
+            help='Include catalog and request addresses in the shareable '
+            'diagnostic export.',
+        )
+
+        session_group.add_argument(
+            '--diagnostic-show-user-token',
+            default=False,
+            action='store_true',
+            help='Include user identity headers in the shareable '
+            'diagnostic export.',
+        )
+
+        session_group.add_argument(
+            '--diagnostic-show-service-token',
+            default=False,
+            action='store_true',
+            help='Include the service identity header in the shareable '
+            'diagnostic export.',
+        )
+
+        session_group.add_argument(
+            '--diagnostic-private-marker',
+            action='append',
+            metavar='<value>',
+            default=[],
+            help='A value to scrub from every shareable diagnostic string. '
+            'May be given more than once.',
+        )
+
+    @staticmethod
+    def _diagnostic_policy_from_namespace(
+        namespace: argparse.Namespace,
+    ) -> diagnostics.DiagnosticPolicy:
+        return diagnostics.DiagnosticPolicy(
+            service_name=namespace.diagnostic_show_service_name,
+            endpoint=namespace.diagnostic_show_endpoint,
+            user_token=namespace.diagnostic_show_user_token,
+            service_token=namespace.diagnostic_show_service_token,
+            private_markers=tuple(namespace.diagnostic_private_marker),
+        )
+
     def load_from_argparse_arguments(
         self, namespace: argparse.Namespace, **kwargs: Any
     ) -> session.Session:
@@ -180,6 +234,10 @@ class Session(base._BaseLoader[session.Session]):
         kwargs.setdefault('collect_timing', namespace.collect_timing)
         kwargs.setdefault('tls_ciphers', namespace.tls_ciphers)
         kwargs.setdefault('tls_min_version', namespace.tls_min_version)
+        kwargs.setdefault(
+            'diagnostic_policy',
+            self._diagnostic_policy_from_namespace(namespace),
+        )
 
         return self.load_from_options(**kwargs)
 
@@ -202,6 +260,16 @@ class Session(base._BaseLoader[session.Session]):
             :split-loggers: Whether to log requests to multiple loggers.
             :tls-ciphers: OpenSSL cipher string for TLS.
             :tls-min-version: Minimum TLS version to require.
+            :diagnostic-show-service-name: Approve catalog service names in
+                the shareable diagnostic export.
+            :diagnostic-show-endpoint: Approve addresses in the shareable
+                diagnostic export.
+            :diagnostic-show-user-token: Approve user identity headers in
+                the shareable diagnostic export.
+            :diagnostic-show-service-token: Approve the service identity
+                header in the shareable diagnostic export.
+            :diagnostic-private-marker: Values to scrub from the shareable
+                diagnostic export.
 
         :param deprecated_opts: Deprecated options that should be included in
             the definition of new options. This should be a dict from the name
@@ -288,6 +356,51 @@ class Session(base._BaseLoader[session.Session]):
                 'and defers to the system '
                 'cryptographic policy.',
             ),
+            cfg.BoolOpt(
+                'diagnostic-show-service-name',
+                default=False,
+                deprecated_opts=deprecated_opts.get(
+                    'diagnostic-show-service-name'
+                ),
+                help='Include catalog service names in the shareable '
+                'diagnostic export.',
+            ),
+            cfg.BoolOpt(
+                'diagnostic-show-endpoint',
+                default=False,
+                deprecated_opts=deprecated_opts.get(
+                    'diagnostic-show-endpoint'
+                ),
+                help='Include catalog and request addresses in the '
+                'shareable diagnostic export.',
+            ),
+            cfg.BoolOpt(
+                'diagnostic-show-user-token',
+                default=False,
+                deprecated_opts=deprecated_opts.get(
+                    'diagnostic-show-user-token'
+                ),
+                help='Include user identity headers in the shareable '
+                'diagnostic export.',
+            ),
+            cfg.BoolOpt(
+                'diagnostic-show-service-token',
+                default=False,
+                deprecated_opts=deprecated_opts.get(
+                    'diagnostic-show-service-token'
+                ),
+                help='Include the service identity header in the shareable '
+                'diagnostic export.',
+            ),
+            cfg.ListOpt(
+                'diagnostic-private-marker',
+                default=[],
+                deprecated_opts=deprecated_opts.get(
+                    'diagnostic-private-marker'
+                ),
+                help='Values to scrub from every shareable diagnostic '
+                'string.',
+            ),
         ]
 
     @classmethod
@@ -309,6 +422,16 @@ class Session(base._BaseLoader[session.Session]):
             :split-loggers: Whether to log requests to multiple loggers.
             :tls-ciphers: OpenSSL cipher string for TLS.
             :tls-min-version: Minimum TLS version to require.
+            :diagnostic-show-service-name: Approve catalog service names in
+                the shareable diagnostic export.
+            :diagnostic-show-endpoint: Approve addresses in the shareable
+                diagnostic export.
+            :diagnostic-show-user-token: Approve user identity headers in
+                the shareable diagnostic export.
+            :diagnostic-show-service-token: Approve the service identity
+                header in the shareable diagnostic export.
+            :diagnostic-private-marker: Values to scrub from the shareable
+                diagnostic export.
 
         :param conf: config object to register with.
         :param group: The ini group to register options in.
@@ -366,6 +489,16 @@ class Session(base._BaseLoader[session.Session]):
         kwargs.setdefault('split_loggers', c.split_loggers)
         kwargs.setdefault('tls_ciphers', c.tls_ciphers)
         kwargs.setdefault('tls_min_version', c.tls_min_version)
+        kwargs.setdefault(
+            'diagnostic_policy',
+            diagnostics.DiagnosticPolicy(
+                service_name=c.diagnostic_show_service_name,
+                endpoint=c.diagnostic_show_endpoint,
+                user_token=c.diagnostic_show_user_token,
+                service_token=c.diagnostic_show_service_token,
+                private_markers=tuple(c.diagnostic_private_marker),
+            ),
+        )
 
         return self.load_from_options(**kwargs)
 

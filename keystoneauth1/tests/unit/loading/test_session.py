@@ -95,6 +95,35 @@ class ConfLoadingTests(utils.TestCase):
 
         self.assertIsNone(s.tls_min_version)
 
+    def test_diagnostic_policy_defaults(self):
+        s = self.get_session()
+
+        policy = s.diagnostic_policy
+        self.assertFalse(policy.service_name)
+        self.assertFalse(policy.endpoint)
+        self.assertFalse(policy.user_token)
+        self.assertFalse(policy.service_token)
+        self.assertEqual((), policy.private_markers)
+
+    def test_diagnostic_policy_switches(self):
+        self.config(
+            diagnostic_show_service_name=True,
+            diagnostic_show_endpoint=True,
+            diagnostic_show_user_token=True,
+            diagnostic_show_service_token=True,
+            diagnostic_private_marker=['marker-one', 'marker-two'],
+        )
+        s = self.get_session()
+
+        policy = s.diagnostic_policy
+        self.assertTrue(policy.service_name)
+        self.assertTrue(policy.endpoint)
+        self.assertTrue(policy.user_token)
+        self.assertTrue(policy.service_token)
+        self.assertEqual(
+            ('marker-one', 'marker-two'), policy.private_markers
+        )
+
     def test_tls_min_version_invalid(self):
         self.assertRaises(ValueError, self.config, tls_min_version='1.0')
 
@@ -112,6 +141,11 @@ class ConfLoadingTests(utils.TestCase):
             'split-loggers',
             'tls-ciphers',
             'tls-min-version',
+            'diagnostic-show-service-name',
+            'diagnostic-show-endpoint',
+            'diagnostic-show-user-token',
+            'diagnostic-show-service-token',
+            'diagnostic-private-marker',
         ]
         depr = {n: [new_deprecated()] for n in opt_names}
         opts = loading.get_session_conf_options(deprecated_opts=depr)
@@ -177,4 +211,33 @@ class CliLoadingTests(utils.TestCase):
     def test_tls_min_version_invalid(self):
         self.assertRaises(
             SystemExit, self.get_session, '--tls-min-version 1.0'
+        )
+
+    def test_diagnostic_policy_defaults(self):
+        s = self.get_session('')
+
+        policy = s.diagnostic_policy
+        self.assertFalse(policy.service_name)
+        self.assertFalse(policy.endpoint)
+        self.assertFalse(policy.user_token)
+        self.assertFalse(policy.service_token)
+        self.assertEqual((), policy.private_markers)
+
+    def test_diagnostic_policy_switches(self):
+        s = self.get_session(
+            '--diagnostic-show-service-name '
+            '--diagnostic-show-endpoint '
+            '--diagnostic-show-user-token '
+            '--diagnostic-show-service-token '
+            '--diagnostic-private-marker marker-one '
+            '--diagnostic-private-marker marker-two'
+        )
+
+        policy = s.diagnostic_policy
+        self.assertTrue(policy.service_name)
+        self.assertTrue(policy.endpoint)
+        self.assertTrue(policy.user_token)
+        self.assertTrue(policy.service_token)
+        self.assertEqual(
+            ('marker-one', 'marker-two'), policy.private_markers
         )

@@ -245,7 +245,11 @@ class Auth(BaseAuth):
         if not self.include_catalog:
             token_url += '?nocatalog'
 
-        LOG.debug('Making authentication request to %s', token_url)
+        policy = session.diagnostic_policy
+        LOG.debug(
+            'Making authentication request to %s',
+            policy.redact_endpoint(token_url),
+        )
         resp = session.post(
             token_url,
             json=body,
@@ -256,10 +260,14 @@ class Auth(BaseAuth):
         )
 
         try:
-            LOG.debug(json.dumps(resp.json()))
             resp_data = resp.json()
         except ValueError:
             raise exceptions.InvalidResponse(response=resp)
+
+        LOG.debug(
+            '%s',
+            json.dumps(policy.sanitize_token_body(resp_data)),
+        )
 
         if 'token' not in resp_data:
             raise exceptions.InvalidResponse(response=resp)

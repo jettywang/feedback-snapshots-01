@@ -13,6 +13,7 @@ Contents
    :maxdepth: 1
 
    using-sessions
+   diagnostics
    authentication-plugins
    service-tokens
    plugin-options

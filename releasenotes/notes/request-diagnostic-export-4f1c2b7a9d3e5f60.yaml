@@ -1,0 +1,23 @@
+---
+features:
+  - |
+    Add a shareable request diagnostic. A new
+    ``keystoneauth1.diagnostics.RequestDiagnostic`` follows one logical
+    request through catalog selection, redirects, retries,
+    re-authentication and the final error. It renders a policy-filtered
+    ``public_view()`` for hand-off and an unredacted ``internal_view()``
+    for controlled debugging, both sharing a single ``request_id`` and
+    distinguishing ``standard`` from ``dual-token`` requests.
+  - |
+    Add ``keystoneauth1.diagnostics.DiagnosticPolicy`` with independent
+    switches for catalog ``service_name``, ``endpoint``, ``user_token``
+    and ``service_token`` visibility, plus ``private_markers`` that are
+    scrubbed from every public string. The same policy governs debug
+    logging, the diagnostic attached to exceptions, and the intermediate
+    responses recorded during retries.
+  - |
+    Add the ``diagnostic_policy`` argument to ``session.Session`` and the
+    matching ``--diagnostic-show-service-name``,
+    ``--diagnostic-show-endpoint``, ``--diagnostic-show-user-token``,
+    ``--diagnostic-show-service-token`` and
+    ``--diagnostic-private-marker`` loader options.

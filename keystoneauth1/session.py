@@ -15,7 +15,6 @@ from collections.abc import MutableMapping
 from contextlib import AbstractContextManager
 import datetime
 import functools
-import hashlib
 import json
 import logging
 import os
@@ -36,6 +35,7 @@ import requests.structures
 
 import keystoneauth1
 from keystoneauth1 import _utils as utils
+from keystoneauth1 import diagnostics as _diagnostics
 from keystoneauth1 import discover
 from keystoneauth1 import exceptions
 from keystoneauth1 import plugin
@@ -365,6 +365,11 @@ class Session:
     :param tls_min_version: The minimum TLS protocol version to allow.
         Supported values are ``'1.2'`` and ``'1.3'``. (optional, defers to the
         system crypto policy when not set)
+    :param diagnostic_policy: Visibility rules used whenever a formatted
+        (shareable) request or response record is produced.  The same policy
+        governs debug logging, the diagnostic returned with exceptions and
+        the intermediate responses recorded across retries.  (optional,
+        defaults to :class:`~keystoneauth1.diagnostics.DiagnosticPolicy`)
     """
 
     user_agent = None
@@ -394,6 +399,7 @@ class Session:
         connect_retries: int = 0,
         tls_ciphers: str | None = None,
         tls_min_version: TLSVersionT | None = None,
+        diagnostic_policy: _diagnostics.DiagnosticPolicy | None = None,
     ):
         self.auth = auth
         self.tls_ciphers = tls_ciphers
@@ -428,6 +434,9 @@ class Session:
         self._connect_retries = connect_retries
         self._api_times: list[RequestTiming] = []
         self._rate_semaphore = rate_semaphore or NoOpSemaphore()
+        self.diagnostic_policy = (
+            diagnostic_policy or _diagnostics.DiagnosticPolicy()
+        )
 
         if timeout is not None:
             self.timeout = float(timeout)
@@ -500,6 +509,13 @@ class Session:
         self.session.mount(scheme, adapter)
 
     def _remove_service_catalog(self, body: str) -> str:
+        """Replace the service catalog inside a token body.
+
+        Keystoneauth has always dropped the catalog from debug output; the
+        catalog is still available to business callers through the response
+        object itself.  Only the formatted (shareable) representation is
+        affected.
+        """
         try:
             data = json.loads(body)
 
@@ -518,20 +534,43 @@ class Session:
         return body
 
     @staticmethod
-    def _process_header(header: tuple[str, str]) -> tuple[str, str]:
-        """Redact the secure headers to be logged."""
-        secure_headers = (
-            'authorization',
-            'x-auth-token',
-            'x-subject-token',
-            'x-service-token',
-        )
-        if header[0].lower() in secure_headers:
-            token_hasher = hashlib.sha256()
-            token_hasher.update(header[1].encode('utf-8'))
-            token_hash = token_hasher.hexdigest()
-            return (header[0], f'{{SHA256}}{token_hash}')
-        return header
+    def _process_header(
+        header: tuple[str, str],
+        policy: _diagnostics.DiagnosticPolicy | None = None,
+    ) -> tuple[str, str]:
+        """Redact a header for formatted (shareable) output.
+
+        The identity headers are reduced to a SHA256 digest unless the
+        request's :class:`~keystoneauth1.diagnostics.DiagnosticPolicy`
+        explicitly approves that particular header.  Any configured private
+        marker is scrubbed from the remaining values.
+        """
+        policy = policy or _diagnostics.DiagnosticPolicy()
+        name, value = header
+        value = '' if value is None else str(value)
+        if policy.is_identity_header(name) and not (
+            policy.identity_header_approved(name)
+        ):
+            return (name, f'{{SHA256}}{_diagnostics.sha256(value)}')
+        return (name, policy.scrub(value))
+
+    @staticmethod
+    def _process_url(
+        url: str, policy: _diagnostics.DiagnosticPolicy
+    ) -> str:
+        """Redact the request/response address for formatted output."""
+        if policy.endpoint:
+            return policy.scrub(url)
+        return f'{{SHA256}}{_diagnostics.sha256(url)}'
+
+    @staticmethod
+    def _process_text(
+        value: str, policy: _diagnostics.DiagnosticPolicy, approved: bool
+    ) -> str:
+        """Scrub one formatted-output string according to ``policy``."""
+        if not approved:
+            return f'{{SHA256}}{_diagnostics.sha256(value)}'
+        return policy.scrub(value)
 
     def _get_split_loggers(self, split_loggers: bool | None) -> bool | None:
         """Get a boolean value from the various argument sources.
@@ -551,6 +590,70 @@ class Session:
             split_loggers = False
         return split_loggers
 
+    def _diagnose_catalog(
+        self,
+        diagnostic: _diagnostics.RequestDiagnostic,
+        url: str,
+        endpoint_filter: dict[str, Any] | None = None,
+        endpoint_override: str | None = None,
+        source: str = 'endpoint_filter',
+    ) -> _diagnostics.DiagnosticEvent:
+        """Record the catalog decision that selected ``url``."""
+        endpoint_filter = endpoint_filter or {}
+        return diagnostic.add(
+            _diagnostics.STAGE_CATALOG,
+            source=source,
+            service_type=endpoint_filter.get('service_type'),
+            service_name=endpoint_filter.get('service_name'),
+            interface=endpoint_filter.get('interface'),
+            region_name=endpoint_filter.get('region_name'),
+            endpoint_override=endpoint_override,
+            endpoint=url,
+        )
+
+    def _diagnose_exception(
+        self,
+        exc: exceptions.ClientException,
+        diagnostic: _diagnostics.RequestDiagnostic,
+    ) -> exceptions.ClientException:
+        """Attach the request diagnostic to an exception before raising."""
+        diagnostic.add(
+            _diagnostics.STAGE_ERROR,
+            exception=type(exc).__name__,
+            message=str(exc),
+        )
+        exc.diagnostic = diagnostic
+        return exc
+
+    @staticmethod
+    def _diagnose_headers(
+        headers: MutableMapping[str, str]
+    ) -> dict[str, str]:
+        return {
+            name: ('' if value is None else str(value))
+            for name, value in headers.items()
+        }
+
+    @staticmethod
+    def _diagnose_body(response: requests.Response) -> Any:
+        """Return a JSON body for diagnostics, or ``None`` when unusable."""
+        text = None
+        try:
+            text = response.text
+        except Exception:  # noqa: S110
+            return None
+        if not text:
+            return None
+        content_type = response.headers.get('content-type', '')
+        if 'json' not in content_type and not text.lstrip().startswith(
+            ('{', '[')
+        ):
+            return None
+        try:
+            return json.loads(text)
+        except ValueError:
+            return None
+
     def _http_log_request(
         self,
         url: str,
@@ -561,7 +664,10 @@ class Session:
         query_params: dict[str, Any] | None = None,
         logger: logging.Logger | None = None,
         split_loggers: bool | None = None,
+        *,
+        policy: _diagnostics.DiagnosticPolicy | None = None,
     ) -> None:
+        policy = policy or _diagnostics.DiagnosticPolicy()
         string_parts = []
 
         if self._get_split_loggers(split_loggers):
@@ -598,15 +704,17 @@ class Session:
             url = url + '?' + urllib.parse.urlencode(query_params)
             # URLs with query strings need to be wrapped in quotes in order
             # for the CURL command to run properly.
-            string_parts.append(f'"{url}"')
+            string_parts.append(f'"{self._process_url(url, policy)}"')
         else:
-            string_parts.append(url)
+            string_parts.append(self._process_url(url, policy))
 
         if headers:
             # Sort headers so that testing can work consistently.
             for header in sorted(headers.items()):
                 string_parts.append(
-                    '-H "{}: {}"'.format(*self._process_header(header))
+                    '-H "{}: {}"'.format(
+                        *self._process_header(header, policy)
+                    )
                 )
         if json:
             data = self._json.encode(json)
@@ -616,7 +724,13 @@ class Session:
                     data = data.decode("ascii")
                 except UnicodeDecodeError:
                     data = "<binary_data>"
-            string_parts.append(f"-d '{data}'")
+            string_parts.append(
+                "-d '{}'".format(
+                    self._process_text(
+                        data, policy, policy.request_body
+                    )
+                )
+            )
 
         _logger.debug(' '.join(string_parts))
 
@@ -630,7 +744,9 @@ class Session:
         *,
         logger: logging.Logger,
         split_loggers: bool | None = None,
+        policy: _diagnostics.DiagnosticPolicy | None = None,
     ) -> None:
+        policy = policy or _diagnostics.DiagnosticPolicy()
         string_parts = []
         body_parts = []
         if self._get_split_loggers(split_loggers):
@@ -657,7 +773,7 @@ class Session:
             # Sort headers so that testing can work consistently.
             for header in sorted(headers.items()):
                 string_parts.append(
-                    '{}: {}'.format(*self._process_header(header))
+                    '{}: {}'.format(*self._process_header(header, policy))
                 )
         logger.debug(' '.join(string_parts))
 
@@ -693,7 +809,9 @@ class Session:
             text = self._json.encode(json)
 
         if text:
-            body_parts.append(text)
+            body_parts.append(
+                self._process_text(text, policy, policy.response_body)
+            )
             body_logger.debug(' '.join(body_parts))
 
     @staticmethod
@@ -787,6 +905,8 @@ class Session:
         global_request_id: str | None = None,
         connect_retry_delay: float | None = None,
         status_code_retry_delay: float | None = None,
+        diagnostic: _diagnostics.RequestDiagnostic | None = None,
+        diagnostic_policy: _diagnostics.DiagnosticPolicy | None = None,
         **kwargs: Any,
     ) -> requests.Response:
         """Send an HTTP request with the specified characteristics.
@@ -871,6 +991,14 @@ class Session:
         :param status_code_retry_delay: Delay (in seconds) between two status
             code retries (if enabled). By default exponential retry starting
             with 0.5 seconds up to a maximum of 60 seconds is used.
+        :param diagnostic: A :class:`~keystoneauth1.diagnostics.
+            RequestDiagnostic` to populate for this request.  When omitted a
+            fresh record is still created and attached to any raised
+            exception, so the caller can always obtain ``public_view()`` and
+            ``internal_view()``.  (optional)
+        :param diagnostic_policy: Visibility rules for this request only.
+            Defaults to the policy of an explicitly supplied ``diagnostic``,
+            then to the session's :attr:`.diagnostic_policy`.  (optional)
         :param kwargs: any other parameter that can be passed to
             :meth:`requests.Session.request` (such as `headers`). Except:
 
@@ -905,6 +1033,12 @@ class Session:
             retriable_status_codes or _RETRIABLE_STATUS_CODES
         )
         rate_semaphore = rate_semaphore or self._rate_semaphore
+        if diagnostic_policy is not None:
+            policy = diagnostic_policy
+        elif diagnostic is not None:
+            policy = diagnostic.policy
+        else:
+            policy = self.diagnostic_policy
 
         headers = kwargs.setdefault('headers', {})
         if microversion:
@@ -923,12 +1057,27 @@ class Session:
 
             if auth_headers is None:
                 msg = 'No valid authentication is available'
-                raise exceptions.AuthorizationFailure(msg)
+                if diagnostic is None:
+                    diagnostic = _diagnostics.RequestDiagnostic(policy=policy)
+                raise self._diagnose_exception(
+                    exceptions.AuthorizationFailure(msg), diagnostic
+                )
 
             headers.update(auth_headers)
 
         if osprofiler_web:
             headers.update(osprofiler_web.get_trace_id_headers())
+
+        # NOTE(diagnostics): the record follows the logical request, so it is
+        # created once and then shared by the initial send, every retry and
+        # the re-authentication exchange.
+        if diagnostic is None:
+            diagnostic = _diagnostics.RequestDiagnostic(policy=policy)
+        elif diagnostic.policy is not policy:
+            diagnostic.policy = policy
+        diagnostic.dual_token = any(
+            name.lower() == 'x-service-token' for name in headers
+        )
 
         # if we are passed a fully qualified URL and an endpoint_filter we
         # should ignore the filter. This will make it easier for clients who
@@ -945,9 +1094,31 @@ class Session:
                 )
 
             if not base_url:
-                raise exceptions.EndpointNotFound()
+                diagnostic.add(
+                    _diagnostics.STAGE_CATALOG,
+                    source='endpoint_not_found',
+                    service_type=(endpoint_filter or {}).get('service_type'),
+                    service_name=(endpoint_filter or {}).get('service_name'),
+                )
+                raise self._diagnose_exception(
+                    exceptions.EndpointNotFound(), diagnostic
+                )
 
+            self._diagnose_catalog(
+                diagnostic,
+                base_url,
+                endpoint_filter=endpoint_filter,
+                endpoint_override=endpoint_override,
+            )
             url = '{}/{}'.format(base_url.rstrip('/'), url.lstrip('/'))
+        else:
+            self._diagnose_catalog(
+                diagnostic,
+                url,
+                endpoint_filter=endpoint_filter,
+                endpoint_override=endpoint_override,
+                source='fully_qualified',
+            )
 
         if self.cert:
             kwargs.setdefault('cert', self.cert)
@@ -1027,6 +1198,15 @@ class Session:
         # picked out so they can be included in the URL that gets logged.
         query_params = kwargs.get('params', {})
 
+        diagnostic.add(
+            _diagnostics.STAGE_REQUEST,
+            method=method,
+            url=url,
+            headers=self._diagnose_headers(headers),
+            query_params=dict(query_params) if query_params else None,
+            body=kwargs.get('data'),
+        )
+
         if log:
             self._http_log_request(
                 url,
@@ -1036,6 +1216,7 @@ class Session:
                 query_params=query_params,
                 logger=logger,
                 split_loggers=split_loggers,
+                policy=policy,
             )
 
         # Force disable requests redirect handling. We will manage this below.
@@ -1061,6 +1242,8 @@ class Session:
             rate_semaphore,
             connect_retry_delays,
             status_code_retry_delays,
+            diagnostic,
+            policy,
         )
 
         try:
@@ -1125,18 +1308,55 @@ class Session:
         # handle getting a 401 Unauthorized response by invalidating the plugin
         # and then retrying the request. This is only tried once.
         if resp.status_code == 401 and authenticated and allow_reauth:
-            if self.invalidate(auth):
+            invalidated = self.invalidate(auth)
+            reauth_event = diagnostic.add(
+                _diagnostics.STAGE_REAUTH,
+                triggered=True,
+                status_code=resp.status_code,
+                authenticated=authenticated,
+                allow_reauth=allow_reauth,
+                invalidated=invalidated,
+                retried=False,
+            )
+            if invalidated:
                 auth_headers = self.get_auth_headers(auth)
 
                 if auth_headers is not None:
                     headers.update(auth_headers)
+                    diagnostic.add(
+                        _diagnostics.STAGE_REQUEST,
+                        method=method,
+                        url=url,
+                        headers=self._diagnose_headers(headers),
+                        query_params=(
+                            dict(query_params) if query_params else None
+                        ),
+                        body=kwargs.get('data'),
+                        after_reauth=True,
+                    )
                     resp = send(**kwargs)
+                    reauth_event.data['retried'] = True
+                    reauth_event.data['replacement_status_code'] = (
+                        resp.status_code
+                    )
 
         if raise_exc and resp.status_code >= 400:
             logger.debug(
                 'Request returned failure status: %s', resp.status_code
             )
-            raise exceptions.from_response(resp, method, url)
+            exc = exceptions.from_response(resp, method, url)
+            diagnostic.add(
+                _diagnostics.STAGE_ERROR,
+                exception=type(exc).__name__,
+                http_status=getattr(exc, 'http_status', resp.status_code),
+                method=getattr(exc, 'method', method),
+                url=getattr(exc, 'url', url),
+                message=getattr(exc, 'message', str(exc)),
+                details=getattr(exc, 'details', None),
+                response_request_id=getattr(exc, 'request_id', None),
+            )
+            exc.diagnostic = diagnostic
+            raise exc
 
         if self._collect_timing:
             for h in resp.history:
@@ -1171,6 +1391,8 @@ class Session:
         rate_semaphore: AbstractContextManager[None],
         connect_retry_delays: _Retries,
         status_code_retry_delays: _Retries,
+        diagnostic: _diagnostics.RequestDiagnostic,
+        policy: _diagnostics.DiagnosticPolicy,
         **kwargs: Any,
     ) -> requests.Response:
         # NOTE(jamielennox): We handle redirection manually because the
@@ -1209,9 +1431,24 @@ class Session:
 
         except exceptions.RetriableConnectionFailure as e:
             if connect_retries <= 0:
+                e.diagnostic = diagnostic
+                diagnostic.add(
+                    _diagnostics.STAGE_ERROR,
+                    exception=type(e).__name__,
+                    method=method,
+                    url=url,
+                    message=str(e),
+                )
                 raise
 
             delay = next(connect_retry_delays)
+            diagnostic.add(
+                _diagnostics.STAGE_RETRY,
+                kind='connection',
+                reason=str(e),
+                delay=delay,
+                retries_left=connect_retries,
+            )
             logger.warning(
                 'Failure: %(e)s. Retrying in %(delay).1fs. '
                 '%(retries)s retries left',
@@ -1232,12 +1469,25 @@ class Session:
                 connect_retries=connect_retries - 1,
                 connect_retry_delays=connect_retry_delays,
                 status_code_retry_delays=status_code_retry_delays,
+                diagnostic=diagnostic,
+                policy=policy,
                 **kwargs,
             )
 
+        diagnostic.add(
+            _diagnostics.STAGE_RESPONSE,
+            status_code=resp.status_code,
+            url=resp.url,
+            headers=dict(resp.headers),
+            body=self._diagnose_body(resp),
+        )
+
         if log:
             self._http_log_response(
-                response=resp, logger=logger, split_loggers=split_loggers
+                response=resp,
+                logger=logger,
+                split_loggers=split_loggers,
+                policy=policy,
             )
 
         if resp.status_code in self._REDIRECT_STATUSES:
@@ -1260,6 +1510,12 @@ class Session:
                     resp.url,
                 )
             else:
+                diagnostic.add(
+                    _diagnostics.STAGE_RETRY,
+                    kind='redirect',
+                    status_code=resp.status_code,
+                    location=location,
+                )
                 # NOTE(TheJulia): Location redirects generally should have
                 # URI's to the destination.
                 # https://datatracker.ietf.org/doc/html/rfc7231#section-7.1.2
@@ -1289,6 +1545,8 @@ class Session:
                     retriable_status_codes=retriable_status_codes,
                     connect_retry_delays=connect_retry_delays,
                     status_code_retry_delays=status_code_retry_delays,
+                    diagnostic=diagnostic,
+                    policy=policy,
                     **kwargs,
                 )
 
@@ -1322,6 +1580,13 @@ class Session:
             # NOTE(jamielennox): We don't keep increasing connection delays.
             # This request actually worked so we can reset the delay count.
             connect_retry_delays.reset()
+            diagnostic.add(
+                _diagnostics.STAGE_RETRY,
+                kind='status_code',
+                status_code=resp.status_code,
+                delay=delay,
+                retries_left=status_code_retries,
+            )
             return self._send_request(
                 url,
                 method,
@@ -1335,6 +1600,8 @@ class Session:
                 rate_semaphore=rate_semaphore,
                 connect_retry_delays=connect_retry_delays,
                 status_code_retry_delays=status_code_retry_delays,
+                diagnostic=diagnostic,
+                policy=policy,
                 **kwargs,
             )
 

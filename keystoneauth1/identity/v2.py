@@ -63,7 +63,11 @@ class Auth(base.BaseIdentityPlugin, metaclass=abc.ABCMeta):
         if self.trust_id:
             params['auth']['trust_id'] = self.trust_id
 
-        LOG.debug('Making authentication request to %s', url)
+        policy = session.diagnostic_policy
+        LOG.debug(
+            'Making authentication request to %s',
+            policy.redact_endpoint(url),
+        )
         resp = session.post(
             url, json=params, headers=headers, authenticated=False, log=False
         )
