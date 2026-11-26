@@ -1,0 +1,20 @@
+[
+  {
+    "action": "acme:DeployWidget",
+    "approved_access_level": "Permissions management",
+    "catalog_access_level_at_approval": "Write",
+    "note": "Manual review settled on Permissions management while the catalog still said Write; the new catalog now agrees with the manual value, but the classification the approval referenced has changed."
+  },
+  {
+    "action": "acme:DescribeWidget",
+    "approved_access_level": "Read",
+    "catalog_access_level_at_approval": "Read",
+    "note": "Only the description (display material unrelated to the approval) changed in the new catalog."
+  },
+  {
+    "action": "acme:RetireWidget",
+    "approved_access_level": "Write",
+    "catalog_access_level_at_approval": "Write",
+    "note": "The new catalog no longer contains a confirmable action for this record."
+  }
+]

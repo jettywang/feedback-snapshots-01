@@ -1,0 +1,77 @@
+{
+  "policy_sentry_schema_version": "v2",
+  "acme": {
+    "service_name": "Acme Widgets",
+    "prefix": "acme",
+    "service_authorization_url": "https://docs.example.com/acme/widgets",
+    "privileges": {
+      "DeployWidget": {
+        "privilege": "DeployWidget",
+        "description": "Grants permission to deploy a widget",
+        "access_level": "Write",
+        "resource_types": {
+          "widget": {
+            "resource_type": "widget",
+            "required": true,
+            "condition_keys": [],
+            "dependent_actions": []
+          }
+        },
+        "resource_types_lower_name": {
+          "widget": "widget"
+        },
+        "api_documentation_link": "https://docs.example.com/acme/DeployWidget"
+      },
+      "DescribeWidget": {
+        "privilege": "DescribeWidget",
+        "description": "Grants permission to describe widgets",
+        "access_level": "Read",
+        "resource_types": {
+          "": {
+            "resource_type": "",
+            "required": false,
+            "condition_keys": [],
+            "dependent_actions": []
+          }
+        },
+        "resource_types_lower_name": {
+          "": ""
+        },
+        "api_documentation_link": "https://docs.example.com/acme/DescribeWidget"
+      },
+      "RetireWidget": {
+        "privilege": "RetireWidget",
+        "description": "Grants permission to retire a widget",
+        "access_level": "Write",
+        "resource_types": {
+          "widget": {
+            "resource_type": "widget",
+            "required": true,
+            "condition_keys": [],
+            "dependent_actions": []
+          }
+        },
+        "resource_types_lower_name": {
+          "widget": "widget"
+        },
+        "api_documentation_link": "https://docs.example.com/acme/RetireWidget"
+      }
+    },
+    "privileges_lower_name": {
+      "deploywidget": "DeployWidget",
+      "describewidget": "DescribeWidget",
+      "retirewidget": "RetireWidget"
+    },
+    "resources": {
+      "widget": {
+        "resource": "widget",
+        "arn": "arn:${Partition}:acme:${Region}:${Account}:widget/${WidgetId}",
+        "condition_keys": []
+      }
+    },
+    "resources_lower_name": {
+      "widget": "widget"
+    },
+    "conditions": {}
+  }
+}
