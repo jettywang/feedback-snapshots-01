@@ -1,0 +1,1 @@
+APPROVAL_RUNTIME_RESULT={"module_file": "/private/tmp/claude-501/poetry-approval-lab/sdist-sources/plain-control/plainpkg-0.1.0/plainpkg/__init__.py", "native_error": "ImportError: cannot import name '_native' from 'plainpkg' (/private/tmp/claude-501/poetry-approval-lab/sdist-sources/plain-control/plainpkg-0.1.0/plainpkg/__init__.py)", "value": "plainpkg-without-build-script"}

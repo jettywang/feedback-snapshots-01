@@ -1,0 +1,402 @@
+{
+  "hook-direct-false/direct-source/editable-hookpkg-0.1.0-cp312-cp312-macosx_26_0_arm64.whl": {
+    "type": "wheel",
+    "sha256": "321d0df0d1a2840a6e25f7d30ddea64e5a6d65122bd3b80414d1526947fcc870",
+    "files": [
+      "hookpkg-0.1.0.dist-info/METADATA",
+      "hookpkg-0.1.0.dist-info/RECORD",
+      "hookpkg-0.1.0.dist-info/WHEEL",
+      "hookpkg.pth"
+    ],
+    "has_native_so": false,
+    "has_pth": true,
+    "pth_content": "/private/tmp/claude-501/poetry-approval-lab/sources/hook-direct-false",
+    "root_is_purelib_false": true,
+    "wheel": "Wheel-Version: 1.0\nGenerator: poetry-core 2.5.0\nRoot-Is-Purelib: false\nTag: cp312-cp312-macosx_26_0_arm64"
+  },
+  "hook-direct-false/direct-source/sdist-hookpkg-0.1.0.tar.gz": {
+    "type": "sdist",
+    "sha256": "ee5b7e7e193b1b06e7672562881a303ade70f30971785687bf2e52d6d14d93bd",
+    "files": [
+      "hookpkg-0.1.0/PKG-INFO",
+      "hookpkg-0.1.0/README.md",
+      "hookpkg-0.1.0/build.py",
+      "hookpkg-0.1.0/hookpkg/__init__.py",
+      "hookpkg-0.1.0/hookpkg/native.c",
+      "hookpkg-0.1.0/pyproject.toml"
+    ],
+    "has_build_py": true,
+    "has_generated_setup_py": false,
+    "setup_py_member_count": 0,
+    "setup_py_has_existing_marker": false,
+    "has_c_source": true,
+    "setup_imports_build": false
+  },
+  "hook-direct-false/direct-source/wheel-hookpkg-0.1.0-cp312-cp312-macosx_26_0_arm64.whl": {
+    "type": "wheel",
+    "sha256": "a0a0e52dfb188fb3fb08ee4ffddc448939a0f859abb842306bf6157ad8d2f9ac",
+    "files": [
+      "hookpkg-0.1.0.dist-info/METADATA",
+      "hookpkg-0.1.0.dist-info/RECORD",
+      "hookpkg-0.1.0.dist-info/WHEEL",
+      "hookpkg/__init__.py",
+      "hookpkg/native.c"
+    ],
+    "has_native_so": false,
+    "has_pth": false,
+    "pth_content": null,
+    "root_is_purelib_false": true,
+    "wheel": "Wheel-Version: 1.0\nGenerator: poetry-core 2.5.0\nRoot-Is-Purelib: false\nTag: cp312-cp312-macosx_26_0_arm64"
+  },
+  "hook-direct-false/sdist-rebuild/editable-hookpkg-0.1.0-cp312-cp312-macosx_26_0_arm64.whl": {
+    "type": "wheel",
+    "sha256": "be78bef35d5252d95b66ea48e7ecb418d0774253d57d1a479674d9f613b129f3",
+    "files": [
+      "hookpkg-0.1.0.dist-info/METADATA",
+      "hookpkg-0.1.0.dist-info/RECORD",
+      "hookpkg-0.1.0.dist-info/WHEEL",
+      "hookpkg.pth"
+    ],
+    "has_native_so": false,
+    "has_pth": true,
+    "pth_content": "/private/tmp/claude-501/poetry-approval-lab/sdist-sources/hook-direct-false/hookpkg-0.1.0",
+    "root_is_purelib_false": true,
+    "wheel": "Wheel-Version: 1.0\nGenerator: poetry-core 2.5.0\nRoot-Is-Purelib: false\nTag: cp312-cp312-macosx_26_0_arm64"
+  },
+  "hook-direct-false/sdist-rebuild/wheel-hookpkg-0.1.0-cp312-cp312-macosx_26_0_arm64.whl": {
+    "type": "wheel",
+    "sha256": "a0a0e52dfb188fb3fb08ee4ffddc448939a0f859abb842306bf6157ad8d2f9ac",
+    "files": [
+      "hookpkg-0.1.0.dist-info/METADATA",
+      "hookpkg-0.1.0.dist-info/RECORD",
+      "hookpkg-0.1.0.dist-info/WHEEL",
+      "hookpkg/__init__.py",
+      "hookpkg/native.c"
+    ],
+    "has_native_so": false,
+    "has_pth": false,
+    "pth_content": null,
+    "root_is_purelib_false": true,
+    "wheel": "Wheel-Version: 1.0\nGenerator: poetry-core 2.5.0\nRoot-Is-Purelib: false\nTag: cp312-cp312-macosx_26_0_arm64"
+  },
+  "hook-existing-setup/direct-source/editable-hookpkg-0.1.0-cp312-cp312-macosx_26_0_arm64.whl": {
+    "type": "wheel",
+    "sha256": "f1d51b84a8f2cb522232b01881d084542f8e45e5c7c3ee96131f9e83a3a21b37",
+    "files": [
+      "hookpkg-0.1.0.dist-info/METADATA",
+      "hookpkg-0.1.0.dist-info/RECORD",
+      "hookpkg-0.1.0.dist-info/WHEEL",
+      "hookpkg.pth"
+    ],
+    "has_native_so": false,
+    "has_pth": true,
+    "pth_content": "/private/tmp/claude-501/poetry-approval-lab/sources/hook-existing-setup",
+    "root_is_purelib_false": true,
+    "wheel": "Wheel-Version: 1.0\nGenerator: poetry-core 2.5.0\nRoot-Is-Purelib: false\nTag: cp312-cp312-macosx_26_0_arm64"
+  },
+  "hook-existing-setup/direct-source/sdist-hookpkg-0.1.0.tar.gz": {
+    "type": "sdist",
+    "sha256": "753a744612f188a4b6a053e7da999e37404df5c44a17fbd82578c4d599530357",
+    "files": [
+      "hookpkg-0.1.0/PKG-INFO",
+      "hookpkg-0.1.0/README.md",
+      "hookpkg-0.1.0/build.py",
+      "hookpkg-0.1.0/hookpkg/__init__.py",
+      "hookpkg-0.1.0/hookpkg/native.c",
+      "hookpkg-0.1.0/pyproject.toml",
+      "hookpkg-0.1.0/setup.py"
+    ],
+    "has_build_py": true,
+    "has_generated_setup_py": true,
+    "setup_py_member_count": 1,
+    "setup_py_has_existing_marker": false,
+    "has_c_source": true,
+    "setup_imports_build": true
+  },
+  "hook-existing-setup/direct-source/wheel-hookpkg-0.1.0-cp312-cp312-macosx_26_0_arm64.whl": {
+    "type": "wheel",
+    "sha256": "a0a0e52dfb188fb3fb08ee4ffddc448939a0f859abb842306bf6157ad8d2f9ac",
+    "files": [
+      "hookpkg-0.1.0.dist-info/METADATA",
+      "hookpkg-0.1.0.dist-info/RECORD",
+      "hookpkg-0.1.0.dist-info/WHEEL",
+      "hookpkg/__init__.py",
+      "hookpkg/native.c"
+    ],
+    "has_native_so": false,
+    "has_pth": false,
+    "pth_content": null,
+    "root_is_purelib_false": true,
+    "wheel": "Wheel-Version: 1.0\nGenerator: poetry-core 2.5.0\nRoot-Is-Purelib: false\nTag: cp312-cp312-macosx_26_0_arm64"
+  },
+  "hook-existing-setup/sdist-rebuild/editable-hookpkg-0.1.0-cp312-cp312-macosx_26_0_arm64.whl": {
+    "type": "wheel",
+    "sha256": "bef55aff79c745bf1fa2a0731c9ce1a8661da69ef74e925e3059041382346f13",
+    "files": [
+      "hookpkg-0.1.0.dist-info/METADATA",
+      "hookpkg-0.1.0.dist-info/RECORD",
+      "hookpkg-0.1.0.dist-info/WHEEL",
+      "hookpkg.pth"
+    ],
+    "has_native_so": false,
+    "has_pth": true,
+    "pth_content": "/private/tmp/claude-501/poetry-approval-lab/sdist-sources/hook-existing-setup/hookpkg-0.1.0",
+    "root_is_purelib_false": true,
+    "wheel": "Wheel-Version: 1.0\nGenerator: poetry-core 2.5.0\nRoot-Is-Purelib: false\nTag: cp312-cp312-macosx_26_0_arm64"
+  },
+  "hook-existing-setup/sdist-rebuild/wheel-hookpkg-0.1.0-cp312-cp312-macosx_26_0_arm64.whl": {
+    "type": "wheel",
+    "sha256": "a0a0e52dfb188fb3fb08ee4ffddc448939a0f859abb842306bf6157ad8d2f9ac",
+    "files": [
+      "hookpkg-0.1.0.dist-info/METADATA",
+      "hookpkg-0.1.0.dist-info/RECORD",
+      "hookpkg-0.1.0.dist-info/WHEEL",
+      "hookpkg/__init__.py",
+      "hookpkg/native.c"
+    ],
+    "has_native_so": false,
+    "has_pth": false,
+    "pth_content": null,
+    "root_is_purelib_false": true,
+    "wheel": "Wheel-Version: 1.0\nGenerator: poetry-core 2.5.0\nRoot-Is-Purelib: false\nTag: cp312-cp312-macosx_26_0_arm64"
+  },
+  "hook-legacy-string/direct-source/editable-hookpkg-0.1.0-cp312-cp312-macosx_26_0_arm64.whl": {
+    "type": "wheel",
+    "sha256": "57cd45cdd4259d9cd8c644d41e535a563ab13e7c620b8bf8776ece8dc25b130a",
+    "files": [
+      "hookpkg-0.1.0.dist-info/METADATA",
+      "hookpkg-0.1.0.dist-info/RECORD",
+      "hookpkg-0.1.0.dist-info/WHEEL",
+      "hookpkg.pth"
+    ],
+    "has_native_so": false,
+    "has_pth": true,
+    "pth_content": "/private/tmp/claude-501/poetry-approval-lab/sources/hook-legacy-string",
+    "root_is_purelib_false": true,
+    "wheel": "Wheel-Version: 1.0\nGenerator: poetry-core 2.5.0\nRoot-Is-Purelib: false\nTag: cp312-cp312-macosx_26_0_arm64"
+  },
+  "hook-legacy-string/direct-source/sdist-hookpkg-0.1.0.tar.gz": {
+    "type": "sdist",
+    "sha256": "518cdef9ef7b2c2e297749cbac6083034c5c0d3749626286b6d51b06b1912315",
+    "files": [
+      "hookpkg-0.1.0/PKG-INFO",
+      "hookpkg-0.1.0/README.md",
+      "hookpkg-0.1.0/build.py",
+      "hookpkg-0.1.0/hookpkg/__init__.py",
+      "hookpkg-0.1.0/hookpkg/native.c",
+      "hookpkg-0.1.0/pyproject.toml"
+    ],
+    "has_build_py": true,
+    "has_generated_setup_py": false,
+    "setup_py_member_count": 0,
+    "setup_py_has_existing_marker": false,
+    "has_c_source": true,
+    "setup_imports_build": false
+  },
+  "hook-legacy-string/direct-source/wheel-hookpkg-0.1.0-cp312-cp312-macosx_26_0_arm64.whl": {
+    "type": "wheel",
+    "sha256": "a0a0e52dfb188fb3fb08ee4ffddc448939a0f859abb842306bf6157ad8d2f9ac",
+    "files": [
+      "hookpkg-0.1.0.dist-info/METADATA",
+      "hookpkg-0.1.0.dist-info/RECORD",
+      "hookpkg-0.1.0.dist-info/WHEEL",
+      "hookpkg/__init__.py",
+      "hookpkg/native.c"
+    ],
+    "has_native_so": false,
+    "has_pth": false,
+    "pth_content": null,
+    "root_is_purelib_false": true,
+    "wheel": "Wheel-Version: 1.0\nGenerator: poetry-core 2.5.0\nRoot-Is-Purelib: false\nTag: cp312-cp312-macosx_26_0_arm64"
+  },
+  "hook-legacy-string/sdist-rebuild/editable-hookpkg-0.1.0-cp312-cp312-macosx_26_0_arm64.whl": {
+    "type": "wheel",
+    "sha256": "90d112f621076b37fa97211134484263a05be54f189caa7a2347c42e7778665c",
+    "files": [
+      "hookpkg-0.1.0.dist-info/METADATA",
+      "hookpkg-0.1.0.dist-info/RECORD",
+      "hookpkg-0.1.0.dist-info/WHEEL",
+      "hookpkg.pth"
+    ],
+    "has_native_so": false,
+    "has_pth": true,
+    "pth_content": "/private/tmp/claude-501/poetry-approval-lab/sdist-sources/hook-legacy-string/hookpkg-0.1.0",
+    "root_is_purelib_false": true,
+    "wheel": "Wheel-Version: 1.0\nGenerator: poetry-core 2.5.0\nRoot-Is-Purelib: false\nTag: cp312-cp312-macosx_26_0_arm64"
+  },
+  "hook-legacy-string/sdist-rebuild/wheel-hookpkg-0.1.0-cp312-cp312-macosx_26_0_arm64.whl": {
+    "type": "wheel",
+    "sha256": "a0a0e52dfb188fb3fb08ee4ffddc448939a0f859abb842306bf6157ad8d2f9ac",
+    "files": [
+      "hookpkg-0.1.0.dist-info/METADATA",
+      "hookpkg-0.1.0.dist-info/RECORD",
+      "hookpkg-0.1.0.dist-info/WHEEL",
+      "hookpkg/__init__.py",
+      "hookpkg/native.c"
+    ],
+    "has_native_so": false,
+    "has_pth": false,
+    "pth_content": null,
+    "root_is_purelib_false": true,
+    "wheel": "Wheel-Version: 1.0\nGenerator: poetry-core 2.5.0\nRoot-Is-Purelib: false\nTag: cp312-cp312-macosx_26_0_arm64"
+  },
+  "hook-setup-native/direct-source/editable-hookpkg-0.1.0-cp312-cp312-macosx_26_0_arm64.whl": {
+    "type": "wheel",
+    "sha256": "dfe99fb70eb36b979ed55cea546ec1e7812b0bf6107bca249549cdcb29985a81",
+    "files": [
+      "hookpkg-0.1.0.dist-info/METADATA",
+      "hookpkg-0.1.0.dist-info/RECORD",
+      "hookpkg-0.1.0.dist-info/WHEEL",
+      "hookpkg.pth"
+    ],
+    "has_native_so": false,
+    "has_pth": true,
+    "pth_content": "/private/tmp/claude-501/poetry-approval-lab/sources/hook-setup-native",
+    "root_is_purelib_false": true,
+    "wheel": "Wheel-Version: 1.0\nGenerator: poetry-core 2.5.0\nRoot-Is-Purelib: false\nTag: cp312-cp312-macosx_26_0_arm64"
+  },
+  "hook-setup-native/direct-source/sdist-hookpkg-0.1.0.tar.gz": {
+    "type": "sdist",
+    "sha256": "753a744612f188a4b6a053e7da999e37404df5c44a17fbd82578c4d599530357",
+    "files": [
+      "hookpkg-0.1.0/PKG-INFO",
+      "hookpkg-0.1.0/README.md",
+      "hookpkg-0.1.0/build.py",
+      "hookpkg-0.1.0/hookpkg/__init__.py",
+      "hookpkg-0.1.0/hookpkg/native.c",
+      "hookpkg-0.1.0/pyproject.toml",
+      "hookpkg-0.1.0/setup.py"
+    ],
+    "has_build_py": true,
+    "has_generated_setup_py": true,
+    "setup_py_member_count": 1,
+    "setup_py_has_existing_marker": false,
+    "has_c_source": true,
+    "setup_imports_build": true
+  },
+  "hook-setup-native/direct-source/wheel-hookpkg-0.1.0-cp312-cp312-macosx_26_0_arm64.whl": {
+    "type": "wheel",
+    "sha256": "4e5d5534b941c03c0b6e88bed9446621d58a493355b7182503c6be207dd21340",
+    "files": [
+      "hookpkg-0.1.0.dist-info/METADATA",
+      "hookpkg-0.1.0.dist-info/RECORD",
+      "hookpkg-0.1.0.dist-info/WHEEL",
+      "hookpkg/__init__.py",
+      "hookpkg/_native.cpython-312-darwin.so",
+      "hookpkg/native.c"
+    ],
+    "has_native_so": true,
+    "has_pth": false,
+    "pth_content": null,
+    "root_is_purelib_false": true,
+    "wheel": "Wheel-Version: 1.0\nGenerator: poetry-core 2.5.0\nRoot-Is-Purelib: false\nTag: cp312-cp312-macosx_26_0_arm64"
+  },
+  "hook-setup-native/sdist-rebuild/editable-hookpkg-0.1.0-cp312-cp312-macosx_26_0_arm64.whl": {
+    "type": "wheel",
+    "sha256": "322883f5d9b83286703d73285eaafea3e827793fdff676c631ff0bc6d3d3890b",
+    "files": [
+      "hookpkg-0.1.0.dist-info/METADATA",
+      "hookpkg-0.1.0.dist-info/RECORD",
+      "hookpkg-0.1.0.dist-info/WHEEL",
+      "hookpkg.pth"
+    ],
+    "has_native_so": false,
+    "has_pth": true,
+    "pth_content": "/private/tmp/claude-501/poetry-approval-lab/sdist-sources/hook-setup-native/hookpkg-0.1.0",
+    "root_is_purelib_false": true,
+    "wheel": "Wheel-Version: 1.0\nGenerator: poetry-core 2.5.0\nRoot-Is-Purelib: false\nTag: cp312-cp312-macosx_26_0_arm64"
+  },
+  "hook-setup-native/sdist-rebuild/wheel-hookpkg-0.1.0-cp312-cp312-macosx_26_0_arm64.whl": {
+    "type": "wheel",
+    "sha256": "6a990aabc1b718ffc90a5e7d0b1583a758b80affd5b9db90c245c38dd6769b58",
+    "files": [
+      "hookpkg-0.1.0.dist-info/METADATA",
+      "hookpkg-0.1.0.dist-info/RECORD",
+      "hookpkg-0.1.0.dist-info/WHEEL",
+      "hookpkg/__init__.py",
+      "hookpkg/_native.cpython-312-darwin.so",
+      "hookpkg/native.c"
+    ],
+    "has_native_so": true,
+    "has_pth": false,
+    "pth_content": null,
+    "root_is_purelib_false": true,
+    "wheel": "Wheel-Version: 1.0\nGenerator: poetry-core 2.5.0\nRoot-Is-Purelib: false\nTag: cp312-cp312-macosx_26_0_arm64"
+  },
+  "plain-control/direct-source/editable-plainpkg-0.1.0-py3-none-any.whl": {
+    "type": "wheel",
+    "sha256": "45b0ba3e7f115f747a46e2868bb2c84098288f1393f7ebf920f3d3830e36ffa0",
+    "files": [
+      "plainpkg-0.1.0.dist-info/METADATA",
+      "plainpkg-0.1.0.dist-info/RECORD",
+      "plainpkg-0.1.0.dist-info/WHEEL",
+      "plainpkg.pth"
+    ],
+    "has_native_so": false,
+    "has_pth": true,
+    "pth_content": "/private/tmp/claude-501/poetry-approval-lab/sources/plain-control",
+    "root_is_purelib_false": false,
+    "wheel": "Wheel-Version: 1.0\nGenerator: poetry-core 2.5.0\nRoot-Is-Purelib: true\nTag: py3-none-any"
+  },
+  "plain-control/direct-source/sdist-plainpkg-0.1.0.tar.gz": {
+    "type": "sdist",
+    "sha256": "c8a5d9f60abdb18c4ff699762750578a68c01cb29cf655f81076c36469122c0c",
+    "files": [
+      "plainpkg-0.1.0/PKG-INFO",
+      "plainpkg-0.1.0/README.md",
+      "plainpkg-0.1.0/plainpkg/__init__.py",
+      "plainpkg-0.1.0/pyproject.toml"
+    ],
+    "has_build_py": false,
+    "has_generated_setup_py": false,
+    "setup_py_member_count": 0,
+    "setup_py_has_existing_marker": false,
+    "has_c_source": false,
+    "setup_imports_build": false
+  },
+  "plain-control/direct-source/wheel-plainpkg-0.1.0-py3-none-any.whl": {
+    "type": "wheel",
+    "sha256": "1a7ad3409b5b3cf159d5d1c788b72ae2a977ba821e733a76d0982d651f2049b5",
+    "files": [
+      "plainpkg-0.1.0.dist-info/METADATA",
+      "plainpkg-0.1.0.dist-info/RECORD",
+      "plainpkg-0.1.0.dist-info/WHEEL",
+      "plainpkg/__init__.py"
+    ],
+    "has_native_so": false,
+    "has_pth": false,
+    "pth_content": null,
+    "root_is_purelib_false": false,
+    "wheel": "Wheel-Version: 1.0\nGenerator: poetry-core 2.5.0\nRoot-Is-Purelib: true\nTag: py3-none-any"
+  },
+  "plain-control/sdist-rebuild/editable-plainpkg-0.1.0-py3-none-any.whl": {
+    "type": "wheel",
+    "sha256": "4184e7bbdba3d0a54d83da8c6c06d6807673670f049562fb5f3453c0f63bf23d",
+    "files": [
+      "plainpkg-0.1.0.dist-info/METADATA",
+      "plainpkg-0.1.0.dist-info/RECORD",
+      "plainpkg-0.1.0.dist-info/WHEEL",
+      "plainpkg.pth"
+    ],
+    "has_native_so": false,
+    "has_pth": true,
+    "pth_content": "/private/tmp/claude-501/poetry-approval-lab/sdist-sources/plain-control/plainpkg-0.1.0",
+    "root_is_purelib_false": false,
+    "wheel": "Wheel-Version: 1.0\nGenerator: poetry-core 2.5.0\nRoot-Is-Purelib: true\nTag: py3-none-any"
+  },
+  "plain-control/sdist-rebuild/wheel-plainpkg-0.1.0-py3-none-any.whl": {
+    "type": "wheel",
+    "sha256": "1a7ad3409b5b3cf159d5d1c788b72ae2a977ba821e733a76d0982d651f2049b5",
+    "files": [
+      "plainpkg-0.1.0.dist-info/METADATA",
+      "plainpkg-0.1.0.dist-info/RECORD",
+      "plainpkg-0.1.0.dist-info/WHEEL",
+      "plainpkg/__init__.py"
+    ],
+    "has_native_so": false,
+    "has_pth": false,
+    "pth_content": null,
+    "root_is_purelib_false": false,
+    "wheel": "Wheel-Version: 1.0\nGenerator: poetry-core 2.5.0\nRoot-Is-Purelib: true\nTag: py3-none-any"
+  }
+}

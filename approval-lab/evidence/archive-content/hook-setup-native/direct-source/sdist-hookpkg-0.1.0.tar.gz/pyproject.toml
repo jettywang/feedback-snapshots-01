@@ -1,0 +1,18 @@
+[build-system]
+requires = ["poetry-core==2.5.0", "setuptools==84.2.1"]
+build-backend = "poetry.core.masonry.api"
+
+[project]
+name = "hookpkg"
+version = "0.1.0"
+description = "Event-recording Poetry build script project"
+readme = "README.md"
+authors = [{ name = "Approval Lab", email = "lab@example.invalid" }]
+requires-python = ">=3.11"
+
+[tool.poetry]
+packages = [{ include = "hookpkg" }]
+
+[tool.poetry.build]
+script = "build.py"
+generate-setup-file = true

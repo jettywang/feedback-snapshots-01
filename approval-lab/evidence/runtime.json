@@ -1,0 +1,306 @@
+[
+  {
+    "name": "runtime-plain-control-direct-source-wheel",
+    "returncode": 0,
+    "result": {
+      "module_file": "/tmp/claude-501/poetry-approval-lab/runtime/plain-control/direct-source/wheel/plainpkg/__init__.py",
+      "native_error": "ImportError: cannot import name '_native' from 'plainpkg' (/tmp/claude-501/poetry-approval-lab/runtime/plain-control/direct-source/wheel/plainpkg/__init__.py)",
+      "value": "plainpkg-without-build-script"
+    },
+    "runtime_event_count": 1,
+    "stdout_log": "evidence/logs/runtime-plain-control-direct-source-wheel.stdout.txt",
+    "stderr_log": "evidence/logs/runtime-plain-control-direct-source-wheel.stderr.txt",
+    "case": "plain-control",
+    "context": "direct-source",
+    "mode": "wheel"
+  },
+  {
+    "name": "runtime-plain-control-direct-source-editable",
+    "returncode": 0,
+    "result": {
+      "module_file": "/private/tmp/claude-501/poetry-approval-lab/sources/plain-control/plainpkg/__init__.py",
+      "native_error": "ImportError: cannot import name '_native' from 'plainpkg' (/private/tmp/claude-501/poetry-approval-lab/sources/plain-control/plainpkg/__init__.py)",
+      "value": "plainpkg-without-build-script"
+    },
+    "runtime_event_count": 1,
+    "stdout_log": "evidence/logs/runtime-plain-control-direct-source-editable.stdout.txt",
+    "stderr_log": "evidence/logs/runtime-plain-control-direct-source-editable.stderr.txt",
+    "case": "plain-control",
+    "context": "direct-source",
+    "mode": "editable"
+  },
+  {
+    "name": "runtime-plain-control-sdist-rebuild-wheel",
+    "returncode": 0,
+    "result": {
+      "module_file": "/tmp/claude-501/poetry-approval-lab/runtime/plain-control/sdist-rebuild/wheel/plainpkg/__init__.py",
+      "native_error": "ImportError: cannot import name '_native' from 'plainpkg' (/tmp/claude-501/poetry-approval-lab/runtime/plain-control/sdist-rebuild/wheel/plainpkg/__init__.py)",
+      "value": "plainpkg-without-build-script"
+    },
+    "runtime_event_count": 1,
+    "stdout_log": "evidence/logs/runtime-plain-control-sdist-rebuild-wheel.stdout.txt",
+    "stderr_log": "evidence/logs/runtime-plain-control-sdist-rebuild-wheel.stderr.txt",
+    "case": "plain-control",
+    "context": "sdist-rebuild",
+    "mode": "wheel"
+  },
+  {
+    "name": "runtime-plain-control-sdist-rebuild-editable",
+    "returncode": 0,
+    "result": {
+      "module_file": "/private/tmp/claude-501/poetry-approval-lab/sdist-sources/plain-control/plainpkg-0.1.0/plainpkg/__init__.py",
+      "native_error": "ImportError: cannot import name '_native' from 'plainpkg' (/private/tmp/claude-501/poetry-approval-lab/sdist-sources/plain-control/plainpkg-0.1.0/plainpkg/__init__.py)",
+      "value": "plainpkg-without-build-script"
+    },
+    "runtime_event_count": 1,
+    "stdout_log": "evidence/logs/runtime-plain-control-sdist-rebuild-editable.stdout.txt",
+    "stderr_log": "evidence/logs/runtime-plain-control-sdist-rebuild-editable.stderr.txt",
+    "case": "plain-control",
+    "context": "sdist-rebuild",
+    "mode": "editable"
+  },
+  {
+    "name": "runtime-hook-direct-false-direct-source-wheel",
+    "returncode": 0,
+    "result": {
+      "module_file": "/tmp/claude-501/poetry-approval-lab/runtime/hook-direct-false/direct-source/wheel/hookpkg/__init__.py",
+      "native_error": "ImportError: cannot import name '_native' from 'hookpkg' (/tmp/claude-501/poetry-approval-lab/runtime/hook-direct-false/direct-source/wheel/hookpkg/__init__.py)",
+      "value": "hookpkg-build-script"
+    },
+    "runtime_event_count": 1,
+    "stdout_log": "evidence/logs/runtime-hook-direct-false-direct-source-wheel.stdout.txt",
+    "stderr_log": "evidence/logs/runtime-hook-direct-false-direct-source-wheel.stderr.txt",
+    "case": "hook-direct-false",
+    "context": "direct-source",
+    "mode": "wheel"
+  },
+  {
+    "name": "runtime-hook-direct-false-direct-source-editable",
+    "returncode": 0,
+    "result": {
+      "module_file": "/private/tmp/claude-501/poetry-approval-lab/sources/hook-direct-false/hookpkg/__init__.py",
+      "native_error": "ImportError: cannot import name '_native' from 'hookpkg' (/private/tmp/claude-501/poetry-approval-lab/sources/hook-direct-false/hookpkg/__init__.py)",
+      "value": "hookpkg-build-script"
+    },
+    "runtime_event_count": 1,
+    "stdout_log": "evidence/logs/runtime-hook-direct-false-direct-source-editable.stdout.txt",
+    "stderr_log": "evidence/logs/runtime-hook-direct-false-direct-source-editable.stderr.txt",
+    "case": "hook-direct-false",
+    "context": "direct-source",
+    "mode": "editable"
+  },
+  {
+    "name": "runtime-hook-direct-false-sdist-rebuild-wheel",
+    "returncode": 0,
+    "result": {
+      "module_file": "/tmp/claude-501/poetry-approval-lab/runtime/hook-direct-false/sdist-rebuild/wheel/hookpkg/__init__.py",
+      "native_error": "ImportError: cannot import name '_native' from 'hookpkg' (/tmp/claude-501/poetry-approval-lab/runtime/hook-direct-false/sdist-rebuild/wheel/hookpkg/__init__.py)",
+      "value": "hookpkg-build-script"
+    },
+    "runtime_event_count": 1,
+    "stdout_log": "evidence/logs/runtime-hook-direct-false-sdist-rebuild-wheel.stdout.txt",
+    "stderr_log": "evidence/logs/runtime-hook-direct-false-sdist-rebuild-wheel.stderr.txt",
+    "case": "hook-direct-false",
+    "context": "sdist-rebuild",
+    "mode": "wheel"
+  },
+  {
+    "name": "runtime-hook-direct-false-sdist-rebuild-editable",
+    "returncode": 0,
+    "result": {
+      "module_file": "/private/tmp/claude-501/poetry-approval-lab/sdist-sources/hook-direct-false/hookpkg-0.1.0/hookpkg/__init__.py",
+      "native_error": "ImportError: cannot import name '_native' from 'hookpkg' (/private/tmp/claude-501/poetry-approval-lab/sdist-sources/hook-direct-false/hookpkg-0.1.0/hookpkg/__init__.py)",
+      "value": "hookpkg-build-script"
+    },
+    "runtime_event_count": 1,
+    "stdout_log": "evidence/logs/runtime-hook-direct-false-sdist-rebuild-editable.stdout.txt",
+    "stderr_log": "evidence/logs/runtime-hook-direct-false-sdist-rebuild-editable.stderr.txt",
+    "case": "hook-direct-false",
+    "context": "sdist-rebuild",
+    "mode": "editable"
+  },
+  {
+    "name": "runtime-hook-setup-native-direct-source-wheel",
+    "returncode": 0,
+    "result": {
+      "answer": 42,
+      "module_file": "/tmp/claude-501/poetry-approval-lab/runtime/hook-setup-native/direct-source/wheel/hookpkg/__init__.py",
+      "native_file": "/tmp/claude-501/poetry-approval-lab/runtime/hook-setup-native/direct-source/wheel/hookpkg/_native.cpython-312-darwin.so",
+      "value": "hookpkg-build-script"
+    },
+    "runtime_event_count": 1,
+    "stdout_log": "evidence/logs/runtime-hook-setup-native-direct-source-wheel.stdout.txt",
+    "stderr_log": "evidence/logs/runtime-hook-setup-native-direct-source-wheel.stderr.txt",
+    "case": "hook-setup-native",
+    "context": "direct-source",
+    "mode": "wheel"
+  },
+  {
+    "name": "runtime-hook-setup-native-direct-source-editable",
+    "returncode": 0,
+    "result": {
+      "answer": 42,
+      "module_file": "/private/tmp/claude-501/poetry-approval-lab/sources/hook-setup-native/hookpkg/__init__.py",
+      "native_file": "/private/tmp/claude-501/poetry-approval-lab/sources/hook-setup-native/hookpkg/_native.cpython-312-darwin.so",
+      "value": "hookpkg-build-script"
+    },
+    "runtime_event_count": 1,
+    "stdout_log": "evidence/logs/runtime-hook-setup-native-direct-source-editable.stdout.txt",
+    "stderr_log": "evidence/logs/runtime-hook-setup-native-direct-source-editable.stderr.txt",
+    "case": "hook-setup-native",
+    "context": "direct-source",
+    "mode": "editable"
+  },
+  {
+    "name": "runtime-hook-setup-native-sdist-rebuild-wheel",
+    "returncode": 0,
+    "result": {
+      "answer": 42,
+      "module_file": "/tmp/claude-501/poetry-approval-lab/runtime/hook-setup-native/sdist-rebuild/wheel/hookpkg/__init__.py",
+      "native_file": "/tmp/claude-501/poetry-approval-lab/runtime/hook-setup-native/sdist-rebuild/wheel/hookpkg/_native.cpython-312-darwin.so",
+      "value": "hookpkg-build-script"
+    },
+    "runtime_event_count": 1,
+    "stdout_log": "evidence/logs/runtime-hook-setup-native-sdist-rebuild-wheel.stdout.txt",
+    "stderr_log": "evidence/logs/runtime-hook-setup-native-sdist-rebuild-wheel.stderr.txt",
+    "case": "hook-setup-native",
+    "context": "sdist-rebuild",
+    "mode": "wheel"
+  },
+  {
+    "name": "runtime-hook-setup-native-sdist-rebuild-editable",
+    "returncode": 0,
+    "result": {
+      "answer": 42,
+      "module_file": "/private/tmp/claude-501/poetry-approval-lab/sdist-sources/hook-setup-native/hookpkg-0.1.0/hookpkg/__init__.py",
+      "native_file": "/private/tmp/claude-501/poetry-approval-lab/sdist-sources/hook-setup-native/hookpkg-0.1.0/hookpkg/_native.cpython-312-darwin.so",
+      "value": "hookpkg-build-script"
+    },
+    "runtime_event_count": 1,
+    "stdout_log": "evidence/logs/runtime-hook-setup-native-sdist-rebuild-editable.stdout.txt",
+    "stderr_log": "evidence/logs/runtime-hook-setup-native-sdist-rebuild-editable.stderr.txt",
+    "case": "hook-setup-native",
+    "context": "sdist-rebuild",
+    "mode": "editable"
+  },
+  {
+    "name": "runtime-hook-legacy-string-direct-source-wheel",
+    "returncode": 0,
+    "result": {
+      "module_file": "/tmp/claude-501/poetry-approval-lab/runtime/hook-legacy-string/direct-source/wheel/hookpkg/__init__.py",
+      "native_error": "ImportError: cannot import name '_native' from 'hookpkg' (/tmp/claude-501/poetry-approval-lab/runtime/hook-legacy-string/direct-source/wheel/hookpkg/__init__.py)",
+      "value": "hookpkg-build-script"
+    },
+    "runtime_event_count": 1,
+    "stdout_log": "evidence/logs/runtime-hook-legacy-string-direct-source-wheel.stdout.txt",
+    "stderr_log": "evidence/logs/runtime-hook-legacy-string-direct-source-wheel.stderr.txt",
+    "case": "hook-legacy-string",
+    "context": "direct-source",
+    "mode": "wheel"
+  },
+  {
+    "name": "runtime-hook-legacy-string-direct-source-editable",
+    "returncode": 0,
+    "result": {
+      "module_file": "/private/tmp/claude-501/poetry-approval-lab/sources/hook-legacy-string/hookpkg/__init__.py",
+      "native_error": "ImportError: cannot import name '_native' from 'hookpkg' (/private/tmp/claude-501/poetry-approval-lab/sources/hook-legacy-string/hookpkg/__init__.py)",
+      "value": "hookpkg-build-script"
+    },
+    "runtime_event_count": 1,
+    "stdout_log": "evidence/logs/runtime-hook-legacy-string-direct-source-editable.stdout.txt",
+    "stderr_log": "evidence/logs/runtime-hook-legacy-string-direct-source-editable.stderr.txt",
+    "case": "hook-legacy-string",
+    "context": "direct-source",
+    "mode": "editable"
+  },
+  {
+    "name": "runtime-hook-legacy-string-sdist-rebuild-wheel",
+    "returncode": 0,
+    "result": {
+      "module_file": "/tmp/claude-501/poetry-approval-lab/runtime/hook-legacy-string/sdist-rebuild/wheel/hookpkg/__init__.py",
+      "native_error": "ImportError: cannot import name '_native' from 'hookpkg' (/tmp/claude-501/poetry-approval-lab/runtime/hook-legacy-string/sdist-rebuild/wheel/hookpkg/__init__.py)",
+      "value": "hookpkg-build-script"
+    },
+    "runtime_event_count": 1,
+    "stdout_log": "evidence/logs/runtime-hook-legacy-string-sdist-rebuild-wheel.stdout.txt",
+    "stderr_log": "evidence/logs/runtime-hook-legacy-string-sdist-rebuild-wheel.stderr.txt",
+    "case": "hook-legacy-string",
+    "context": "sdist-rebuild",
+    "mode": "wheel"
+  },
+  {
+    "name": "runtime-hook-legacy-string-sdist-rebuild-editable",
+    "returncode": 0,
+    "result": {
+      "module_file": "/private/tmp/claude-501/poetry-approval-lab/sdist-sources/hook-legacy-string/hookpkg-0.1.0/hookpkg/__init__.py",
+      "native_error": "ImportError: cannot import name '_native' from 'hookpkg' (/private/tmp/claude-501/poetry-approval-lab/sdist-sources/hook-legacy-string/hookpkg-0.1.0/hookpkg/__init__.py)",
+      "value": "hookpkg-build-script"
+    },
+    "runtime_event_count": 1,
+    "stdout_log": "evidence/logs/runtime-hook-legacy-string-sdist-rebuild-editable.stdout.txt",
+    "stderr_log": "evidence/logs/runtime-hook-legacy-string-sdist-rebuild-editable.stderr.txt",
+    "case": "hook-legacy-string",
+    "context": "sdist-rebuild",
+    "mode": "editable"
+  },
+  {
+    "name": "runtime-hook-existing-setup-direct-source-wheel",
+    "returncode": 0,
+    "result": {
+      "module_file": "/tmp/claude-501/poetry-approval-lab/runtime/hook-existing-setup/direct-source/wheel/hookpkg/__init__.py",
+      "native_error": "ImportError: cannot import name '_native' from 'hookpkg' (/tmp/claude-501/poetry-approval-lab/runtime/hook-existing-setup/direct-source/wheel/hookpkg/__init__.py)",
+      "value": "hookpkg-build-script"
+    },
+    "runtime_event_count": 1,
+    "stdout_log": "evidence/logs/runtime-hook-existing-setup-direct-source-wheel.stdout.txt",
+    "stderr_log": "evidence/logs/runtime-hook-existing-setup-direct-source-wheel.stderr.txt",
+    "case": "hook-existing-setup",
+    "context": "direct-source",
+    "mode": "wheel"
+  },
+  {
+    "name": "runtime-hook-existing-setup-direct-source-editable",
+    "returncode": 0,
+    "result": {
+      "module_file": "/private/tmp/claude-501/poetry-approval-lab/sources/hook-existing-setup/hookpkg/__init__.py",
+      "native_error": "ImportError: cannot import name '_native' from 'hookpkg' (/private/tmp/claude-501/poetry-approval-lab/sources/hook-existing-setup/hookpkg/__init__.py)",
+      "value": "hookpkg-build-script"
+    },
+    "runtime_event_count": 1,
+    "stdout_log": "evidence/logs/runtime-hook-existing-setup-direct-source-editable.stdout.txt",
+    "stderr_log": "evidence/logs/runtime-hook-existing-setup-direct-source-editable.stderr.txt",
+    "case": "hook-existing-setup",
+    "context": "direct-source",
+    "mode": "editable"
+  },
+  {
+    "name": "runtime-hook-existing-setup-sdist-rebuild-wheel",
+    "returncode": 0,
+    "result": {
+      "module_file": "/tmp/claude-501/poetry-approval-lab/runtime/hook-existing-setup/sdist-rebuild/wheel/hookpkg/__init__.py",
+      "native_error": "ImportError: cannot import name '_native' from 'hookpkg' (/tmp/claude-501/poetry-approval-lab/runtime/hook-existing-setup/sdist-rebuild/wheel/hookpkg/__init__.py)",
+      "value": "hookpkg-build-script"
+    },
+    "runtime_event_count": 1,
+    "stdout_log": "evidence/logs/runtime-hook-existing-setup-sdist-rebuild-wheel.stdout.txt",
+    "stderr_log": "evidence/logs/runtime-hook-existing-setup-sdist-rebuild-wheel.stderr.txt",
+    "case": "hook-existing-setup",
+    "context": "sdist-rebuild",
+    "mode": "wheel"
+  },
+  {
+    "name": "runtime-hook-existing-setup-sdist-rebuild-editable",
+    "returncode": 0,
+    "result": {
+      "module_file": "/private/tmp/claude-501/poetry-approval-lab/sdist-sources/hook-existing-setup/hookpkg-0.1.0/hookpkg/__init__.py",
+      "native_error": "ImportError: cannot import name '_native' from 'hookpkg' (/private/tmp/claude-501/poetry-approval-lab/sdist-sources/hook-existing-setup/hookpkg-0.1.0/hookpkg/__init__.py)",
+      "value": "hookpkg-build-script"
+    },
+    "runtime_event_count": 1,
+    "stdout_log": "evidence/logs/runtime-hook-existing-setup-sdist-rebuild-editable.stdout.txt",
+    "stderr_log": "evidence/logs/runtime-hook-existing-setup-sdist-rebuild-editable.stderr.txt",
+    "case": "hook-existing-setup",
+    "context": "sdist-rebuild",
+    "mode": "editable"
+  }
+]

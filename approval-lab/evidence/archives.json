@@ -1,0 +1,152 @@
+[
+  {
+    "case": "plain-control",
+    "context": "direct-source",
+    "kind": "sdist",
+    "evidence_path": "evidence/artifacts/plain-control/direct-source/sdist-plainpkg-0.1.0.tar.gz"
+  },
+  {
+    "case": "plain-control",
+    "context": "direct-source",
+    "kind": "wheel",
+    "evidence_path": "evidence/artifacts/plain-control/direct-source/wheel-plainpkg-0.1.0-py3-none-any.whl"
+  },
+  {
+    "case": "plain-control",
+    "context": "direct-source",
+    "kind": "editable",
+    "evidence_path": "evidence/artifacts/plain-control/direct-source/editable-plainpkg-0.1.0-py3-none-any.whl"
+  },
+  {
+    "case": "plain-control",
+    "context": "sdist-rebuild",
+    "kind": "wheel",
+    "evidence_path": "evidence/artifacts/plain-control/sdist-rebuild/wheel-plainpkg-0.1.0-py3-none-any.whl"
+  },
+  {
+    "case": "plain-control",
+    "context": "sdist-rebuild",
+    "kind": "editable",
+    "evidence_path": "evidence/artifacts/plain-control/sdist-rebuild/editable-plainpkg-0.1.0-py3-none-any.whl"
+  },
+  {
+    "case": "hook-direct-false",
+    "context": "direct-source",
+    "kind": "sdist",
+    "evidence_path": "evidence/artifacts/hook-direct-false/direct-source/sdist-hookpkg-0.1.0.tar.gz"
+  },
+  {
+    "case": "hook-direct-false",
+    "context": "direct-source",
+    "kind": "wheel",
+    "evidence_path": "evidence/artifacts/hook-direct-false/direct-source/wheel-hookpkg-0.1.0-cp312-cp312-macosx_26_0_arm64.whl"
+  },
+  {
+    "case": "hook-direct-false",
+    "context": "direct-source",
+    "kind": "editable",
+    "evidence_path": "evidence/artifacts/hook-direct-false/direct-source/editable-hookpkg-0.1.0-cp312-cp312-macosx_26_0_arm64.whl"
+  },
+  {
+    "case": "hook-direct-false",
+    "context": "sdist-rebuild",
+    "kind": "wheel",
+    "evidence_path": "evidence/artifacts/hook-direct-false/sdist-rebuild/wheel-hookpkg-0.1.0-cp312-cp312-macosx_26_0_arm64.whl"
+  },
+  {
+    "case": "hook-direct-false",
+    "context": "sdist-rebuild",
+    "kind": "editable",
+    "evidence_path": "evidence/artifacts/hook-direct-false/sdist-rebuild/editable-hookpkg-0.1.0-cp312-cp312-macosx_26_0_arm64.whl"
+  },
+  {
+    "case": "hook-setup-native",
+    "context": "direct-source",
+    "kind": "sdist",
+    "evidence_path": "evidence/artifacts/hook-setup-native/direct-source/sdist-hookpkg-0.1.0.tar.gz"
+  },
+  {
+    "case": "hook-setup-native",
+    "context": "direct-source",
+    "kind": "wheel",
+    "evidence_path": "evidence/artifacts/hook-setup-native/direct-source/wheel-hookpkg-0.1.0-cp312-cp312-macosx_26_0_arm64.whl"
+  },
+  {
+    "case": "hook-setup-native",
+    "context": "direct-source",
+    "kind": "editable",
+    "evidence_path": "evidence/artifacts/hook-setup-native/direct-source/editable-hookpkg-0.1.0-cp312-cp312-macosx_26_0_arm64.whl"
+  },
+  {
+    "case": "hook-setup-native",
+    "context": "sdist-rebuild",
+    "kind": "wheel",
+    "evidence_path": "evidence/artifacts/hook-setup-native/sdist-rebuild/wheel-hookpkg-0.1.0-cp312-cp312-macosx_26_0_arm64.whl"
+  },
+  {
+    "case": "hook-setup-native",
+    "context": "sdist-rebuild",
+    "kind": "editable",
+    "evidence_path": "evidence/artifacts/hook-setup-native/sdist-rebuild/editable-hookpkg-0.1.0-cp312-cp312-macosx_26_0_arm64.whl"
+  },
+  {
+    "case": "hook-legacy-string",
+    "context": "direct-source",
+    "kind": "sdist",
+    "evidence_path": "evidence/artifacts/hook-legacy-string/direct-source/sdist-hookpkg-0.1.0.tar.gz"
+  },
+  {
+    "case": "hook-legacy-string",
+    "context": "direct-source",
+    "kind": "wheel",
+    "evidence_path": "evidence/artifacts/hook-legacy-string/direct-source/wheel-hookpkg-0.1.0-cp312-cp312-macosx_26_0_arm64.whl"
+  },
+  {
+    "case": "hook-legacy-string",
+    "context": "direct-source",
+    "kind": "editable",
+    "evidence_path": "evidence/artifacts/hook-legacy-string/direct-source/editable-hookpkg-0.1.0-cp312-cp312-macosx_26_0_arm64.whl"
+  },
+  {
+    "case": "hook-legacy-string",
+    "context": "sdist-rebuild",
+    "kind": "wheel",
+    "evidence_path": "evidence/artifacts/hook-legacy-string/sdist-rebuild/wheel-hookpkg-0.1.0-cp312-cp312-macosx_26_0_arm64.whl"
+  },
+  {
+    "case": "hook-legacy-string",
+    "context": "sdist-rebuild",
+    "kind": "editable",
+    "evidence_path": "evidence/artifacts/hook-legacy-string/sdist-rebuild/editable-hookpkg-0.1.0-cp312-cp312-macosx_26_0_arm64.whl"
+  },
+  {
+    "case": "hook-existing-setup",
+    "context": "direct-source",
+    "kind": "sdist",
+    "evidence_path": "evidence/artifacts/hook-existing-setup/direct-source/sdist-hookpkg-0.1.0.tar.gz"
+  },
+  {
+    "case": "hook-existing-setup",
+    "context": "direct-source",
+    "kind": "wheel",
+    "evidence_path": "evidence/artifacts/hook-existing-setup/direct-source/wheel-hookpkg-0.1.0-cp312-cp312-macosx_26_0_arm64.whl"
+  },
+  {
+    "case": "hook-existing-setup",
+    "context": "direct-source",
+    "kind": "editable",
+    "evidence_path": "evidence/artifacts/hook-existing-setup/direct-source/editable-hookpkg-0.1.0-cp312-cp312-macosx_26_0_arm64.whl"
+  },
+  {
+    "case": "hook-existing-setup",
+    "context": "sdist-rebuild",
+    "kind": "wheel",
+    "evidence_path": "evidence/artifacts/hook-existing-setup/sdist-rebuild/wheel-hookpkg-0.1.0-cp312-cp312-macosx_26_0_arm64.whl"
+  },
+  {
+    "case": "hook-existing-setup",
+    "context": "sdist-rebuild",
+    "kind": "editable",
+    "evidence_path": "evidence/artifacts/hook-existing-setup/sdist-rebuild/editable-hookpkg-0.1.0-cp312-cp312-macosx_26_0_arm64.whl"
+  }
+]

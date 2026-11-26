@@ -1,0 +1,18 @@
+running build
+running build_py
+creating /private/tmp/claude-501/poetry-approval-lab/sources/hook-setup-native/build/lib.macosx-11.0-arm64-cpython-312/hookpkg
+copying hookpkg/__init__.py -> /private/tmp/claude-501/poetry-approval-lab/sources/hook-setup-native/build/lib.macosx-11.0-arm64-cpython-312/hookpkg
+running egg_info
+creating hookpkg.egg-info
+writing hookpkg.egg-info/PKG-INFO
+writing dependency_links to hookpkg.egg-info/dependency_links.txt
+writing top-level names to hookpkg.egg-info/top_level.txt
+writing manifest file 'hookpkg.egg-info/SOURCES.txt'
+reading manifest file 'hookpkg.egg-info/SOURCES.txt'
+writing manifest file 'hookpkg.egg-info/SOURCES.txt'
+copying hookpkg/native.c -> /private/tmp/claude-501/poetry-approval-lab/sources/hook-setup-native/build/lib.macosx-11.0-arm64-cpython-312/hookpkg
+running build_ext
+building 'hookpkg._native' extension
+cc -fno-strict-overflow -Wsign-compare -Wunreachable-code -DNDEBUG -g -O3 -Wall -arch arm64 -mmacosx-version-min=11.0 -Wno-nullability-completeness -Wno-expansion-to-defined -Wno-undef-prefix -fPIC -I/Users/apple/Documents/用户反馈项目/batches/feedback-20261120-backend-security-280-jettywang/prepared/FB-20261120-SEC-JW-186/workspace/.venv/include -I/Users/apple/.local/share/uv/python/cpython-3.12.11-macos-aarch64-none/include/python3.12 -c hookpkg/native.c -o /private/tmp/claude-501/poetry-approval-lab/sources/hook-setup-native/build/temp.macosx-11.0-arm64-cpython-312/hookpkg/native.o
+cc -bundle -undefined dynamic_lookup -arch arm64 -mmacosx-version-min=11.0 -LModules/_hacl -Wl,-headerpad,40 /private/tmp/claude-501/poetry-approval-lab/sources/hook-setup-native/build/temp.macosx-11.0-arm64-cpython-312/hookpkg/native.o -L/Users/apple/.local/share/uv/python/cpython-3.12.11-macos-aarch64-none/lib -o /private/tmp/claude-501/poetry-approval-lab/sources/hook-setup-native/build/lib.macosx-11.0-arm64-cpython-312/hookpkg/_native.cpython-312-darwin.so
+APPROVAL_RESULT={"result": "hookpkg-0.1.0-cp312-cp312-macosx_26_0_arm64.whl"}

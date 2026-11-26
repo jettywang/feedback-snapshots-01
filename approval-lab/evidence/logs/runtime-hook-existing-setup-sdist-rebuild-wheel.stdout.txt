@@ -1,0 +1,1 @@
+APPROVAL_RUNTIME_RESULT={"module_file": "/tmp/claude-501/poetry-approval-lab/runtime/hook-existing-setup/sdist-rebuild/wheel/hookpkg/__init__.py", "native_error": "ImportError: cannot import name '_native' from 'hookpkg' (/tmp/claude-501/poetry-approval-lab/runtime/hook-existing-setup/sdist-rebuild/wheel/hookpkg/__init__.py)", "value": "hookpkg-build-script"}

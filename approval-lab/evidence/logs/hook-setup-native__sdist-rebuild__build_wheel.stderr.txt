@@ -1,0 +1,22 @@
+A setup.py file already exists. Using it.
+/Users/apple/Documents/用户反馈项目/batches/feedback-20261120-backend-security-280-jettywang/prepared/FB-20261120-SEC-JW-186/workspace/approval-lab/pylibs/setuptools/config/_apply_pyprojecttoml.py:75: _MissingDynamic: `maintainers` defined outside of `pyproject.toml` is ignored.
+!!
+
+        ********************************************************************************
+        The following seems to be defined outside of `pyproject.toml`:
+
+        `maintainers = 'None'`
+
+        According to the spec (see the link below), however, setuptools CANNOT
+        consider this value unless `maintainers` is listed as `dynamic`.
+
+        https://packaging.python.org/en/latest/specifications/pyproject-toml/#declaring-project-metadata-the-project-table
+
+        To prevent this problem, you can list `maintainers` under `dynamic` or alternatively
+        remove the `[project]` table from your file and rely entirely on other means of
+        configuration.
+        ********************************************************************************
+
+!!
+  _handle_missing_dynamic(dist, project_table)
+ld: warning: search path 'Modules/_hacl' not found

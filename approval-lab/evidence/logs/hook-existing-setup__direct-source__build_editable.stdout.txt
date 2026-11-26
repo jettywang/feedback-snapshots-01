@@ -1,0 +1,10 @@
+running build_ext
+running build
+running build_py
+running egg_info
+writing hookpkg.egg-info/PKG-INFO
+writing dependency_links to hookpkg.egg-info/dependency_links.txt
+writing top-level names to hookpkg.egg-info/top_level.txt
+reading manifest file 'hookpkg.egg-info/SOURCES.txt'
+writing manifest file 'hookpkg.egg-info/SOURCES.txt'
+APPROVAL_RESULT={"result": "hookpkg-0.1.0-cp312-cp312-macosx_26_0_arm64.whl"}

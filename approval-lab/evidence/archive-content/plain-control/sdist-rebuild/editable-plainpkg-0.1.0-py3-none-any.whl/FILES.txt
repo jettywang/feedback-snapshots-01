@@ -1,0 +1,4 @@
+plainpkg-0.1.0.dist-info/METADATA
+plainpkg-0.1.0.dist-info/RECORD
+plainpkg-0.1.0.dist-info/WHEEL
+plainpkg.pth

@@ -1,0 +1,72 @@
+[
+  {
+    "case": "plain-control",
+    "file": "pyproject.toml",
+    "sha256": "07fa63c9c297137309a766e0a50ab181f6301e967cbde5644cb2068b4ef5d95d"
+  },
+  {
+    "case": "hook-direct-false",
+    "file": "pyproject.toml",
+    "sha256": "5bb561d7be691c82d66c5c660a9eb562a7032873f47adcf99bc6c77cc28a103d"
+  },
+  {
+    "case": "hook-direct-false",
+    "file": "build.py",
+    "sha256": "7bc20c986a999312dd68ea72924bb8539f7133a77655bf1e3ce1102f09d9efd5"
+  },
+  {
+    "case": "hook-direct-false",
+    "file": "hookpkg/native.c",
+    "sha256": "2cb7cc3b28ef43c441d4dc248ae5834976bdd24fd0f0c1468d011fc8d979a264"
+  },
+  {
+    "case": "hook-setup-native",
+    "file": "pyproject.toml",
+    "sha256": "1dac285569c48872e99f7452e7d1f947900f142ff8fdac35c8af1fffa9306271"
+  },
+  {
+    "case": "hook-setup-native",
+    "file": "build.py",
+    "sha256": "7bc20c986a999312dd68ea72924bb8539f7133a77655bf1e3ce1102f09d9efd5"
+  },
+  {
+    "case": "hook-setup-native",
+    "file": "hookpkg/native.c",
+    "sha256": "2cb7cc3b28ef43c441d4dc248ae5834976bdd24fd0f0c1468d011fc8d979a264"
+  },
+  {
+    "case": "hook-legacy-string",
+    "file": "pyproject.toml",
+    "sha256": "0f7c39330ba4ef78f8441056600dd41a091ff4d994269f67c08c3a83160a6f96"
+  },
+  {
+    "case": "hook-legacy-string",
+    "file": "build.py",
+    "sha256": "7bc20c986a999312dd68ea72924bb8539f7133a77655bf1e3ce1102f09d9efd5"
+  },
+  {
+    "case": "hook-legacy-string",
+    "file": "hookpkg/native.c",
+    "sha256": "2cb7cc3b28ef43c441d4dc248ae5834976bdd24fd0f0c1468d011fc8d979a264"
+  },
+  {
+    "case": "hook-existing-setup",
+    "file": "pyproject.toml",
+    "sha256": "1dac285569c48872e99f7452e7d1f947900f142ff8fdac35c8af1fffa9306271"
+  },
+  {
+    "case": "hook-existing-setup",
+    "file": "build.py",
+    "sha256": "7bc20c986a999312dd68ea72924bb8539f7133a77655bf1e3ce1102f09d9efd5"
+  },
+  {
+    "case": "hook-existing-setup",
+    "file": "setup.py",
+    "sha256": "d0378e70a22bd7a591e372eeef92e6d3adda2e72e0f3c2e354993eadd40a2445"
+  },
+  {
+    "case": "hook-existing-setup",
+    "file": "hookpkg/native.c",
+    "sha256": "2cb7cc3b28ef43c441d4dc248ae5834976bdd24fd0f0c1468d011fc8d979a264"
+  }
+]

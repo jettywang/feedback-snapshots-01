@@ -1,0 +1,1 @@
+APPROVAL_RUNTIME_RESULT={"module_file": "/private/tmp/claude-501/poetry-approval-lab/sources/hook-legacy-string/hookpkg/__init__.py", "native_error": "ImportError: cannot import name '_native' from 'hookpkg' (/private/tmp/claude-501/poetry-approval-lab/sources/hook-legacy-string/hookpkg/__init__.py)", "value": "hookpkg-build-script"}

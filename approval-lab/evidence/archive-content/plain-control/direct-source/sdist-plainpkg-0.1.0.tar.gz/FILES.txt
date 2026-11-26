@@ -1,0 +1,4 @@
+plainpkg-0.1.0/PKG-INFO
+plainpkg-0.1.0/README.md
+plainpkg-0.1.0/plainpkg/__init__.py
+plainpkg-0.1.0/pyproject.toml

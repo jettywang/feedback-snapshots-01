@@ -1,0 +1,14 @@
+running build
+running build_py
+creating /private/tmp/claude-501/poetry-approval-lab/sdist-sources/hook-existing-setup/hookpkg-0.1.0/build/lib/hookpkg
+copying hookpkg/__init__.py -> /private/tmp/claude-501/poetry-approval-lab/sdist-sources/hook-existing-setup/hookpkg-0.1.0/build/lib/hookpkg
+running egg_info
+creating hookpkg.egg-info
+writing hookpkg.egg-info/PKG-INFO
+writing dependency_links to hookpkg.egg-info/dependency_links.txt
+writing top-level names to hookpkg.egg-info/top_level.txt
+writing manifest file 'hookpkg.egg-info/SOURCES.txt'
+reading manifest file 'hookpkg.egg-info/SOURCES.txt'
+writing manifest file 'hookpkg.egg-info/SOURCES.txt'
+copying hookpkg/native.c -> /private/tmp/claude-501/poetry-approval-lab/sdist-sources/hook-existing-setup/hookpkg-0.1.0/build/lib/hookpkg
+APPROVAL_RESULT={"result": "hookpkg-0.1.0-cp312-cp312-macosx_26_0_arm64.whl"}

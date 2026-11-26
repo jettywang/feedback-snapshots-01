@@ -1,0 +1,1 @@
+APPROVAL_RESULT={"result": "hookpkg-0.1.0.dist-info"}

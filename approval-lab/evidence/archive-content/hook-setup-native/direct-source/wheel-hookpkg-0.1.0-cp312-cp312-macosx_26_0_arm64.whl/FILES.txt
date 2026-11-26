@@ -1,0 +1,6 @@
+hookpkg-0.1.0.dist-info/METADATA
+hookpkg-0.1.0.dist-info/RECORD
+hookpkg-0.1.0.dist-info/WHEEL
+hookpkg/__init__.py
+hookpkg/_native.cpython-312-darwin.so
+hookpkg/native.c

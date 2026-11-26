@@ -1,0 +1,1 @@
+APPROVAL_RUNTIME_RESULT={"answer": 42, "module_file": "/private/tmp/claude-501/poetry-approval-lab/sdist-sources/hook-setup-native/hookpkg-0.1.0/hookpkg/__init__.py", "native_file": "/private/tmp/claude-501/poetry-approval-lab/sdist-sources/hook-setup-native/hookpkg-0.1.0/hookpkg/_native.cpython-312-darwin.so", "value": "hookpkg-build-script"}
