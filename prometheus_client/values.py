@@ -4,6 +4,7 @@ from typing import Callable, List
 import warnings
 
 from .mmap_dict import mmap_key, MmapedDict
+from .provenance import new_session_id, stamp_file
 
 _multi_process_cleanups: List[Callable[[], None]] = []
 
@@ -56,6 +57,11 @@ def MultiProcessValue(process_identifier=os.getpid):
     files = {}
     values = []
     pid = {'value': process_identifier()}
+    # A random session id identifies this writing session: the same process
+    # identifier may be reused by a later deployment, but the session id stays
+    # unique. Sidecars written next to the .db files keep this id so the origin
+    # of a file remains checkable after the process exits.
+    session_id = {'value': new_session_id()}
     # Use a single global lock when in multi-processing mode
     # as we presume this means there is no threading going on.
     # This avoids the need to also have mutexes in __MmapDict.
@@ -90,12 +96,25 @@ def MultiProcessValue(process_identifier=os.getpid):
                 file_prefix = typ + '_' + multiprocess_mode
             else:
                 file_prefix = typ
+            directory = os.environ.get('PROMETHEUS_MULTIPROC_DIR')
+            filename = os.path.join(
+                directory,
+                '{}_{}.db'.format(file_prefix, pid['value']))
             if file_prefix not in files:
-                filename = os.path.join(
-                    os.environ.get('PROMETHEUS_MULTIPROC_DIR'),
-                    '{}_{}.db'.format(file_prefix, pid['value']))
-
                 files[file_prefix] = MmapedDict(filename)
+            # Record (idempotently) that this metric was written by the
+            # current session. This runs for every metric rather than only
+            # when the file is first opened, so a metric added later to an
+            # already-open file is still attributed correctly. On a fork the
+            # session id is shared and the new process identifier joins the
+            # same session manifest.
+            stamp_file(
+                filename,
+                session_id['value'],
+                pid['value'],
+                directory,
+                metric_name=metric_name,
+            )
             self._file = files[file_prefix]
             self._key = mmap_key(metric_name, name, labelnames, labelvalues, help_text)
             self._value, self._timestamp = self._file.read_value(self._key)

@@ -287,9 +287,14 @@ class TestMultiProcess(unittest.TestCase):
         values.ValueClass = MultiProcessValue(lambda: pid)
 
         # can not inspect the files cache directly, as it's a closure, so we
-        # check for the actual files themselves
+        # check for the actual files themselves. Provenance sidecars and
+        # session manifests live next to the .db files but are not metric
+        # files, so filter to the .db names.
         def files():
-            fs = os.listdir(os.environ['PROMETHEUS_MULTIPROC_DIR'])
+            fs = [
+                name for name in os.listdir(os.environ['PROMETHEUS_MULTIPROC_DIR'])
+                if name.endswith('.db')
+            ]
             fs.sort()
             return fs
 

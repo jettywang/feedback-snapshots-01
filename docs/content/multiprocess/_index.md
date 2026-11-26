@@ -103,6 +103,44 @@ from prometheus_client import Gauge
 IN_PROGRESS = Gauge("inprogress_requests", "help", multiprocess_mode='livesum')
 ```
 
+## Offline provenance audit
+
+When metric files from two deployments end up in the same directory — for
+example after an incident that skipped the usual directory wipe — the regular
+aggregation still works, but the numbers on their own do not say which write
+produced them. Two deployments can even reuse the same process identifier, so
+the `pid` embedded in the file name is not enough to tell them apart.
+
+Each multi-process write session therefore records its provenance next to the
+metric files:
+
+- a `<file>.db.provenance` JSON sidecar for every metric file, identifying the
+  write session (a random session id), the process identifier that wrote the
+  file and the session that owns each metric inside it; and
+- a `session-<id>.json` manifest listing every process identifier that took
+  part in that session, including identifiers added after a `fork()`.
+
+The evidence is written atomically and stays on disk after every process has
+exited, so the origin of an aggregate can be checked offline. Metric files
+produced by older releases have no sidecar: they are still aggregated in the
+normal way, but their source can only be inferred from the historical
+`<type>_<mode>_<pid>.db` naming and are reported as **unknown**, with the
+missing evidence listed explicitly rather than guessed.
+
+Run the audit from the command line:
+
+```sh
+python -m prometheus_client.audit "$PROMETHEUS_MULTIPROC_DIR"
+```
+
+It writes an `audit-report.json` describing each file's status (`known` or
+`unknown`), the session behind every aggregated metric and the evidence gaps.
+It also copies the original files into a temporary directory and independently
+re-runs the standard merge there, writing an `aggregates-summary.json` so the
+report's figures can be recomputed without touching the original samples. The
+same functionality is available from `prometheus_client.audit.run_audit` and
+`prometheus_client.audit.build_audit_report`.
+
 ## API Reference
 
 ### `MultiProcessCollector(registry, path=None)`
@@ -152,3 +190,24 @@ from prometheus_client import multiprocess
 def child_exit(server, worker):
     multiprocess.mark_process_dead(worker.pid)
 ```
+
+### `audit.build_audit_report(directory)`
+
+Build a serializable audit report for a multi-process metric directory.
+
+The report contains, per metric file, a `known`/`unknown` status, the write
+session id and process identifier when a sidecar exists, the process identifier
+that can only be inferred from the historical file name otherwise, and the
+human-readable evidence gap for every `unknown` file. Each aggregated metric
+family additionally lists the session ids of every file that contributed to
+it, so an aggregate mixing two deployments is traced to both even when they
+reused the same process identifier.
+
+### `audit.run_audit(directory, report_directory=None)`
+
+Write `audit-report.json` (into `report_directory`, or a fresh temporary
+directory) and recompute every aggregate from copies of the files in a second
+temporary directory, written to `aggregates-summary.json`. The original
+directory is never modified, and `matches_report` states whether the
+recomputed aggregates equal the report. This is the entry point used by
+`python -m prometheus_client.audit`.
