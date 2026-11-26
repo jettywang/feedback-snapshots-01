@@ -314,6 +314,7 @@ class ClientApplication(object):
             allow_broker=None,
             enable_pii_log=None,
             oidc_authority=None,
+            signing_rotation=None,
             ):
         """Create an instance of application.
 
@@ -676,10 +677,21 @@ class ClientApplication(object):
             and retrieve the OIDC metadata from there, to figure out the endpoints.
 
             Note: Broker will NOT be used for OIDC authority.
+
+        :param signing_rotation:
+            Optional :class:`~msal.SigningRotationPolicy` used to correlate
+            client assertions with generations of rotating signing material.
+            When supplied without an explicit ``client_assertion`` in
+            ``client_credential``, MSAL asks the policy for a fresh assertion
+            and reviews it again immediately before the HTTP send. Access-token
+            cache keys remain independent of signing generation.
         """
         self.client_id = client_id
         self.client_credential = client_credential
         self.client_claims = client_claims
+        self._signing_rotation = signing_rotation or (
+            client_credential.get("signing_rotation")
+            if isinstance(client_credential, dict) else None)
         self._client_capabilities = client_capabilities
         self._instance_discovery = instance_discovery
         if isinstance(azure_region, str):
@@ -718,6 +730,11 @@ class ClientApplication(object):
             a = requests.adapters.HTTPAdapter(max_retries=1)
             self.http_client.mount("http://", a)
             self.http_client.mount("https://", a)
+        if self._signing_rotation is not None:
+            # Review immediately before the wire send, after MSAL has prepared
+            # its request body. Throttling stays outside this guard.
+            self.http_client = self._signing_rotation.guard_http_client(
+                self.http_client)
         self.http_client = ThrottledHttpClient(
             self.http_client,
             http_cache=http_cache,
@@ -933,6 +950,11 @@ The reserved list: {}""".format(list(scope_set), list(reserved_scope)))
             # so that we can ignore an empty string came from an empty ENV VAR.
             if client_credential.get("client_assertion"):
                 client_assertion = client_credential['client_assertion']
+            elif self._signing_rotation is not None and not any(
+                    client_credential.get(key)
+                    for key in ("private_key", "private_key_pfx_path")):
+                client_assertion = \
+                    self._signing_rotation.assertion_provider()
             else:
                 headers = {}
                 sha1_thumbprint = sha256_thumbprint = None

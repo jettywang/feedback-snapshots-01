@@ -35,6 +35,17 @@ from .oauth2cli.oidc import Prompt, IdTokenError
 from .sku import __version__
 from .token_cache import TokenCache, SerializableTokenCache
 from .auth_scheme import PopAuthScheme
+from .signing_rotation import (
+    GenerationBoundAssertion,
+    PreparedAssertion,
+    RecordingSigner,
+    RotationGuardedHttpClient,
+    SigningGeneration,
+    SigningGenerationRegistry,
+    SigningRotationHttpClient,
+    SigningRotationPolicy,
+    public_key_tag,
+    )
 from .managed_identity import (
     SystemAssignedManagedIdentity, UserAssignedManagedIdentity,
     ManagedIdentityClient,
