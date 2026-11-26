@@ -428,6 +428,64 @@ end
 The keys `origin` and `params` are OmniAuth's, so a strategy shouldn't
 use them.
 
+## Provider Migration Identity Contracts
+
+When old and new employee identity providers are mounted at the same time,
+the same uid can exist in both registrations without identifying the same
+business subject. The optional `OmniAuth::IdentityMigration::Contract`
+pins the registration and mapping version chosen in the request phase and
+reports each callback without changing `env['omniauth.auth']`.
+
+```ruby
+identity_contract = OmniAuth::IdentityMigration::Contract.new(
+  :preferred_provider => 'current_employee',
+  :registrations => [
+    {'name' => 'legacy', 'provider' => 'legacy_employee', 'mapping_version' => '2026-1'},
+    {'name' => 'current', 'provider' => 'current_employee', 'mapping_version' => '2026-1'}
+  ]
+)
+
+OmniAuth::Builder.new(app) do
+  provider :oauth2, :name => 'legacy_employee', :identity_contract => identity_contract
+  provider :oauth2, :name => 'current_employee', :identity_contract => identity_contract
+end
+```
+
+The request phase stores the registration and mapping version in the
+remembered sign-in (and under
+`session['omniauth.identity_initiations'][provider_name]` as a fallback).
+A later change to the preferred provider therefore doesn't reclassify an
+already-started callback.
+
+Before an application-approved mapping exists, equal uids in two
+registrations are reported as `pending_review` with the reason
+`same_uid_unapproved`; OmniAuth does not merge them. The callback
+environment contains the namespaced source principal and a reviewable
+receipt:
+
+```ruby
+env['omniauth.auth']                 # ordinary OmniAuth::AuthHash reads still work
+env['omniauth.principal']            # e.g. #<Principal current:1000>
+env['omniauth.source_principal']     # the provider registration that authenticated
+env['omniauth.migration_receipt']    # status, reasons, mapping, and audit result
+```
+
+When the application has verified both sides, record and use the bilateral
+mapping explicitly:
+
+```ruby
+source = {'registration' => 'legacy', 'uid' => '1000'}
+target = {'registration' => 'current', 'uid' => '1000'}
+
+identity_contract.approve_mapping!(source, target, :version => '2026-1', :approved_by => 'people-ops')
+identity_contract.convert!(source, target, :reference => 'MIGRATION-160')
+```
+
+`identity_contract.ledger` keeps the callback deliveries and conversions in
+order for review. An executable out-of-order Rack scenario, including an
+unchanged ordinary login, is in
+`spec/omniauth/identity_migration_flow_spec.rb`.
+
 ## Resources
 The [OmniAuth Wiki](https://github.com/omniauth/omniauth/wiki) has
 actively maintained in-depth documentation for OmniAuth. It should be

@@ -14,6 +14,12 @@ module OmniAuth
   autoload :Test,     'omniauth/test'
   autoload :Form,     'omniauth/form'
   autoload :AuthHash, 'omniauth/auth_hash'
+  autoload :IdentityMigration, 'omniauth/identity_migration'
+  autoload :IdentityPinning, 'omniauth/identity_migration'
+  autoload :ProviderMigration, 'omniauth/identity_migration'
+  autoload :Migration, 'omniauth/identity_migration'
+  autoload :IdentityContract, 'omniauth/identity_migration'
+  autoload :CallbackContract, 'omniauth/identity_migration'
   autoload :FailureEndpoint, 'omniauth/failure_endpoint'
   autoload :AuthenticityTokenProtection, 'omniauth/authenticity_token_protection'
 
@@ -151,7 +157,8 @@ module OmniAuth
     attr_writer :on_failure, :before_callback_phase, :before_options_phase, :before_request_phase, :after_request_phase, :request_validation_phase
     attr_accessor :failure_raise_out_environments, :path_prefix, :allowed_request_methods, :form_css,
                   :test_mode, :mock_auth, :full_host, :camelizations, :logger, :silence_get_warning,
-                  :allowed_hosts
+                  :allowed_hosts, :identity_contract, :migration_contract,
+                  :identity_migration_contract, :callback_contract
   end
 
   def self.config

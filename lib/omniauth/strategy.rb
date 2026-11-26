@@ -3,6 +3,7 @@ require 'omniauth/key_store'
 require 'omniauth/strategy/class_methods'
 require 'omniauth/strategy/fetchers'
 require 'omniauth/strategy/hosts'
+require 'omniauth/strategy/identity_pinning'
 require 'omniauth/strategy/paths'
 require 'omniauth/strategy/sign_ins'
 require 'omniauth/strategy/test_mode'
@@ -19,6 +20,7 @@ module OmniAuth
     include Hosts
     include Paths
     include SignIns
+    include IdentityPinning
     include TestMode
 
     def self.included(base)
@@ -173,6 +175,7 @@ module OmniAuth
 
       run_hook(:request_validation_phase)
       session['omniauth.params'] = omniauth_params
+      pin_identity_initiation!
       run_hook(:before_request_phase)
       request_response.tap { run_hook(:after_request_phase) }
     rescue OmniAuth::AuthenticityError => e
@@ -228,6 +231,8 @@ module OmniAuth
 
       sign_in = recall_sign_in
       origin = sign_in['origin']
+      identity_initiation = identity_initiation_from_sign_in(sign_in)
+      env[IdentityPinning::INITIATION_ENV_KEY] = identity_initiation if identity_initiation
       env['omniauth.origin'] = (origin unless origin.eql?(''))
       env['omniauth.params'] = sign_in['params'] || {}
       run_hook(:before_callback_phase)
@@ -263,6 +268,7 @@ module OmniAuth
 
     def callback_phase
       env['omniauth.auth'] = auth_hash
+      apply_identity_contract!
       call_app!
     end
 
