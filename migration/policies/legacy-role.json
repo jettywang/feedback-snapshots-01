@@ -1,0 +1,59 @@
+{
+  "Version": "2012-10-17",
+  "Id": "LegacyOnCallDataAccess",
+  "Statement": [
+    {
+      "Sid": "LegacyS3ReadBroad",
+      "Effect": "Allow",
+      "Action": [
+        "s3:GetObject",
+        "s3:GetBucketLocation",
+        "s3:ListBucket",
+        "s3:GetBucketPolicy"
+      ],
+      "Resource": [
+        "arn:aws:s3:::oncall-evidence",
+        "arn:aws:s3:::oncall-evidence/*",
+        "arn:aws:s3:::legacy-archive",
+        "arn:aws:s3:::legacy-archive/*"
+      ],
+      "Condition": {
+        "StringEquals": { "s3:ResourceAccount": "111111111111" },
+        "Bool": { "s3:TlsVersion": ["true"] }
+      }
+    },
+    {
+      "Sid": "LegacyDdbScansBroad",
+      "Effect": "Allow",
+      "Action": [
+        "dynamodb:GetItem",
+        "dynamodb:Query",
+        "dynamodb:Scan",
+        "dynamodb:DescribeTable"
+      ],
+      "Resource": [
+        "arn:aws:dynamodb:us-east-1:111111111111:table/oncall-tickets",
+        "arn:aws:dynamodb:us-east-1:111111111111:table/oncall-tickets/index/*",
+        "arn:aws:dynamodb:us-east-1:111111111111:table/legacy-audit"
+      ],
+      "Condition": {
+        "StringEquals": { "aws:ResourceTag/DataClass": "internal" }
+      }
+    },
+    {
+      "Sid": "LegacyKmsKeyRead",
+      "Effect": "Allow",
+      "Action": ["kms:DescribeKey"],
+      "Resource": ["arn:aws:kms:us-east-1:111111111111:key/11111111-1111-1111-1111-111111111111"],
+      "Condition": {
+        "StringEquals": { "aws:ResourceTag/DataClass": "internal" }
+      }
+    },
+    {
+      "Sid": "LegacyOverPrivilegedList",
+      "Effect": "Allow",
+      "Action": ["s3:ListAllMyBuckets", "dynamodb:ListTables"],
+      "Resource": "*"
+    }
+  ]
+}

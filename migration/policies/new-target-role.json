@@ -1,0 +1,31 @@
+{
+  "Version": "2012-10-17",
+  "Id": "NewApprovedOnCallTarget",
+  "Statement": [
+    {
+      "Sid": "TargetS3EvidenceRead",
+      "Effect": "Allow",
+      "Action": ["s3:GetObject", "s3:GetBucketLocation", "s3:ListBucket"],
+      "Resource": [
+        "arn:aws:s3:::oncall-evidence",
+        "arn:aws:s3:::oncall-evidence/*"
+      ],
+      "Condition": {
+        "StringEquals": { "s3:ResourceAccount": "111111111111" },
+        "Bool": { "s3:TlsVersion": ["true"] }
+      }
+    },
+    {
+      "Sid": "TargetDdbTicketRead",
+      "Effect": "Allow",
+      "Action": ["dynamodb:GetItem", "dynamodb:Query", "dynamodb:DescribeTable"],
+      "Resource": [
+        "arn:aws:dynamodb:us-east-1:111111111111:table/oncall-tickets",
+        "arn:aws:dynamodb:us-east-1:111111111111:table/oncall-tickets/index/*"
+      ],
+      "Condition": {
+        "StringEquals": { "aws:ResourceTag/DataClass": "internal" }
+      }
+    }
+  ]
+}
