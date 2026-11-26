@@ -28,8 +28,16 @@ module OmniAuth
     def redirect_to_failure
       message_key = env['omniauth.error.type']
 
-      new_path = "#{env['SCRIPT_NAME']}#{strategy_path_prefix}/failure?message=#{Rack::Utils.escape(message_key)}#{origin_query_param}#{strategy_name_query_param}"
+      new_path = "#{env['SCRIPT_NAME']}#{strategy_path_prefix}/failure?message=#{Rack::Utils.escape(message_key)}#{receipt_query_param}#{origin_query_param}#{strategy_name_query_param}"
       Rack::Response.new(['302 Moved'], 302, 'Location' => new_path).finish
+    end
+
+    # The receipt id the user can quote to support; the page never sees
+    # the underlying error itself.
+    def receipt_query_param
+      return '' unless env['omniauth.error.receipt']
+
+      "&receipt=#{Rack::Utils.escape(env.fetch('omniauth.error.receipt'))}"
     end
 
     def strategy_path_prefix

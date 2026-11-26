@@ -13,6 +13,9 @@ versioned together, so those entries cover all of them.
 
 ## [Unreleased]
 
+### Added
+- Failure receipts constrain what a failure may show the browser. `fail!` now issues an `OmniAuth::FailureReceipt` and stores its id in `env['omniauth.error.receipt']`; the default failure endpoint adds it to the redirect as the `receipt` query param, and the `Authentication failure!` log line names only the approved message key and the receipt id. A Symbol message key is approved as-is; any other key, such as free text from an exception message, is treated as private and reported as `:internal_error` in `env['omniauth.error.type']`, the log, and the redirect. The new `OmniAuth.config.on_failure_receipt` hook receives each receipt with the original exception (including its backtrace), the failure phase (`:setup`, `:request`, or `:callback`), and the strategy name, so controlled monitoring can recover every cause by receipt id. Custom `on_failure` endpoints are unaffected: they still receive `omniauth.error`, `omniauth.error.type`, and `omniauth.error.strategy`, and their response status passes through untouched.
+
 ## [2.4.2] - 2026-11-18
 
 ### Added

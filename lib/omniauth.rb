@@ -15,6 +15,7 @@ module OmniAuth
   autoload :Form,     'omniauth/form'
   autoload :AuthHash, 'omniauth/auth_hash'
   autoload :FailureEndpoint, 'omniauth/failure_endpoint'
+  autoload :FailureReceipt, 'omniauth/failure_receipt'
   autoload :AuthenticityTokenProtection, 'omniauth/authenticity_token_protection'
 
   def self.strategies
@@ -35,6 +36,7 @@ module OmniAuth
         :camelizations => {},
         :path_prefix => '/auth',
         :on_failure => FailureEndpoint,
+        :on_failure_receipt => nil,
         :failure_raise_out_environments => ['development'],
         :request_validation_phase => AuthenticityTokenProtection,
         :before_request_phase   => nil,
@@ -62,6 +64,14 @@ module OmniAuth
         @on_failure = block
       else
         @on_failure
+      end
+    end
+
+    def on_failure_receipt(&block)
+      if block_given?
+        @on_failure_receipt = block
+      else
+        @on_failure_receipt
       end
     end
 
@@ -148,7 +158,7 @@ module OmniAuth
     end
 
     attr_reader :max_remembered_sign_ins, :max_remembered_params_bytesize
-    attr_writer :on_failure, :before_callback_phase, :before_options_phase, :before_request_phase, :after_request_phase, :request_validation_phase
+    attr_writer :on_failure, :on_failure_receipt, :before_callback_phase, :before_options_phase, :before_request_phase, :after_request_phase, :request_validation_phase
     attr_accessor :failure_raise_out_environments, :path_prefix, :allowed_request_methods, :form_css,
                   :test_mode, :mock_auth, :full_host, :camelizations, :logger, :silence_get_warning,
                   :allowed_hosts

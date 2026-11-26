@@ -83,23 +83,25 @@ describe OmniAuth::Strategy do
   end
 
   describe '#fail!' do
-    it 'provides exception information when one is provided' do
+    it 'logs the approved key and the receipt id, not the exception message' do
       env = make_env
       exception = RuntimeError.new('No session!')
 
-      expect(OmniAuth.logger).to receive(:error).with(
-        "(test) Authentication failure! failed: #{exception.class}, #{exception.message}"
-      )
+      expect(OmniAuth.logger).to receive(:error) do |message|
+        expect(message).to match(/\A\(test\) Authentication failure! failed encountered\. Receipt: [0-9a-f]{16}\z/)
+        expect(message).not_to include('No session!')
+      end
 
       ExampleStrategy.new(app, :failure => :failed, :failure_exception => exception).call(env)
     end
 
-    it 'provides a generic message when not provided an exception' do
+    it 'treats a non-Symbol message key as private text' do
       env = make_env
 
-      expect(OmniAuth.logger).to receive(:error).with(
-        '(test) Authentication failure! Some Issue encountered.'
-      )
+      expect(OmniAuth.logger).to receive(:error) do |message|
+        expect(message).to match(/\A\(test\) Authentication failure! internal_error encountered\. Receipt: [0-9a-f]{16}\z/)
+        expect(message).not_to include('Some Issue')
+      end
 
       ExampleStrategy.new(app, :failure => 'Some Issue').call(env)
     end
@@ -117,10 +119,34 @@ describe OmniAuth::Strategy do
       it 'records the failure in the env and returns the on_failure response' do
         exception = RuntimeError.new('boom')
 
-        expect(strategy.fail!('invalid_credentials', exception)).to eq([401, {}, [':invalid_credentials']])
+        expect(strategy.fail!(:invalid_credentials, exception)).to eq([401, {}, [':invalid_credentials']])
         expect(env['omniauth.error']).to equal(exception)
         expect(env['omniauth.error.type']).to eq(:invalid_credentials)
         expect(env['omniauth.error.strategy']).to equal(strategy)
+      end
+
+      it 'keeps a non-Symbol message key out of the env and issues a receipt for it' do
+        exception = RuntimeError.new('boom')
+
+        expect(strategy.fail!('invalid_credentials', exception)).to eq([401, {}, [':internal_error']])
+        expect(env['omniauth.error']).to equal(exception)
+        expect(env['omniauth.error.type']).to eq(:internal_error)
+        expect(env['omniauth.error.receipt']).to match(/\A[0-9a-f]{16}\z/)
+      end
+
+      it 'emits the receipt to the controlled failure event' do
+        receipts = []
+        allow(OmniAuth.config).to receive(:on_failure_receipt).and_return(lambda { |receipt| receipts << receipt })
+        exception = RuntimeError.new('boom')
+
+        strategy.fail!(:invalid_credentials, exception)
+
+        expect(receipts.size).to eq(1)
+        receipt = receipts.first
+        expect(receipt.id).to eq(env['omniauth.error.receipt'])
+        expect(receipt.message_key).to eq(:invalid_credentials)
+        expect(receipt.error).to equal(exception)
+        expect(receipt.strategy_name).to eq('test')
       end
 
       it 'does not require an exception' do
@@ -128,7 +154,7 @@ describe OmniAuth::Strategy do
         expect(env).to include('omniauth.error' => nil, 'omniauth.error.type' => :timeout)
       end
 
-      it "logs the exception's message" do
+      it "does not log the exception's private message" do
         exception_class = Class.new(StandardError) do
           def message
             'custom message'
@@ -136,7 +162,10 @@ describe OmniAuth::Strategy do
         end
         stub_const('CustomError', exception_class)
 
-        expect(OmniAuth.logger).to receive(:error).with('(test) Authentication failure! oops: CustomError, custom message')
+        expect(OmniAuth.logger).to receive(:error) do |message|
+          expect(message).to match(/\A\(test\) Authentication failure! oops encountered\. Receipt: [0-9a-f]{16}\z/)
+          expect(message).not_to include('custom message')
+        end
         strategy.fail!(:oops, CustomError.new)
       end
     end
@@ -1341,6 +1370,20 @@ describe OmniAuth::Strategy do
           expect(strategy).to receive(:fail!).with('Some error in authentication', kind_of(AuthError))
           strategy.call(make_env('/auth/test', props))
         end
+
+        it 'passes nil to fail!() when reading the error message raises again' do
+          secondary = Class.new(StandardError) do
+            def message
+              raise 'secondary explosion'
+            end
+          end
+          strategy = Class.new(ExampleStrategy) do
+            define_method(:request_phase) { raise secondary, 'primary' }
+          end.new(app)
+
+          expect(strategy).to receive(:fail!).with(nil, kind_of(secondary))
+          strategy.call(make_env('/auth/test', props))
+        end
       end
     end
 
@@ -1507,7 +1550,7 @@ describe OmniAuth::Strategy do
 
         it 'runs the request phase when :form is false' do
           @options = {:form => false}
-          expect(strategy.call(make_env)).to eq([401, {}, ['Request Phase']])
+          expect(strategy.call(make_env)).to eq([401, {}, ['internal_error']])
         end
 
         it 'does not store the referer as the origin when origin_param is disabled' do

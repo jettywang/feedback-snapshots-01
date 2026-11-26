@@ -136,5 +136,20 @@ describe OmniAuth::FailureEndpoint do
       _, head = *subject.call(env.merge('omniauth.error.type' => 'Connection refused!'))
       expect(head['Location']).to be_include('message=Connection+refused%21')
     end
+
+    it 'includes the receipt id after the message if one is present' do
+      _, head = *subject.call(env.merge('omniauth.error.receipt' => '9f8e7d6c5b4a3210'))
+      expect(head['Location']).to eq('/auth/failure?message=invalid_request&receipt=9f8e7d6c5b4a3210&strategy=test')
+    end
+
+    it 'escapes the receipt id' do
+      _, head = *subject.call(env.merge('omniauth.error.receipt' => 'a b'))
+      expect(head['Location']).to be_include('receipt=a+b')
+    end
+
+    it 'omits the receipt param when no receipt was issued' do
+      _, head = *subject.call(env)
+      expect(head['Location']).not_to include('receipt')
+    end
   end
 end

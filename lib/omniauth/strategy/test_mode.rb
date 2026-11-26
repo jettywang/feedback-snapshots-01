@@ -20,6 +20,7 @@ module OmniAuth
 
       def mock_request_call
         setup_phase
+        @failure_phase = :request
 
         run_hook(:request_validation_phase)
 
@@ -37,6 +38,7 @@ module OmniAuth
 
       def mock_callback_call
         setup_phase
+        @failure_phase = :callback
 
         origin = session.delete('omniauth.origin')
         env['omniauth.origin'] ||= origin

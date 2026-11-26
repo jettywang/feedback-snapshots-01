@@ -329,13 +329,42 @@ with the environment, which also includes:
 | `omniauth.error` | The exception that caused the failure, if there was one. |
 | `omniauth.error.type` | A symbol describing the failure, such as `:invalid_credentials`. |
 | `omniauth.error.strategy` | The strategy instance that failed. |
+| `omniauth.error.receipt` | The id of the failure receipt issued for this failure. |
 
 `omniauth.origin` and `omniauth.params` come from the user's request, so
 treat them like any other request params and validate them before use.
 
 The default `on_failure` raises the error in development and otherwise
-redirects to `/auth/failure` with the `message`, `strategy`, and
-`origin` as query string parameters.
+redirects to `/auth/failure` with the `message`, `receipt`, `strategy`,
+and `origin` as query string parameters.
+
+### Failure Receipts
+
+Everything the browser may learn about a failure is constrained at the
+egress: the redirect above, and the `Authentication failure!` log line,
+carry only the approved message key and the id of a
+`OmniAuth::FailureReceipt`. A Symbol message key is a constant the
+strategy chose and is approved as-is; anything else, such as free text
+from an exception message, is treated as private and shown as
+`:internal_error`. The user can quote the receipt id to support, but the
+private details of the failure never leave the server.
+
+Each failure is also handed to `OmniAuth.config.on_failure_receipt` (nil
+by default) as a `OmniAuth::FailureReceipt`, so controlled monitoring can
+recover the original exception (with its backtrace), the phase the
+failure happened in (`:setup`, `:request`, or `:callback`), and the
+strategy's name by the receipt id:
+
+```ruby
+OmniAuth.config.on_failure_receipt = lambda do |receipt|
+  ErrorMonitor.report(
+    receipt.error,
+    :receipt => receipt.id,
+    :phase => receipt.phase,
+    :strategy => receipt.strategy_name
+  )
+end
+```
 
 ## Session Cookies and SameSite
 OmniAuth keeps its state between the request and callback phases (for

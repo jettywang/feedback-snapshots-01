@@ -16,6 +16,12 @@ module OmniAuth
   # A configuration hook. Hooks set to nil or false are skipped.
   type hook = _EnvCallable | false | nil
 
+  # Anything that can be called with a failure receipt: a proc, a lambda,
+  # or an object that responds to #call.
+  interface _ReceiptCallable
+    def call: (FailureReceipt) -> untyped
+  end
+
   class Error < StandardError
   end
 
@@ -55,6 +61,9 @@ module OmniAuth
     def on_failure: () { (env) -> untyped } -> Proc
                   | () -> _EnvCallable
 
+    def on_failure_receipt: () { (FailureReceipt) -> untyped } -> Proc
+                          | () -> _ReceiptCallable?
+
     def before_callback_phase: () { (env) -> untyped } -> Proc
                              | () -> hook
 
@@ -82,6 +91,7 @@ module OmniAuth
     attr_reader max_remembered_params_bytesize: Integer
 
     attr_writer on_failure: _EnvCallable
+    attr_writer on_failure_receipt: _ReceiptCallable?
     attr_writer before_callback_phase: hook
     attr_writer before_options_phase: hook
     attr_writer before_request_phase: hook
@@ -230,6 +240,25 @@ module OmniAuth
     def strategy_name_query_param: () -> String
 
     def origin_query_param: () -> String
+
+    def receipt_query_param: () -> String
+  end
+
+  # A server-side record of one authentication failure: the original
+  # exception, the failure phase, and the strategy name, looked up by the
+  # receipt id the browser sees.
+  class FailureReceipt
+    PUBLIC_FALLBACK_KEY: Symbol
+
+    attr_reader id: String
+    attr_reader message_key: String | Symbol | nil
+    attr_reader error: Exception?
+    attr_reader phase: Symbol?
+    attr_reader strategy_name: String
+
+    def initialize: (message_key: String | Symbol | nil, error: Exception?, phase: Symbol?, strategy_name: String) -> void
+
+    def public_message_key: () -> Symbol
   end
 
   # Builds the HTML form some strategies show in their request phase.
@@ -300,7 +329,7 @@ module OmniAuth
       def setup_phase: () -> void
       def call_app!: (?env env) -> rack_response
       def redirect: (String uri) -> rack_response
-      def fail!: (String | Symbol message_key, ?Exception? exception) -> rack_response
+      def fail!: (String | Symbol | nil message_key, ?Exception? exception) -> rack_response
       def store_origin: () -> void
       def omniauth_params: () -> Hash[String, untyped]
       def request_call?: () -> boolish
@@ -511,6 +540,9 @@ module OmniAuth
 
       def mock_callback_call: () -> rack_response
 
+      # The phase a failure is reported against; shared with Strategy.
+      @failure_phase: Symbol?
+
       private
 
       # Defined in Strategy.
@@ -527,6 +559,9 @@ module OmniAuth
 
     # Called with the Rack env; nil until then.
     @env: env?
+
+    # The phase a failure is reported against; nil outside the phases.
+    @failure_phase: Symbol?
 
     def inspect: () -> String
 
@@ -584,7 +619,7 @@ module OmniAuth
 
     def user_info: () -> Hash[untyped, untyped]
 
-    def fail!: (String | Symbol message_key, ?Exception? exception) -> rack_response
+    def fail!: (String | Symbol | nil message_key, ?Exception? exception) -> rack_response
 
     @app: Rack::_Application
     @options: Options
@@ -615,6 +650,10 @@ module OmniAuth
     def ascii_compatible_uri: [T < Object] (T uri) -> (T | String)
 
     def handle_phase_error: (StandardError error) -> rack_response
+
+    def phase_error_message_key: (StandardError error) -> String?
+
+    def with_failure_phase: [T] (Symbol phase) { () -> T } -> T
 
     def run_hook: (Symbol name) -> void
 

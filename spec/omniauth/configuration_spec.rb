@@ -17,6 +17,7 @@ describe OmniAuth::Configuration do
         :camelizations => {},
         :path_prefix => '/auth',
         :on_failure => OmniAuth::FailureEndpoint,
+        :on_failure_receipt => nil,
         :failure_raise_out_environments => ['development'],
         :request_validation_phase => OmniAuth::AuthenticityTokenProtection,
         :before_request_phase => nil,
@@ -60,6 +61,7 @@ describe OmniAuth::Configuration do
   before do
     @old_path_prefix              = OmniAuth.config.path_prefix
     @old_on_failure               = OmniAuth.config.on_failure
+    @old_on_failure_receipt       = OmniAuth.config.on_failure_receipt
     @old_before_callback_phase    = OmniAuth.config.before_callback_phase
     @old_before_options_phase     = OmniAuth.config.before_options_phase
     @old_before_request_phase     = OmniAuth.config.before_request_phase
@@ -75,6 +77,7 @@ describe OmniAuth::Configuration do
     OmniAuth.configure do |config|
       config.path_prefix              = @old_path_prefix
       config.on_failure               = @old_on_failure
+      config.on_failure_receipt       = @old_on_failure_receipt
       config.before_callback_phase    = @old_before_callback_phase
       config.before_options_phase     = @old_before_options_phase
       config.before_request_phase     = @old_before_request_phase
@@ -101,6 +104,16 @@ describe OmniAuth::Configuration do
     end
 
     expect(OmniAuth.config.on_failure.call).to eq('yoyo')
+  end
+
+  it 'is able to set the on_failure_receipt handler' do
+    OmniAuth.configure do |config|
+      config.on_failure_receipt do
+        'yoyo'
+      end
+    end
+
+    expect(OmniAuth.config.on_failure_receipt.call).to eq('yoyo')
   end
 
   it 'is able to set hook on option_call' do

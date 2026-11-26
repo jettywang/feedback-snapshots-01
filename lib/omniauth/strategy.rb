@@ -167,6 +167,7 @@ module OmniAuth
     # Performs the steps necessary to run the request phase of a strategy.
     def request_call
       setup_phase
+      @failure_phase = :request
       log :debug, 'Request phase initiated.'
       warn_if_using_request_host
       return invalid_host! unless allowed_host?
@@ -223,6 +224,7 @@ module OmniAuth
     # Performs the steps necessary to run the callback phase of a strategy.
     def callback_call
       setup_phase
+      @failure_phase = :callback
       log :debug, 'Callback phase initiated.'
       return invalid_host! unless allowed_host?
 
@@ -246,11 +248,11 @@ module OmniAuth
       setup = options[:setup]
       if setup.respond_to?(:call)
         log :debug, 'Setup endpoint detected, running now.'
-        setup.call(env)
+        with_failure_phase(:setup) { setup.call(env) }
       elsif setup
         log :debug, 'Calling through to underlying application for setup.'
         setup_env = env.merge('PATH_INFO' => setup_path, 'REQUEST_METHOD' => 'GET')
-        call_app!(setup_env)
+        with_failure_phase(:setup) { call_app!(setup_env) }
       end
     end
 
@@ -306,16 +308,29 @@ module OmniAuth
       {}
     end
 
+    # Reports an authentication failure. Everything the browser may learn
+    # is constrained here at the egress: the env and the log carry only the
+    # approved message key (a developer-chosen Symbol, anything else is
+    # private text) and the id of a FailureReceipt, which keeps the
+    # original exception, the failure phase, and the strategy name for
+    # OmniAuth.config.on_failure_receipt to hand to controlled monitoring.
     def fail!(message_key, exception = nil)
-      env['omniauth.error'] = exception
-      env['omniauth.error.type'] = message_key.to_sym
-      env['omniauth.error.strategy'] = self
+      receipt = OmniAuth::FailureReceipt.new(
+        :message_key => message_key,
+        :error => exception,
+        :phase => @failure_phase,
+        :strategy_name => name
+      )
 
-      if exception
-        log :error, "Authentication failure! #{message_key}: #{exception.class}, #{exception.message}"
-      else
-        log :error, "Authentication failure! #{message_key} encountered."
-      end
+      env['omniauth.error'] = exception
+      env['omniauth.error.type'] = receipt.public_message_key
+      env['omniauth.error.strategy'] = self
+      env['omniauth.error.receipt'] = receipt.id
+
+      log :error, "Authentication failure! #{receipt.public_message_key} encountered. Receipt: #{receipt.id}"
+
+      receipt_handler = OmniAuth.config.on_failure_receipt
+      receipt_handler.call(receipt) if receipt_handler
 
       OmniAuth.config.on_failure.call(env)
     end
@@ -414,7 +429,26 @@ module OmniAuth
     def handle_phase_error(error)
       raise error if env.delete('omniauth.error.app')
 
-      fail!(error.message, error)
+      fail!(phase_error_message_key(error), error)
+    end
+
+    # The message of the error a phase raised, or nil when even reading
+    # the message raises again: the failure receipt must still be
+    # produced, and nothing but the approved category may leave through
+    # the log or the failure redirect.
+    def phase_error_message_key(error)
+      error.message
+    rescue StandardError
+      nil
+    end
+
+    # Sets the failure phase for the block. The phase is deliberately not
+    # restored afterwards: an error the block raises is reported against
+    # this phase only after the block has unwound, and the caller moves
+    # the phase on itself once the block has completed.
+    def with_failure_phase(phase)
+      @failure_phase = phase
+      yield
     end
 
     # Calls the named OmniAuth.config hook (such as :before_request_phase)
