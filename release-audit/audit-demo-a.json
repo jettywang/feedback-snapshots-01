@@ -1,0 +1,323 @@
+{
+  "project": "/private/tmp/claude-501/release-audit-demo",
+  "package": "demo-pkg",
+  "version": "0.4.2",
+  "vcs_detected": true,
+  "vcs_ignored_files": [
+    "build.log",
+    "secrets/ignored_secret.txt",
+    "secrets/not_included.txt"
+  ],
+  "declared_policy": {
+    "packages": [
+      {
+        "include": "demo_pkg",
+        "from": "src"
+      },
+      {
+        "include": "sdist_only_pkg",
+        "format": "sdist"
+      },
+      {
+        "include": "wheel_only_pkg",
+        "format": "wheel"
+      },
+      {
+        "include": "relocated",
+        "from": "etc",
+        "to": "moved_pkg"
+      }
+    ],
+    "include": [
+      {
+        "path": "config/settings.toml"
+      },
+      {
+        "path": "config/wheel_only.json",
+        "format": "wheel"
+      },
+      "notes.txt",
+      "secrets/ignored_secret.txt"
+    ],
+    "exclude": [
+      "**/internal_only.txt"
+    ],
+    "build": null
+  },
+  "formats": {
+    "sdist": {
+      "selected": [
+        {
+          "source": "LICENSE",
+          "in_archive": "LICENSE",
+          "reasons": [
+            "sdist mandatory member (pyproject.toml/readme/license/script): SdistBuilder.find_files_to_add()"
+          ]
+        },
+        {
+          "source": "README.md",
+          "in_archive": "README.md",
+          "reasons": [
+            "sdist mandatory member (pyproject.toml/readme/license/script): SdistBuilder.find_files_to_add()"
+          ]
+        },
+        {
+          "source": "config/settings.toml",
+          "in_archive": "config/settings.toml",
+          "reasons": [
+            "explicit include path='config/settings.toml', formats=['sdist'] (bare string defaults to sdist-only)"
+          ]
+        },
+        {
+          "source": "etc/relocated/__init__.py",
+          "in_archive": "etc/relocated/__init__.py",
+          "reasons": [
+            "packages entry include='relocated', from='etc', to='moved_pkg' (wheel-only relocation), formats=['sdist', 'wheel']"
+          ]
+        },
+        {
+          "source": "etc/relocated/thing.py",
+          "in_archive": "etc/relocated/thing.py",
+          "reasons": [
+            "packages entry include='relocated', from='etc', to='moved_pkg' (wheel-only relocation), formats=['sdist', 'wheel']"
+          ]
+        },
+        {
+          "source": "notes.txt",
+          "in_archive": "notes.txt",
+          "reasons": [
+            "explicit include path='notes.txt', formats=['sdist'] (bare string defaults to sdist-only)"
+          ]
+        },
+        {
+          "source": "pyproject.toml",
+          "in_archive": "pyproject.toml",
+          "reasons": [
+            "sdist mandatory member (pyproject.toml/readme/license/script): SdistBuilder.find_files_to_add()"
+          ]
+        },
+        {
+          "source": "sdist_only_pkg/__init__.py",
+          "in_archive": "sdist_only_pkg/__init__.py",
+          "reasons": [
+            "packages entry include='sdist_only_pkg', formats=['sdist']"
+          ]
+        },
+        {
+          "source": "sdist_only_pkg/sdist_code.py",
+          "in_archive": "sdist_only_pkg/sdist_code.py",
+          "reasons": [
+            "packages entry include='sdist_only_pkg', formats=['sdist']"
+          ]
+        },
+        {
+          "source": "secrets/ignored_secret.txt",
+          "in_archive": "secrets/ignored_secret.txt",
+          "reasons": [
+            "explicit include path='secrets/ignored_secret.txt', formats=['sdist'] (bare string defaults to sdist-only)",
+            "explicit include overrides VCS ignore (Builder.find_excluded_files subtracts explicit includes)"
+          ]
+        },
+        {
+          "source": "src/demo_pkg/__init__.py",
+          "in_archive": "src/demo_pkg/__init__.py",
+          "reasons": [
+            "packages entry include='demo_pkg', from='src', formats=['sdist', 'wheel']"
+          ]
+        },
+        {
+          "source": "src/demo_pkg/app.py",
+          "in_archive": "src/demo_pkg/app.py",
+          "reasons": [
+            "packages entry include='demo_pkg', from='src', formats=['sdist', 'wheel']"
+          ]
+        },
+        {
+          "source": "src/demo_pkg/data.json",
+          "in_archive": "src/demo_pkg/data.json",
+          "reasons": [
+            "packages entry include='demo_pkg', from='src', formats=['sdist', 'wheel']"
+          ]
+        },
+        {
+          "source": "src/demo_pkg/sub/__init__.py",
+          "in_archive": "src/demo_pkg/sub/__init__.py",
+          "reasons": [
+            "packages entry include='demo_pkg', from='src', formats=['sdist', 'wheel']"
+          ]
+        },
+        {
+          "source": "src/demo_pkg/sub/helper.py",
+          "in_archive": "src/demo_pkg/sub/helper.py",
+          "reasons": [
+            "packages entry include='demo_pkg', from='src', formats=['sdist', 'wheel']"
+          ]
+        }
+      ],
+      "excluded": [
+        {
+          "path": "build.log",
+          "reasons": [
+            "VCS ignore (.gitignore via git ls-files --others -i)"
+          ]
+        },
+        {
+          "path": "etc/relocated/internal_only.txt",
+          "reasons": [
+            "tool.poetry.exclude glob"
+          ]
+        },
+        {
+          "path": "secrets/not_included.txt",
+          "reasons": [
+            "VCS ignore (.gitignore via git ls-files --others -i)"
+          ]
+        },
+        {
+          "path": "src/demo_pkg/internal_only.txt",
+          "reasons": [
+            "tool.poetry.exclude glob"
+          ]
+        }
+      ],
+      "not_included_by_any_rule": [
+        ".gitignore",
+        "config/wheel_only.json",
+        "wheel_only_pkg/__init__.py",
+        "wheel_only_pkg/wheel_code.py"
+      ],
+      "generated_metadata": [
+        "PKG-INFO (always synthesized from package metadata)"
+      ],
+      "undeterminable": []
+    },
+    "wheel": {
+      "selected": [
+        {
+          "source": "config/wheel_only.json",
+          "in_archive": "config/wheel_only.json",
+          "reasons": [
+            "explicit include path='config/wheel_only.json', formats=['wheel'] (bare string defaults to sdist-only)"
+          ]
+        },
+        {
+          "source": "etc/relocated/__init__.py",
+          "in_archive": "moved_pkg/relocated/__init__.py",
+          "reasons": [
+            "packages entry include='relocated', from='etc', to='moved_pkg' (wheel-only relocation), formats=['sdist', 'wheel']"
+          ]
+        },
+        {
+          "source": "etc/relocated/thing.py",
+          "in_archive": "moved_pkg/relocated/thing.py",
+          "reasons": [
+            "packages entry include='relocated', from='etc', to='moved_pkg' (wheel-only relocation), formats=['sdist', 'wheel']"
+          ]
+        },
+        {
+          "source": "src/demo_pkg/__init__.py",
+          "in_archive": "demo_pkg/__init__.py",
+          "reasons": [
+            "packages entry include='demo_pkg', from='src', formats=['sdist', 'wheel']"
+          ]
+        },
+        {
+          "source": "src/demo_pkg/app.py",
+          "in_archive": "demo_pkg/app.py",
+          "reasons": [
+            "packages entry include='demo_pkg', from='src', formats=['sdist', 'wheel']"
+          ]
+        },
+        {
+          "source": "src/demo_pkg/data.json",
+          "in_archive": "demo_pkg/data.json",
+          "reasons": [
+            "packages entry include='demo_pkg', from='src', formats=['sdist', 'wheel']"
+          ]
+        },
+        {
+          "source": "src/demo_pkg/sub/__init__.py",
+          "in_archive": "demo_pkg/sub/__init__.py",
+          "reasons": [
+            "packages entry include='demo_pkg', from='src', formats=['sdist', 'wheel']"
+          ]
+        },
+        {
+          "source": "src/demo_pkg/sub/helper.py",
+          "in_archive": "demo_pkg/sub/helper.py",
+          "reasons": [
+            "packages entry include='demo_pkg', from='src', formats=['sdist', 'wheel']"
+          ]
+        },
+        {
+          "source": "wheel_only_pkg/__init__.py",
+          "in_archive": "wheel_only_pkg/__init__.py",
+          "reasons": [
+            "packages entry include='wheel_only_pkg', formats=['wheel']"
+          ]
+        },
+        {
+          "source": "wheel_only_pkg/wheel_code.py",
+          "in_archive": "wheel_only_pkg/wheel_code.py",
+          "reasons": [
+            "packages entry include='wheel_only_pkg', formats=['wheel']"
+          ]
+        }
+      ],
+      "excluded": [
+        {
+          "path": "build.log",
+          "reasons": [
+            "VCS ignore (.gitignore via git ls-files --others -i)"
+          ]
+        },
+        {
+          "path": "etc/relocated/internal_only.txt",
+          "reasons": [
+            "tool.poetry.exclude glob"
+          ]
+        },
+        {
+          "path": "secrets/ignored_secret.txt",
+          "reasons": [
+            "VCS ignore (.gitignore via git ls-files --others -i)"
+          ]
+        },
+        {
+          "path": "secrets/not_included.txt",
+          "reasons": [
+            "VCS ignore (.gitignore via git ls-files --others -i)"
+          ]
+        },
+        {
+          "path": "src/demo_pkg/internal_only.txt",
+          "reasons": [
+            "tool.poetry.exclude glob"
+          ]
+        }
+      ],
+      "not_included_by_any_rule": [
+        ".gitignore",
+        "LICENSE",
+        "README.md",
+        "config/settings.toml",
+        "notes.txt",
+        "pyproject.toml",
+        "sdist_only_pkg/__init__.py",
+        "sdist_only_pkg/sdist_code.py"
+      ],
+      "generated_metadata": [
+        "demo_pkg-0.4.2.dist-info/METADATA",
+        "demo_pkg-0.4.2.dist-info/WHEEL",
+        "demo_pkg-0.4.2.dist-info/RECORD",
+        "demo_pkg-0.4.2.dist-info/entry_points.txt (only if scripts declared)",
+        "demo_pkg-0.4.2.dist-info/licenses/* (declared license files)"
+      ],
+      "undeterminable": [
+        {
+          "reason": "no build script: wheel tag is fixed (py3-none-any); only dist-info metadata above is generated"
+        }
+      ]
+    }
+  }
+}

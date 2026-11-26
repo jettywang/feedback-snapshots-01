@@ -1,0 +1,7 @@
+wheel archive : my_package-0.1.0-cp312-cp312-macosx_26_0_arm64.whl (6 entries)
+note: sdist cannot be built in this layout (package missing until
+      the build script runs); the audit flagged the same failure.
+[PASS] audit predicted zero source members and flagged undeterminability
+[PASS] every real wheel entry is script-generated or backend metadata
+       script-generated (source stage could not predict): ["my_package/__init__.py", "my_package/foo.py"]
+       backend-generated: ["my_package-0.1.0.dist-info/METADATA", "my_package-0.1.0.dist-info/RECORD", "my_package-0.1.0.dist-info/WHEEL", "my_package-0.1.0.dist-info/licenses/LICENSE"]

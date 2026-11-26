@@ -1,0 +1,6 @@
+sdist archive : demo_pkg-0.4.2.tar.gz (16 entries)
+wheel archive : demo_pkg-0.4.2-py3-none-any.whl (14 entries)
+[PASS] sdist source membership matches audit; remainder is generated metadata
+       backend-generated (flagged): ["PKG-INFO"]
+[PASS] wheel source membership matches audit; remainder is dist-info
+       backend-generated (flagged): ["demo_pkg-0.4.2.dist-info/METADATA", "demo_pkg-0.4.2.dist-info/RECORD", "demo_pkg-0.4.2.dist-info/WHEEL", "demo_pkg-0.4.2.dist-info/licenses/LICENSE"]

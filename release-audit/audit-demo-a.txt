@@ -1,0 +1,98 @@
+# Release-scope audit: demo-pkg 0.4.2
+project: /private/tmp/claude-501/release-audit-demo
+vcs detected: True
+vcs ignored: build.log, secrets/ignored_secret.txt, secrets/not_included.txt
+declared policy: {"packages": [{"include": "demo_pkg", "from": "src"}, {"include": "sdist_only_pkg", "format": "sdist"}, {"include": "wheel_only_pkg", "format": "wheel"}, {"include": "relocated", "from": "etc", "to": "moved_pkg"}], "include": [{"path": "config/settings.toml"}, {"path": "config/wheel_only.json", "format": "wheel"}, "notes.txt", "secrets/ignored_secret.txt"], "exclude": ["**/internal_only.txt"], "build": null}
+
+== sdist ==
+-- selected (15) --
+  + LICENSE
+      why: sdist mandatory member (pyproject.toml/readme/license/script): SdistBuilder.find_files_to_add()
+  + README.md
+      why: sdist mandatory member (pyproject.toml/readme/license/script): SdistBuilder.find_files_to_add()
+  + config/settings.toml
+      why: explicit include path='config/settings.toml', formats=['sdist'] (bare string defaults to sdist-only)
+  + etc/relocated/__init__.py
+      why: packages entry include='relocated', from='etc', to='moved_pkg' (wheel-only relocation), formats=['sdist', 'wheel']
+  + etc/relocated/thing.py
+      why: packages entry include='relocated', from='etc', to='moved_pkg' (wheel-only relocation), formats=['sdist', 'wheel']
+  + notes.txt
+      why: explicit include path='notes.txt', formats=['sdist'] (bare string defaults to sdist-only)
+  + pyproject.toml
+      why: sdist mandatory member (pyproject.toml/readme/license/script): SdistBuilder.find_files_to_add()
+  + sdist_only_pkg/__init__.py
+      why: packages entry include='sdist_only_pkg', formats=['sdist']
+  + sdist_only_pkg/sdist_code.py
+      why: packages entry include='sdist_only_pkg', formats=['sdist']
+  + secrets/ignored_secret.txt
+      why: explicit include path='secrets/ignored_secret.txt', formats=['sdist'] (bare string defaults to sdist-only)
+      why: explicit include overrides VCS ignore (Builder.find_excluded_files subtracts explicit includes)
+  + src/demo_pkg/__init__.py
+      why: packages entry include='demo_pkg', from='src', formats=['sdist', 'wheel']
+  + src/demo_pkg/app.py
+      why: packages entry include='demo_pkg', from='src', formats=['sdist', 'wheel']
+  + src/demo_pkg/data.json
+      why: packages entry include='demo_pkg', from='src', formats=['sdist', 'wheel']
+  + src/demo_pkg/sub/__init__.py
+      why: packages entry include='demo_pkg', from='src', formats=['sdist', 'wheel']
+  + src/demo_pkg/sub/helper.py
+      why: packages entry include='demo_pkg', from='src', formats=['sdist', 'wheel']
+-- excluded (4) --
+  - build.log  [VCS ignore (.gitignore via git ls-files --others -i)]
+  - etc/relocated/internal_only.txt  [tool.poetry.exclude glob]
+  - secrets/not_included.txt  [VCS ignore (.gitignore via git ls-files --others -i)]
+  - src/demo_pkg/internal_only.txt  [tool.poetry.exclude glob]
+-- unreferenced by any rule (4) --
+  ~ .gitignore
+  ~ config/wheel_only.json
+  ~ wheel_only_pkg/__init__.py
+  ~ wheel_only_pkg/wheel_code.py
+-- generated at build time (not source files) --
+  # PKG-INFO (always synthesized from package metadata)
+-- source-stage UNDETERMINABLE --
+
+== wheel ==
+-- selected (10) --
+  + config/wheel_only.json
+      why: explicit include path='config/wheel_only.json', formats=['wheel'] (bare string defaults to sdist-only)
+  + etc/relocated/__init__.py -> moved_pkg/relocated/__init__.py
+      why: packages entry include='relocated', from='etc', to='moved_pkg' (wheel-only relocation), formats=['sdist', 'wheel']
+  + etc/relocated/thing.py -> moved_pkg/relocated/thing.py
+      why: packages entry include='relocated', from='etc', to='moved_pkg' (wheel-only relocation), formats=['sdist', 'wheel']
+  + src/demo_pkg/__init__.py -> demo_pkg/__init__.py
+      why: packages entry include='demo_pkg', from='src', formats=['sdist', 'wheel']
+  + src/demo_pkg/app.py -> demo_pkg/app.py
+      why: packages entry include='demo_pkg', from='src', formats=['sdist', 'wheel']
+  + src/demo_pkg/data.json -> demo_pkg/data.json
+      why: packages entry include='demo_pkg', from='src', formats=['sdist', 'wheel']
+  + src/demo_pkg/sub/__init__.py -> demo_pkg/sub/__init__.py
+      why: packages entry include='demo_pkg', from='src', formats=['sdist', 'wheel']
+  + src/demo_pkg/sub/helper.py -> demo_pkg/sub/helper.py
+      why: packages entry include='demo_pkg', from='src', formats=['sdist', 'wheel']
+  + wheel_only_pkg/__init__.py
+      why: packages entry include='wheel_only_pkg', formats=['wheel']
+  + wheel_only_pkg/wheel_code.py
+      why: packages entry include='wheel_only_pkg', formats=['wheel']
+-- excluded (5) --
+  - build.log  [VCS ignore (.gitignore via git ls-files --others -i)]
+  - etc/relocated/internal_only.txt  [tool.poetry.exclude glob]
+  - secrets/ignored_secret.txt  [VCS ignore (.gitignore via git ls-files --others -i)]
+  - secrets/not_included.txt  [VCS ignore (.gitignore via git ls-files --others -i)]
+  - src/demo_pkg/internal_only.txt  [tool.poetry.exclude glob]
+-- unreferenced by any rule (8) --
+  ~ .gitignore
+  ~ LICENSE
+  ~ README.md
+  ~ config/settings.toml
+  ~ notes.txt
+  ~ pyproject.toml
+  ~ sdist_only_pkg/__init__.py
+  ~ sdist_only_pkg/sdist_code.py
+-- generated at build time (not source files) --
+  # demo_pkg-0.4.2.dist-info/METADATA
+  # demo_pkg-0.4.2.dist-info/WHEEL
+  # demo_pkg-0.4.2.dist-info/RECORD
+  # demo_pkg-0.4.2.dist-info/entry_points.txt (only if scripts declared)
+  # demo_pkg-0.4.2.dist-info/licenses/* (declared license files)
+-- source-stage UNDETERMINABLE --
+  ? no build script: wheel tag is fixed (py3-none-any); only dist-info metadata above is generated
