@@ -1,8 +1,59 @@
 import operator
 
+from jmespath import exceptions
 from jmespath import functions
 from jmespath.compat import string_type
 from numbers import Number
+
+
+def _annotate_evaluation_error(exc, node=None):
+    """Attach diagnostic metadata to an evaluation error.
+
+    Metadata is only added when the exception does not already carry it, so
+    a more precise inner location is preserved.
+    """
+    if getattr(exc, 'phase', None) is None:
+        # Only annotate exceptions we can safely extend.  Built-in exceptions
+        # such as RuntimeError generally accept attributes, but slots-based
+        # extension exceptions may not; diagnostics degrade to ``unknown``
+        # rather than failing the query twice.
+        try:
+            exc.phase = exceptions.PHASE_EVALUATION
+        except Exception:
+            pass
+    function_name = None
+    span = None
+    location = 'unknown'
+    if node is not None:
+        function_name = node.get('value')
+        candidate = getattr(node, 'span', None)
+        if isinstance(exc, exceptions.JMESPathError):
+            # Errors raised by the evaluator itself know which function was
+            # executing, so we can highlight the call site.  Exceptions from
+            # opaque extension code only give us the exception object; those
+            # keep ``span=None`` and ``location='unknown'``.
+            named = getattr(node, 'name_span', None)
+            if named is not None:
+                span = named
+            elif candidate is not None:
+                span = candidate
+            location = 'call_site'
+    if getattr(exc, '_jmespath_function', None) is None and function_name:
+        try:
+            exc._jmespath_function = function_name
+        except Exception:
+            pass
+    if getattr(exc, '_jmespath_location', None) is None:
+        try:
+            exc._jmespath_location = location
+        except Exception:
+            pass
+    if getattr(exc, '_jmespath_span', None) is None and span is not None:
+        try:
+            exc._jmespath_span = span
+        except Exception:
+            pass
+    return exc
 
 
 def _equals(x, y):
@@ -58,7 +109,8 @@ def _is_actual_number(x):
 
 class Options(object):
     """Options to control how a JMESPath function is evaluated."""
-    def __init__(self, dict_cls=None, custom_functions=None):
+    def __init__(self, dict_cls=None, custom_functions=None,
+                 diagnostics=None):
         #: The class to use when creating a dict.  The interpreter
         #  may create dictionaries during the evaluation of a JMESPath
         #  expression.  For example, a multi-select hash will
@@ -69,6 +121,9 @@ class Options(object):
         #  have predictable key ordering.
         self.dict_cls = dict_cls
         self.custom_functions = custom_functions
+        #: Optional :class:`jmespath.diagnostics.Diagnostics` instance.
+        #  When omitted, the historical exception behaviour is unchanged.
+        self.diagnostics = diagnostics
 
 
 class _Expression(object):
@@ -168,7 +223,11 @@ class TreeInterpreter(Visitor):
         for child in node['children']:
             current = self.visit(child, value)
             resolved_args.append(current)
-        return self._functions.call_function(node['value'], resolved_args)
+        try:
+            return self._functions.call_function(node['value'], resolved_args)
+        except Exception as exc:
+            _annotate_evaluation_error(exc, node)
+            raise
 
     def visit_filter_projection(self, node, value):
         base = self.visit(node['children'][0], value)

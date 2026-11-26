@@ -101,6 +101,55 @@ of your dict keys.  To do this you can use either of these options:
     ...               jmespath.Options(dict_cls=collections.OrderedDict))
 
 
+Diagnostics and redacted errors
+-------------------------------
+
+By default JMESPath raises the original exception and performs no reporting.
+Applications that show query errors to less trusted observers (for example a
+tenant facing editor) can opt in to scoped diagnostics.  Diagnostics are
+passed through :class:`jmespath.Options` and produce two views of one
+failure:
+
+* an internal event for trusted sinks, containing the original exception
+  and expression, and
+* a public report containing only an approved code, a fixed message, an
+  optional character span and an opaque correlation identifier.
+
+Both views share the correlation identifier, so internal logs can be joined
+to a public receipt without either side carrying business values.
+
+.. code:: python
+
+    import logging
+    from jmespath import Options, Diagnostics
+
+    internal_events = []
+    public_receipts = []
+    diagnostics = Diagnostics(
+        public=True,
+        internal_sink=internal_events.append,
+        public_sink=public_receipts.append,
+        logger=logging.getLogger('query-diagnostics'),
+    )
+    options = Options(diagnostics=diagnostics)
+
+With ``public=True`` a :class:`jmespath.PublicJMESPathError` is raised.  Its
+``args``, ``str()``, ``repr()``, ``__cause__``, ``__context__`` and normal
+traceback/log formatting contain only approved information.  Trusted
+in-process handlers can still reach the original exception through the
+``internal_error`` property; it is stored out of band and never appears in
+those renderings.
+
+Reports distinguish the ``lexer``, ``parser`` and ``evaluation`` phases.
+Spans are half-open character ranges into the original expression (not byte
+offsets), so they remain correct for expressions containing multi-byte
+characters.  ``location`` is ``exact`` when the position is known,
+``call_site`` for evaluator errors attributed to the function name, and
+``unknown`` when only an opaque exception object is available (for example
+from a third-party extension).
+
+Existing code is unaffected when no ``Diagnostics`` instance is supplied.
+
 Custom Functions
 ~~~~~~~~~~~~~~~~
 

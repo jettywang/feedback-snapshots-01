@@ -1,7 +1,12 @@
 Next Release (TBD)
 ==================
 
-* No changes yet.
+* Add opt-in scoped diagnostics with separate internal events and redacted
+  public error reports, correlated by an opaque identifier.
+* Report lexer/parser/evaluation phases and character-based source spans,
+  including correct spans for expressions containing multi-byte characters.
+* Public errors no longer carry the original exception string, chain or
+  extension details; trusted handlers can use ``internal_error``.
 
 
 1.1.0

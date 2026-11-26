@@ -30,6 +30,7 @@ from jmespath.compat import with_repr_method
 from jmespath import ast
 from jmespath import exceptions
 from jmespath import visitor
+from jmespath.spans import CharacterSpan
 
 
 class Parser(object):
@@ -122,8 +123,10 @@ class Parser(object):
         parsed = self._expression(binding_power=0)
         if not self._current_token() == 'eof':
             t = self._lookahead_token(0)
-            raise exceptions.ParseError(t['start'], t['value'], t['type'],
-                                        "Unexpected token: %s" % t['value'])
+            raise exceptions.ParseError(
+                t['start'], t['value'], t['type'],
+                "Unexpected token: %s" % t['value'],
+                end_position=t.span.end)
         return ParsedResult(expression, parsed)
 
     def _expression(self, binding_power=0):
@@ -146,20 +149,20 @@ class Parser(object):
         return left
 
     def _token_nud_literal(self, token):
-        return ast.literal(token['value'])
+        return ast.literal(token['value'], span=token.span)
 
     def _token_nud_unquoted_identifier(self, token):
-        return ast.field(token['value'])
+        return ast.field(token['value'], span=token.span)
 
     def _token_nud_quoted_identifier(self, token):
-        field = ast.field(token['value'])
+        field = ast.field(token['value'], span=token.span)
         # You can't have a quoted identifier as a function
         # name.
         if self._current_token() == 'lparen':
-            t = self._lookahead_token(0)
             raise exceptions.ParseError(
-                0, t['value'], t['type'],
-                'Quoted identifier not allowed for function names.')
+                token.span.start, token['value'], token['type'],
+                'Quoted identifier not allowed for function names.',
+                end_position=token.span.end)
         return field
 
     def _token_nud_star(self, token):
@@ -248,11 +251,11 @@ class Parser(object):
         return ast.slice(*parts)
 
     def _token_nud_current(self, token):
-        return ast.current_node()
+        return ast.current_node(span=token.span)
 
     def _token_nud_expref(self, token):
         expression = self._expression(self.BINDING_POWER['expref'])
-        return ast.expref(expression)
+        return ast.expref(expression, span=token.span)
 
     def _token_led_dot(self, left):
         if not self._current_token() == 'star':
@@ -261,7 +264,8 @@ class Parser(object):
                 left['children'].append(right)
                 return left
             else:
-                return ast.subexpression([left, right])
+                return ast.subexpression(
+                    [left, right], span=self._span_between(left, right))
         else:
             # We're creating a projection.
             self._advance()
@@ -271,15 +275,17 @@ class Parser(object):
 
     def _token_led_pipe(self, left):
         right = self._expression(self.BINDING_POWER['pipe'])
-        return ast.pipe(left, right)
+        return ast.pipe(left, right, span=self._span_between(left, right))
 
     def _token_led_or(self, left):
         right = self._expression(self.BINDING_POWER['or'])
-        return ast.or_expression(left, right)
+        return ast.or_expression(
+            left, right, span=self._span_between(left, right))
 
     def _token_led_and(self, left):
         right = self._expression(self.BINDING_POWER['and'])
-        return ast.and_expression(left, right)
+        return ast.and_expression(
+            left, right, span=self._span_between(left, right))
 
     def _token_led_lparen(self, left):
         if left['type'] != 'field':
@@ -289,7 +295,8 @@ class Parser(object):
             prev_t = self._lookahead_token(-2)
             raise exceptions.ParseError(
                 prev_t['start'], prev_t['value'], prev_t['type'],
-                "Invalid function name '%s'" % prev_t['value'])
+                "Invalid function name '%s'" % prev_t['value'],
+                end_position=prev_t.span.end)
         name = left['value']
         args = []
         while not self._current_token() == 'rparen':
@@ -297,8 +304,11 @@ class Parser(object):
             if self._current_token() == 'comma':
                 self._match('comma')
             args.append(expression)
+        rparen = self._lookahead_token(0)
         self._match('rparen')
-        function_node = ast.function_expression(name, args)
+        function_node = ast.function_expression(
+            name, args, span=self._span_between(left, rparen),
+            name_span=getattr(left, 'span', None))
         return function_node
 
     def _token_led_filter(self, left):
@@ -365,7 +375,8 @@ class Parser(object):
 
     def _parse_comparator(self, left, comparator):
         right = self._expression(self.BINDING_POWER[comparator])
-        return ast.comparator(comparator, left, right)
+        return ast.comparator(
+            comparator, left, right, span=self._span_between(left, right))
 
     def _parse_multi_select_list(self):
         expressions = []
@@ -376,8 +387,12 @@ class Parser(object):
                 break
             else:
                 self._match('comma')
+        rbracket = self._lookahead_token(0)
         self._match('rbracket')
-        return ast.multi_select_list(expressions)
+        span = None
+        if expressions:
+            span = self._span_between(expressions[0], rbracket)
+        return ast.multi_select_list(expressions, span=span)
 
     def _parse_multi_select_hash(self):
         pairs = []
@@ -397,7 +412,10 @@ class Parser(object):
             elif self._current_token() == 'rbrace':
                 self._match('rbrace')
                 break
-        return ast.multi_select_dict(nodes=pairs)
+        span = None
+        if pairs:
+            span = self._span_between(pairs[0], pairs[-1])
+        return ast.multi_select_dict(nodes=pairs, span=span)
 
     def _parse_projection_rhs(self, binding_power):
         # Parse the right hand side of the projection.
@@ -480,12 +498,20 @@ class Parser(object):
     def _lookahead_token(self, number):
         return self._tokens[self._index + number]
 
+    def _span_between(self, first, second):
+        start = first.span.start if getattr(first, 'span', None) else None
+        end = second.span.end if getattr(second, 'span', None) else None
+        if start is None or end is None or end < start:
+            return None
+        return CharacterSpan(start, end)
+
     def _raise_parse_error_for_token(self, token, reason):
         lex_position = token['start']
         actual_value = token['value']
         actual_type = token['type']
-        raise exceptions.ParseError(lex_position, actual_value,
-                                    actual_type, reason)
+        raise exceptions.ParseError(
+            lex_position, actual_value, actual_type, reason,
+            end_position=token.span.end)
 
     def _raise_parse_error_maybe_eof(self, expected_type, token):
         lex_position = token['start']
@@ -497,7 +523,8 @@ class Parser(object):
         message = 'Expecting: %s, got: %s' % (expected_type,
                                               actual_type)
         raise exceptions.ParseError(
-            lex_position, actual_value, actual_type, message)
+            lex_position, actual_value, actual_type, message,
+            end_position=token.span.end)
 
     @classmethod
     def purge(cls):
@@ -512,9 +539,26 @@ class ParsedResult(object):
         self.parsed = parsed
 
     def search(self, value, options=None):
-        interpreter = visitor.TreeInterpreter(options)
-        result = interpreter.visit(self.parsed, value)
-        return result
+        from jmespath import diagnostics as diagnostics_module
+        reporter = diagnostics_module.from_options(options)
+        if reporter is None or not reporter.enabled:
+            interpreter = visitor.TreeInterpreter(options)
+            return interpreter.visit(self.parsed, value)
+        public_error = None
+        try:
+            interpreter = visitor.TreeInterpreter(options)
+            return interpreter.visit(self.parsed, value)
+        except Exception as exc:
+            report = reporter.record(exc, self.expression)
+            if reporter.public_exception:
+                public_error = diagnostics_module.PublicJMESPathError(
+                    report, internal_error=exc)
+            else:
+                raise
+        # Raise outside the ``except`` block so Python does not implicitly
+        # chain the original (private) exception as ``__context__``.
+        if public_error is not None:
+            raise public_error from None
 
     def _render_dot_file(self):
         """Render the parsed AST as a dot file.
