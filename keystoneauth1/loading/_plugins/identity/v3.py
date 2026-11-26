@@ -14,9 +14,16 @@ from typing import Any
 
 from keystoneauth1 import exceptions
 from keystoneauth1 import identity
+from keystoneauth1.identity.v3 import approval
 from keystoneauth1.identity.v3 import oidc
 from keystoneauth1 import loading
 from keystoneauth1.loading import opts
+
+
+def _load_approvals(path: str) -> approval.ProviderApprovals:
+    """Load an approved configuration registry from a JSON file."""
+    with open(path, encoding='utf-8') as stream:
+        return approval.ProviderApprovals.from_json(stream.read())
 
 
 def _add_common_identity_options(options: list[opts.Opt]) -> None:
@@ -112,12 +119,17 @@ class _OpenIDConnectBase(loading.BaseFederationLoader[oidc._OidcBaseT]):
         if not (
             kwargs.get('access_token_endpoint')
             or kwargs.get('discovery_endpoint')
+            or kwargs.get('approval_path')
         ):
             m = (
                 "You have to specify either an 'access-token-endpoint' or "
                 "a 'discovery-endpoint'."
             )
             raise exceptions.OptionError(m)
+
+        approval_path = kwargs.pop('approval_path', None)
+        if approval_path:
+            kwargs['approvals'] = _load_approvals(approval_path)
 
         return super().load_from_options(**kwargs)
 
@@ -164,6 +176,17 @@ class _OpenIDConnectBase(loading.BaseFederationLoader[oidc._OidcBaseT]):
                     'of token will be used when processing token '
                     'introspection. Valid values are: '
                     '"access_token" or "id_token"',
+                ),
+                loading.Opt(
+                    'approval-path',
+                    dest='approval_path',
+                    help='JSON file describing the approved identity '
+                    'provider configurations, as returned by '
+                    'ProviderApprovals.to_dict(). New logins use its '
+                    'current generation and logins already started use the '
+                    'generation their receipt names, so discovery, the '
+                    'token exchange and the federated endpoint all agree '
+                    'on one approval.',
                 ),
             ]
         )

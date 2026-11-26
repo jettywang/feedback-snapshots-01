@@ -498,6 +498,75 @@ The following example shows the method usage with a session:
     ...     verify='/opt/ca.crt',
     ... )
 
+Switching identity providers
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+A deployment may replace the identity provider behind a federation in
+batches, keeping the old one available until logins already started under it
+have finished. Both providers can map different people to the same local
+principal id, so a login that started under one provider must not be
+completed against another, and the scope it hands Keystone must be the one it
+was started with.
+
+The OpenID Connect plugins accept an approval registry describing the
+approved configurations and which one is current.
+:py:class:`~keystoneauth1.identity.v3.ProviderApproval` names a generation
+and its endpoints; :py:class:`~keystoneauth1.identity.v3.ProviderApprovals`
+holds several and records which is current, which have been withdrawn, and
+when each retires. A new login uses the current one through
+:py:meth:`~keystoneauth1.identity.v3.oidc._OidcBase.start_login`, which returns
+a :py:class:`~keystoneauth1.identity.v3.LoginReceipt` recording the
+generation and the Keystone scope. Discovery, the token exchange with the
+provider, and the Keystone federated endpoint that performs the local mapping
+are all built from that generation, and every request carries the generation
+and the receipt's login id in the ``X-Keystoneauth-Approval`` and
+``X-Keystoneauth-Login`` headers so the actual requests can be correlated.
+
+Store the receipt with whatever resumes the login - an authorization code or
+a device code - and pass it back. If the approval is withdrawn or has reached
+its retirement time, the login raises
+:py:class:`~keystoneauth1.exceptions.oidc.OidcLoginReopenRequired` with a
+``reason`` of ``withdrawn``, ``retired`` or ``unknown``; the login has not
+reached Keystone and should be started again, which will use the current
+approval. A plugin asked to finish a login with a different scope raises
+:py:class:`~keystoneauth1.exceptions.oidc.OidcLoginScopeMismatch` instead of
+rescoping it elsewhere. Both the unscoped cache id and reauthentication follow
+the same generation, so a cached unscoped token is not reused across a
+switch.
+
+.. code-block:: python
+
+    >>> from keystoneauth1 import session
+    >>> from keystoneauth1.identity import v3
+    >>> approvals = v3.ProviderApprovals(
+    ...     v3.ProviderApproval(
+    ...         'old', 'https://keystone/v3', 'old-idp', 'openid',
+    ...         discovery_endpoint='https://old-idp/.well-known/openid-configuration',
+    ...     ),
+    ...     v3.ProviderApproval(
+    ...         'new', 'https://keystone/v3', 'new-idp', 'openid',
+    ...         discovery_endpoint='https://new-idp/.well-known/openid-configuration',
+    ...     ),
+    ... )
+    >>> auth = v3.OidcAuthorizationCode(
+    ...     auth_url='https://keystone/v3',
+    ...     identity_provider='new-idp',
+    ...     protocol='openid',
+    ...     client_id='client',
+    ...     client_secret='secret',
+    ...     discovery_endpoint='https://new-idp/.well-known/openid-configuration',
+    ...     code='authorization-code',
+    ...     approvals=approvals,
+    ... )
+    >>> receipt = auth.start_login()  # generation 'new'
+    >>> # ... persist receipt while the user logs in ...
+    >>> auth.set_login_receipt(receipt)
+    >>> sess = session.Session(auth=auth)
+
+A registry can be loaded from a file with
+:py:meth:`~keystoneauth1.identity.v3.ProviderApprovals.from_json` and the
+``approval-path`` option, or built directly as above.
+
 Version Independent Identity Plugins
 ------------------------------------
 

@@ -13,6 +13,7 @@
 # flake8: noqa: F405
 
 from keystoneauth1.identity.v3.application_credential import *  # noqa
+from keystoneauth1.identity.v3.approval import *  # noqa
 from keystoneauth1.identity.v3.base import *  # noqa
 from keystoneauth1.identity.v3.federation import *  # noqa
 from keystoneauth1.identity.v3.k2k import *  # noqa
@@ -36,6 +37,9 @@ __all__ = (
     'AuthMethod',
     'BaseAuth',
     'FederationBaseAuth',
+    'LoginReceipt',
+    'ProviderApproval',
+    'ProviderApprovals',
     'Keystone2Keystone',
     'Password',
     'PasswordMethod',

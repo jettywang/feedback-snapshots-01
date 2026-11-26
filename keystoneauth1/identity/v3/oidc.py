@@ -25,6 +25,7 @@ import requests
 from keystoneauth1 import _utils as utils
 from keystoneauth1 import access
 from keystoneauth1 import exceptions
+from keystoneauth1.identity.v3 import approval
 from keystoneauth1.identity.v3 import federation
 from keystoneauth1 import session as ks_session
 
@@ -38,6 +39,9 @@ __all__ = (
 )
 
 SENSITIVE_KEYS = ("password", "code", "token", "secret", "otp", "totp", "mfa")
+
+HEADER_APPROVAL = 'X-Keystoneauth-Approval'
+HEADER_LOGIN = 'X-Keystoneauth-Login'
 
 
 _OidcBaseT = TypeVar('_OidcBaseT', bound='_OidcBase')
@@ -74,6 +78,7 @@ class _OidcBase(federation.FederationBaseAuth, metaclass=abc.ABCMeta):
         project_domain_name: str | None,
         reauthenticate: bool,
         include_catalog: bool,
+        approvals: approval.ProviderApprovals | None,
     ):
         """The OpenID Connect plugin expects the following.
 
@@ -125,6 +130,191 @@ class _OidcBase(federation.FederationBaseAuth, metaclass=abc.ABCMeta):
         self.access_token_type = access_token_type
         self.scope = scope
 
+        # An approval registry replaces the endpoint parameters with the
+        # approved generation's values, so a login cannot be pointed at a
+        # provider other than the one it was started against.
+        self.approvals = approvals
+        self.login_receipt: approval.LoginReceipt | None = None
+        self._approval: approval.ProviderApproval | None = None
+
+    # -- approved configuration ------------------------------------------
+
+    def set_approvals(
+        self, approvals: approval.ProviderApprovals | None
+    ) -> None:
+        """Use the given registry for later logins."""
+        self.approvals = approvals
+
+    def _scope_elements(self) -> dict[str, str]:
+        elements = {}
+        for field in approval.SCOPE_FIELDS:
+            value = getattr(self, field)
+            if value is not None:
+                elements[field] = str(value)
+        return elements
+
+    def start_login(
+        self, approvals: approval.ProviderApprovals | None = None
+    ) -> approval.LoginReceipt:
+        """Record the approval and scope a new login is started under.
+
+        Call this before presenting anything to the user. Keep the receipt
+        with whatever lets the login resume - an authorization code, a device
+        code - and pass it to :meth:`get_unscoped_auth_ref`. New logins use
+        the current approval of the registry.
+
+        :param approvals: Registry to use, if not the plugin's own.
+        :returns: A receipt to store and hand back.
+        """
+        registry = approvals or self.approvals
+        if registry is None:
+            raise ValueError(
+                'An approved configuration registry is required to start a '
+                'login'
+            )
+
+        current = registry.current()
+        self.approvals = registry
+        self.bind_approval(current)
+        receipt = approval.LoginReceipt(
+            current.generation,
+            self._scope_elements(),
+            openid_scope=self.scope,
+            identity_provider=self.identity_provider,
+            protocol=self.protocol,
+        )
+        self.login_receipt = receipt
+        return receipt
+
+    def set_login_receipt(
+        self, receipt: approval.LoginReceipt | str | None
+    ) -> None:
+        """Resume a login started earlier, using its receipt.
+
+        Pass what :meth:`start_login` returned, or the string
+        :meth:`~keystoneauth1.identity.v3.LoginReceipt.to_string` produces.
+        The receipt pins the approval generation and the Keystone scope; the
+        next authentication checks both.
+
+        :raises ValueError: The input is not a login receipt.
+        """
+        if receipt is None:
+            self.login_receipt = None
+            return
+
+        if isinstance(receipt, str):
+            receipt = approval.LoginReceipt.from_string(receipt)
+        elif not isinstance(receipt, approval.LoginReceipt):
+            raise ValueError('Not a login receipt')
+
+        self.login_receipt = receipt
+
+    def bind_approval(
+        self, approved: approval.ProviderApproval
+    ) -> None:
+        """Point the plugin at an approved generation's endpoints.
+
+        An endpoint the approval names replaces the plugin's own option; one
+        it leaves unset keeps the configured default. A cached discovery
+        document is dropped whenever it belonged to a different generation,
+        so it is refetched from the endpoint the login is now bound to.
+        """
+        previous = self._approval
+        if previous is not None and (
+            approved.generation == previous.generation
+        ):
+            return
+
+        self._approval = approved
+        self.identity_provider = approved.identity_provider
+        self.protocol = approved.protocol
+        self.auth_url = approved.auth_url
+
+        if approved.discovery_endpoint is not None:
+            if previous is not None and (
+                approved.discovery_endpoint != self.discovery_endpoint
+            ):
+                self._discovery_document = {}
+            self.discovery_endpoint = approved.discovery_endpoint
+
+        if approved.access_token_endpoint is not None:
+            self.access_token_endpoint = approved.access_token_endpoint
+
+        if approved.device_authorization_endpoint is not None:
+            self._device_authorization_endpoint = (
+                approved.device_authorization_endpoint
+            )
+
+    def _bound_approval(self) -> approval.ProviderApproval | None:
+        """The approval this login is bound to, resolved through the registry.
+
+        A receipt always wins: it names the generation the login started
+        under, and the registry is asked whether that generation is still
+        valid. Without a receipt the plugin uses the current approval.
+        """
+        if self.login_receipt is None:
+            if self.approvals is None:
+                return self._approval
+            return self.approvals.current()
+
+        if self.approvals is None:
+            if self._approval is None:
+                raise exceptions.OidcLoginReopenRequired(
+                    reason='unknown',
+                    generation=self.login_receipt.generation,
+                    login_id=self.login_receipt.login_id,
+                )
+            if self._approval.generation != self.login_receipt.generation:
+                raise exceptions.OidcLoginReopenRequired(
+                    reason='unknown',
+                    generation=self.login_receipt.generation,
+                    login_id=self.login_receipt.login_id,
+                )
+            return self._approval
+
+        return self.approvals.resolve(self.login_receipt)
+
+    def _check_scope(self, receipt: approval.LoginReceipt) -> None:
+        """Refuse to hand Keystone a scope other than the receipt's."""
+        receipt_scope = receipt.scope
+        requested_scope = self._scope_elements()
+        if receipt_scope != requested_scope:
+            raise exceptions.OidcLoginScopeMismatch(
+                receipt_scope=receipt_scope,
+                requested_scope=requested_scope,
+                login_id=receipt.login_id,
+            )
+
+    def _check_rescope_target(self) -> None:
+        """Check the scope about to be handed to the identity service."""
+        if self.login_receipt is not None:
+            self._check_scope(self.login_receipt)
+
+    def _unscoped_token_matches(
+        self, auth_ref: access.AccessInfoV3
+    ) -> bool:
+        """Require a held token to name the approval it was obtained under.
+
+        The base check compares the token's identity provider and protocol
+        with the plugin's current ones. With an approval registry there can
+        be two valid generations at once whose provider names coincide, so
+        the token has to name the generation the login is bound to. Resolving
+        the approval here means a withdrawn or retired receipt is refused
+        even when a cached unscoped token is still held.
+        """
+        if not super()._unscoped_token_matches(auth_ref):
+            return False
+
+        approved = self._bound_approval()
+        if approved is None:
+            return True
+
+        identity = self._unscoped_token_identity(auth_ref)
+        return identity is not None and identity == (
+            approved.identity_provider,
+            approved.protocol,
+        )
+
     def get_unscoped_cache_id_elements(self) -> dict[str, str | None]:
         """Add the OAuth client to what identifies the unscoped token.
 
@@ -137,6 +327,8 @@ class _OidcBase(federation.FederationBaseAuth, metaclass=abc.ABCMeta):
         elements = super().get_unscoped_cache_id_elements()
         elements['client_id'] = self.client_id
         elements['client_secret'] = self.client_secret
+        if self._approval is not None:
+            elements['approval_generation'] = self._approval.generation
         return elements
 
     def _get_discovery_document(
@@ -208,6 +400,32 @@ class _OidcBase(federation.FederationBaseAuth, metaclass=abc.ABCMeta):
                 sanitized[key] = "***"
         return sanitized
 
+    def _prepare_login(self) -> approval.ProviderApproval:
+        """Resolve and apply the approval this attempt must use.
+
+        All three steps of a login - discovery, the token exchange and the
+        federated endpoint that performs the local principal mapping - are
+        built from the approval returned here, so they cannot disagree about
+        which generation is in force.
+        """
+        approved = self._bound_approval()
+        if approved is not None:
+            self.bind_approval(approved)
+
+        if self.login_receipt is not None:
+            self._check_scope(self.login_receipt)
+
+        return approved
+
+    def _correlation_headers(self) -> dict[str, str]:
+        """Headers that tie the requests to the receipt they belong to."""
+        headers: dict[str, str] = {}
+        if self._approval is not None:
+            headers[HEADER_APPROVAL] = self._approval.generation
+        if self.login_receipt is not None:
+            headers[HEADER_LOGIN] = self.login_receipt.login_id
+        return headers
+
     def _get_access_token(
         self, session: ks_session.Session, payload: dict[str, str | None]
     ) -> str:
@@ -243,6 +461,7 @@ class _OidcBase(federation.FederationBaseAuth, metaclass=abc.ABCMeta):
         op_response = session.post(
             access_token_endpoint,
             requests_auth=client_auth,
+            headers=self._correlation_headers(),
             data=payload,
             log=False,
             authenticated=False,
@@ -277,6 +496,7 @@ class _OidcBase(federation.FederationBaseAuth, metaclass=abc.ABCMeta):
         """
         # use access token against protected URL
         headers = {'Authorization': 'Bearer ' + access_token}
+        headers.update(self._correlation_headers())
         auth_response = session.post(
             self.federated_token_url, headers=headers, authenticated=False
         )
@@ -305,6 +525,7 @@ class _OidcBase(federation.FederationBaseAuth, metaclass=abc.ABCMeta):
         :returns: a token data representation
         """
         # First of all, check if the grant type is supported
+        self._prepare_login()
         discovery = self._get_discovery_document(session)
         grant_types = cast(
             list[str] | None, discovery.get("grant_types_supported")
@@ -377,6 +598,7 @@ class OidcPassword(_OidcBase):
         project_domain_name: str | None = None,
         reauthenticate: bool = True,
         include_catalog: bool = True,
+        approvals: approval.ProviderApprovals | None = None,
     ):
         """The OpenID Password plugin expects the following.
 
@@ -403,6 +625,7 @@ class OidcPassword(_OidcBase):
             project_domain_name=project_domain_name,
             reauthenticate=reauthenticate,
             include_catalog=include_catalog,
+            approvals=approvals,
         )
         self.username = username
         self.password = password
@@ -501,6 +724,7 @@ class OidcClientCredentials(_OidcBase):
         project_domain_name: str | None = None,
         reauthenticate: bool = True,
         include_catalog: bool = True,
+        approvals: approval.ProviderApprovals | None = None,
     ):
         """The OpenID Client Credentials expects the following.
 
@@ -527,6 +751,7 @@ class OidcClientCredentials(_OidcBase):
             project_domain_name=project_domain_name,
             reauthenticate=reauthenticate,
             include_catalog=include_catalog,
+            approvals=approvals,
         )
 
     def get_payload(
@@ -573,6 +798,7 @@ class OidcAuthorizationCode(_OidcBase):
         reauthenticate: bool = True,
         include_catalog: bool = True,
         redirect_uri: str | None = None,
+        approvals: approval.ProviderApprovals | None = None,
     ):
         """The OpenID Authorization Code plugin expects the following.
 
@@ -599,6 +825,7 @@ class OidcAuthorizationCode(_OidcBase):
             project_domain_name=project_domain_name,
             reauthenticate=reauthenticate,
             include_catalog=include_catalog,
+            approvals=approvals,
         )
         self.redirect_uri = redirect_uri
         self.code = code
@@ -642,6 +869,7 @@ class OidcAccessToken(_OidcBase):
         project_domain_name: str | None = None,
         reauthenticate: bool = True,
         include_catalog: bool = True,
+        approvals: approval.ProviderApprovals | None = None,
     ):
         """The OpenID Connect plugin based on the Access Token.
 
@@ -675,6 +903,7 @@ class OidcAccessToken(_OidcBase):
             project_domain_name=project_domain_name,
             reauthenticate=reauthenticate,
             include_catalog=include_catalog,
+            approvals=approvals,
         )
         assert access_token is not None  # nosec B101
         self.access_token = access_token
@@ -710,6 +939,7 @@ class OidcAccessToken(_OidcBase):
         :param session: a session object to send out HTTP requests.
         :returns: a token data representation
         """
+        self._prepare_login()
         response = self._get_keystone_token(session, self.access_token)
         access_info = access.create(resp=response)
         assert isinstance(access_info, access.AccessInfoV3)  # nosec B101
@@ -750,6 +980,7 @@ class OidcDeviceAuthorization(_OidcBase):
         project_domain_name: str | None = None,
         reauthenticate: bool = True,
         include_catalog: bool = True,
+        approvals: approval.ProviderApprovals | None = None,
     ):
         """The OAuth 2.0 Device Authorization plugin expects the following.
 
@@ -759,7 +990,6 @@ class OidcDeviceAuthorization(_OidcBase):
             override the discovered one.
         :param code_challenge_method: PKCE Challenge Method (RFC 7636).
         """
-        self.device_authorization_endpoint = device_authorization_endpoint
         self.code_challenge_method = code_challenge_method
 
         super().__init__(
@@ -782,7 +1012,32 @@ class OidcDeviceAuthorization(_OidcBase):
             project_domain_name=project_domain_name,
             reauthenticate=reauthenticate,
             include_catalog=include_catalog,
+            approvals=approvals,
         )
+        self.device_authorization_endpoint = device_authorization_endpoint
+
+    @property
+    def device_authorization_endpoint(self) -> str | None:
+        """The endpoint the current approval names, or the configured one.
+
+        Kept as a property so that binding an approval cannot leave the
+        plugin pointed at a different provider's verification endpoint.
+        """
+        if (
+            self._approval is not None
+            and self._approval.device_authorization_endpoint is not None
+        ):
+            return self._approval.device_authorization_endpoint
+        return self._device_authorization_endpoint
+
+    @device_authorization_endpoint.setter
+    def device_authorization_endpoint(self, value: str | None) -> None:
+        if (
+            self._approval is not None
+            and self._approval.device_authorization_endpoint is not None
+        ):
+            return
+        self._device_authorization_endpoint = value
 
     def _get_device_authorization_endpoint(
         self, session: ks_session.Session
@@ -873,10 +1128,12 @@ class OidcDeviceAuthorization(_OidcBase):
                 device_authz_endpoint,
                 sanitized_payload,
             )
+        headers = dict(self.HEADER_X_FORM)
+        headers.update(self._correlation_headers())
         op_response = session.post(
             device_authz_endpoint,
             requests_auth=client_auth,
-            headers=self.HEADER_X_FORM,
+            headers=headers,
             data=encoded_payload,
             log=False,
             authenticated=False,
@@ -954,11 +1211,13 @@ class OidcDeviceAuthorization(_OidcBase):
                         access_token_endpoint,
                         sanitized_payload,
                     )
+                headers = dict(self.HEADER_X_FORM)
+                headers.update(self._correlation_headers())
                 op_response = session.post(
                     access_token_endpoint,
                     requests_auth=client_auth,
                     data=encoded_payload,
-                    headers=self.HEADER_X_FORM,
+                    headers=headers,
                     log=False,
                     authenticated=False,
                 )

@@ -1,0 +1,29 @@
+---
+features:
+  - |
+    The OpenID Connect federation plugins can now bind a login to an approved
+    identity provider configuration. ``ProviderApproval`` describes one
+    approved configuration and its generation, ``ProviderApprovals`` holds
+    several while a deployment switches providers in batches, and
+    ``start_login`` returns a ``LoginReceipt`` recording the generation and
+    the Keystone scope the login started with. Discovery, the token exchange
+    and the federated endpoint that performs the local principal mapping are
+    all built from that generation, so a login that started under one
+    provider cannot be completed against another that may map a different
+    person to the same local principal id.
+  - |
+    A login whose approval was withdrawn or has reached its retirement time
+    raises ``OidcLoginReopenRequired`` with a ``reason`` of ``withdrawn``,
+    ``retired`` or ``unknown``, before anything reaches Keystone. A login
+    asked to finish with a scope other than its receipt's raises
+    ``OidcLoginScopeMismatch``. The unscoped cache id and reauthentication
+    follow the same generation.
+  - |
+    Every request made for a login carries the approval generation in the
+    ``X-Keystoneauth-Approval`` header and the receipt's identifier in the
+    ``X-Keystoneauth-Login`` header, so the discovery, token exchange and
+    federated endpoint requests can be correlated with the receipt.
+  - |
+    The ``v3oidc*`` loaders accept an ``approval-path`` option naming a JSON
+    file, as produced by ``ProviderApprovals.to_json``, describing the
+    approved configurations and the current one.

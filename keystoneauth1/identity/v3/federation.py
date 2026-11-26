@@ -188,6 +188,13 @@ class _Rescoped(base.BaseAuth, metaclass=abc.ABCMeta):
             self.MIN_TOKEN_LIFE_SECONDS
         )
 
+        if reused and not self._unscoped_token_matches(auth_ref):
+            # An installed token can describe a different federation. It
+            # cannot stand in for this login, and nothing recovers it, so
+            # start the authentication over rather than rescope it.
+            auth_ref = None
+            reused = False
+
         if not reused:
             auth_ref = self._authenticate(session)
 
@@ -219,12 +226,45 @@ class _Rescoped(base.BaseAuth, metaclass=abc.ABCMeta):
         self._unscoped_auth_ref = auth_ref
         return auth_ref
 
+    def _unscoped_token_identity(
+        self, auth_ref: access.AccessInfoV3
+    ) -> tuple[str | None, str | None] | None:
+        """Return the provider and protocol a token says produced it."""
+        try:
+            federation = auth_ref._user['OS-FEDERATION']
+            return (
+                federation['identity_provider']['id'],
+                federation['protocol']['id'],
+            )
+        except (KeyError, TypeError):
+            return None
+
+    def _unscoped_token_matches(
+        self, auth_ref: access.AccessInfoV3
+    ) -> bool:
+        """Whether a held unscoped token belongs to this configuration.
+
+        A token obtained for one identity provider and protocol describes who
+        that provider mapped the user to. If the plugin is now pointed at
+        another, the two providers may map different people to the same local
+        principal id, so the token cannot stand in for a fresh login. A token
+        that does not record its federation at all cannot be shown to belong
+        here either way, so it is left for the subclass to judge.
+        """
+        identity = self._unscoped_token_identity(auth_ref)
+        if identity is None:
+            return True
+
+        return identity == (self.identity_provider, self.protocol)
+
     def _rescope(
         self, session: ks_session.Session, auth_ref: access.AccessInfoV3
     ) -> access.AccessInfoV3:
         """Rescope an unscoped token, if any scope was asked for."""
         # narrow type
         assert auth_ref.auth_token is not None  # nosec B101
+
+        self._check_rescope_target()
 
         if not any(
             [
@@ -254,6 +294,15 @@ class _Rescoped(base.BaseAuth, metaclass=abc.ABCMeta):
         )
 
         return token_plugin.get_auth_ref(session)
+
+    def _check_rescope_target(self) -> None:
+        """Check the scope about to be handed to the identity service.
+
+        The base implementation accepts any scope. A plugin bound to an
+        approved configuration that recorded the scope its login started
+        under overrides this to refuse a different one.
+        """
+        return None
 
     @abc.abstractmethod
     def get_unscoped_auth_ref(
