@@ -1,0 +1,14 @@
+mode: crud
+name: 'Sec194DocumentPublisher'
+read:
+  - arn:aws:ssm:us-east-1:123456789012:parameter/demo
+write:
+  - arn:aws:ssm:us-east-1:123456789012:parameter/demo
+  - arn:aws:ssm:us-east-1:123456789012:document/demo-doc
+permissions-management:
+  - arn:aws:ssm:us-east-1:123456789012:document/demo-doc
+tagging:
+  - arn:aws:secretsmanager:us-east-1:123456789012:secret:demo
+wildcard-only:
+  single-actions:
+    - ssm:CreateMaintenanceWindow

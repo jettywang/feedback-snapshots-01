@@ -40,6 +40,7 @@ nav:
         - Service-wide: 'writing-policies/wildcard-only/service-wide.md'
     - Actions Mode: 'writing-policies/actions-mode.md'
     - Minimizing characters: 'writing-policies/minimization.md'
+    - Provenance and approvals: 'writing-policies/provenance.md'
   - "<b>Querying the IAM Database</b>":
     - Overview: 'querying/querying.md'
     - Action Table: 'querying/action-table.md'

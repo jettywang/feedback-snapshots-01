@@ -1,0 +1,36 @@
+{
+  "changes": [
+    {
+      "action": "lambda:GetFunction",
+      "documented_access_level": "Write"
+    },
+    {
+      "action": "lambda:GetFunctionUrlConfig",
+      "documented_access_level": "Read"
+    },
+    {
+      "action": "secretsmanager:CreateSecret",
+      "documented_access_level": "Tagging"
+    },
+    {
+      "action": "ssm:CreateDocument",
+      "documented_access_level": "Tagging"
+    },
+    {
+      "action": "ssm:CreateMaintenanceWindow",
+      "documented_access_level": "Tagging"
+    },
+    {
+      "action": "ssm:PutParameter",
+      "documented_access_level": "Tagging"
+    }
+  ],
+  "derived_from": "policy_sentry/shared/data/iam-definition.json",
+  "services": [
+    "iam",
+    "secretsmanager",
+    "ssm",
+    "lambda"
+  ],
+  "snapshot": "catalog-2026-12-01"
+}

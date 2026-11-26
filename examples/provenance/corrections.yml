@@ -1,0 +1,66 @@
+# Human corrections to catalog metadata, with their approval state.
+#
+# Only rules whose approval.status is "approved" change policy generation.
+# Pending/rejected rules are still read, so the provenance report can explain
+# which template parts cannot be published under them.
+schema: policy-sentry/corrections@1
+corrections:
+  - id: SEC-194-C01
+    service: ssm
+    action: PutParameter
+    corrected_access_level: Write
+    rationale: >-
+      AWS documented parameter writes as Tagging; the security team treats them
+      as ordinary writes because they change stored configuration.
+    requested_by: platform-security
+    requested_at: "2026-10-02"
+    approval:
+      status: approved
+      approver: security-review-board
+      approved_at: "2026-10-09"
+      reference: ARB-2026-101
+
+  - id: SEC-194-C02
+    service: ssm
+    action: CreateDocument
+    corrected_access_level: Write
+    rationale: >-
+      Same systemic Tagging/Write misclassification as PutParameter; documents
+      control what automation runs on managed instances.
+    requested_by: platform-security
+    requested_at: "2026-10-02"
+    approval:
+      status: approved
+      approver: security-review-board
+      approved_at: "2026-10-09"
+      reference: ARB-2026-101
+
+  - id: SEC-194-C03
+    service: secretsmanager
+    action: CreateSecret
+    corrected_access_level: Write
+    rationale: >-
+      Secrets creation is a write, not tagging. Kept pending because the
+      approval board has not reviewed the blast radius yet.
+    requested_by: platform-security
+    requested_at: "2026-11-04"
+    approval:
+      status: pending
+      approver: null
+      approved_at: null
+      reference: ARB-2026-118
+
+  - id: SEC-194-C04
+    service: kms
+    action: CreateKey
+    corrected_access_level: Write
+    rationale: >-
+      Not used by this template; kept to prove the report scopes corrections to
+      the policy under review.
+    requested_by: platform-security
+    requested_at: "2026-09-15"
+    approval:
+      status: approved
+      approver: security-review-board
+      approved_at: "2026-09-22"
+      reference: ARB-2026-090

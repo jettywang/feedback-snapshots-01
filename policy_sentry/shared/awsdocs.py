@@ -265,7 +265,9 @@ def create_database(destination_directory: str | Path, access_level_overrides_fi
                     priv = chomp(cells[0].text)
                 action_name = priv
                 description = chomp(cells[1].text)
-                access_level = chomp(cells[2].text)
+                documented_access_level = chomp(cells[2].text)
+                access_level = documented_access_level
+                access_level_override = None
                 # Access Level #####
                 # access_level_overrides_cfg will only be true if the service in question is present
                 # in the overrides YML file
@@ -278,6 +280,12 @@ def create_database(destination_directory: str | Path, access_level_overrides_fi
                     )
                     if override_result:
                         access_level = override_result
+                        access_level_override = {
+                            "access_level": override_result,
+                            "documented_access_level": documented_access_level,
+                            "source": str(access_level_overrides_file),
+                            "rule": f"{service_prefix}:{action_name.lower()}",
+                        }
                         logger.debug(
                             "Override: Setting access level for %s:%s to %s",
                             service_prefix,
@@ -342,6 +350,8 @@ def create_database(destination_directory: str | Path, access_level_overrides_fi
                     "privilege": priv,
                     "description": description,
                     "access_level": access_level,
+                    "access_level_documented": documented_access_level,
+                    "access_level_override": access_level_override,
                     "resource_types": resource_types,
                     "resource_types_lower_name": resource_types_lower_name,
                     "api_documentation_link": api_documentation_link,

@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import logging
 import re
+from collections.abc import Iterable
 from typing import Any
 
 from policy_sentry.analysis.expand import determine_actions_to_expand
@@ -24,6 +25,7 @@ from policy_sentry.util.actions import get_lowercase_action_list
 from policy_sentry.util.arns import does_arn_match, get_service_from_arn, parse_arn
 from policy_sentry.util.text import capitalize_first_character, strip_special_characters
 from policy_sentry.writing.minimize import minimize_statement_actions
+from policy_sentry.writing.origins import ACCESS_LEVEL_SECTIONS, Origin, OriginTracker, resolve_sid
 from policy_sentry.writing.validate import check_actions_schema, check_crud_schema
 
 SANITIZE_NAME_PATTERN = re.compile(r"[^A-Za-z0-9]+")
@@ -64,6 +66,11 @@ class SidGroup:
         # sids instead of ARN
         self.sids: dict[str, dict[str, Any]] = {}
         self.universal_conditions: dict[str, Any] = {}
+        # Why each action sits in each SID. Never rendered into the policy.
+        self.origin_tracker = OriginTracker()
+        # SID -> the explicit actions each rendered entry grants. Needed when
+        # ``minimize`` replaces the action list with wildcards.
+        self.rendered_actions: dict[str, list[dict[str, str]]] = {}
         self.skip_resource_constraints: list[str] = []
         self.exclude_actions: list[str] = []
         self.wildcard_only_single_actions: list[str] = []
@@ -155,6 +162,18 @@ class SidGroup:
 
                             # Using a custom namespace and not gathering actions so no need to find
                             # dependent actions either, though we could do it here
+                            self.origin_tracker.record(
+                                sid_namespace,
+                                row["action"],
+                                Origin(
+                                    kind="sts",
+                                    template_section="sts",
+                                    requested_arns=[arn],
+                                    requested_access_level=access_level,
+                                    resource_type=None,
+                                    detail={"sts_action": action},
+                                ),
+                            )
 
                             if sid_namespace in self.sids:
                                 # If the ARN already exists there, skip it.
@@ -220,6 +239,8 @@ class SidGroup:
 
         # render the policy
         sids_to_be_changed = []
+        sid_merges: dict[str, str] = {}
+        rendered_actions: dict[str, list[dict[str, str]]] = {}
         for sid, group in self.sids.items():
             temp_actions = group["actions"]
             if not temp_actions:
@@ -238,6 +259,7 @@ class SidGroup:
             # Check if SID is empty of actions. Continue if yes.
             if not actions:
                 continue
+            explicit_actions = list(actions)
             match_found = False
             if minimize is not None and isinstance(minimize, int):
                 logger.debug("Minimizing statements...")
@@ -249,6 +271,11 @@ class SidGroup:
                         stmt["Action"].extend(x for x in actions if x not in stmt["Action"])
                         match_found = True
                         sids_to_be_changed.append(stmt["Sid"])
+                        if sid != stmt["Sid"]:
+                            sid_merges[sid] = stmt["Sid"]
+                        rendered_actions.setdefault(stmt["Sid"], []).extend(
+                            _attribute_rendered_actions(explicit_actions, actions)
+                        )
                         break
                 actions = list(set(actions))  # remove duplicates
             actions.sort()
@@ -264,6 +291,7 @@ class SidGroup:
                         "Resource": group["arn"],
                     }
                 )
+                rendered_actions[sid] = _attribute_rendered_actions(explicit_actions, actions)
 
         if sids_to_be_changed:
             for stmt in statements:
@@ -271,13 +299,30 @@ class SidGroup:
                     arn_details = parse_arn(stmt["Resource"][0])
                     resource_path = arn_details.get("resource_path")
                     resource_sid_segment = strip_special_characters(f"{arn_details['resource']}{resource_path}")
-                    stmt["Sid"] = create_policy_sid_namespace(arn_details["service"], "Mult", resource_sid_segment)
+                    new_sid = create_policy_sid_namespace(arn_details["service"], "Mult", resource_sid_segment)
+                    if new_sid != stmt["Sid"]:
+                        sid_merges[stmt["Sid"]] = new_sid
+                        stmt["Sid"] = new_sid
                     # If we have combined the statements, minimize it again
                     if minimize is not None and isinstance(minimize, int):
                         actions = minimize_statement_actions(stmt["Action"], all_actions, minchars=minimize)
                         actions.sort()
                         stmt["Action"] = actions
+
+        self.rendered_actions = _remap_rendered_actions(rendered_actions, sid_merges)
+        self._reconcile_origins(sid_merges)
         return {"Version": POLICY_LANGUAGE_VERSION, "Statement": statements}
+
+    def _reconcile_origins(self, sid_merges: dict[str, str]) -> None:
+        """Keep per-action origins aligned with the statements actually rendered."""
+        self.origin_tracker.merge_sids(sid_merges)
+        # Minimization rewrites explicit actions into wildcards, so filter on
+        # the explicit actions each statement still represents rather than on
+        # the rendered strings.
+        actions_by_sid = {
+            sid: [entry["action"] for entry in entries] for sid, entries in self.rendered_actions.items()
+        }
+        self.origin_tracker.retain_existing(actions_by_sid)
 
     # pylint: disable=unused-argument
     def add_by_arn_and_access_level(
@@ -324,12 +369,20 @@ class SidGroup:
                         actions_matching_resource_type = get_actions_matching_arn_type(
                             service_prefix, resource_type_name
                         )
+                        direct_actions = set(actions)
+                        coupled_dependencies: dict[str, list[str]] = {}
                         for dep_action in dependent_actions:
+                            parent = _dependent_parent(dep_action, direct_actions)
                             if dep_action in actions_matching_resource_type:
                                 if dep_action not in actions:
                                     actions.append(dep_action)
+                                coupled_dependencies[dep_action] = [parent] if parent else []
                             else:
-                                self.add_action_without_resource_constraint(dep_action)
+                                self.add_action_without_resource_constraint(
+                                    dep_action,
+                                    dependent_of=parent,
+                                    template_section=ACCESS_LEVEL_SECTIONS.get(access_level, access_level),
+                                )
 
                         if sid_namespace in self.sids:
                             # If the ARN already exists there, skip it.
@@ -347,8 +400,44 @@ class SidGroup:
                             }
                             self.sids[sid_namespace] = temp_sid_dict
 
+                        for action in sorted(direct_actions):
+                            self.origin_tracker.record(
+                                sid_namespace,
+                                action,
+                                Origin(
+                                    kind="template_access_level",
+                                    template_section=ACCESS_LEVEL_SECTIONS.get(access_level, access_level),
+                                    requested_arns=[arn],
+                                    requested_access_level=access_level,
+                                    resource_type=resource_type_name,
+                                    detail={"sid_namespace": sid_namespace},
+                                ),
+                            )
+                        for dep_action, parents in coupled_dependencies.items():
+                            if dep_action in direct_actions:
+                                continue
+                            self.origin_tracker.record(
+                                sid_namespace,
+                                dep_action,
+                                Origin(
+                                    kind="dependent_action",
+                                    template_section=ACCESS_LEVEL_SECTIONS.get(access_level, access_level),
+                                    requested_arns=[arn],
+                                    requested_access_level=access_level,
+                                    resource_type=resource_type_name,
+                                    dependent_of=parents,
+                                    detail={"reason": "shares the requested resource type"},
+                                ),
+                            )
+
     def add_action_without_resource_constraint(
-        self, action: str, sid_namespace: str = "MultMultNone"
+        self,
+        action: str,
+        sid_namespace: str = "MultMultNone",
+        *,
+        dependent_of: str | None = None,
+        template_section: str | None = None,
+        requested_arns: list[str] | None = None,
     ) -> dict[str, Any]:
         """
         This handles the cases where certain actions do not handle resource constraints - either by AWS, or for
@@ -357,6 +446,9 @@ class SidGroup:
         Arguments:
             action: The single action to add to the SID namespace. For instance, s3:ListAllMyBuckets
             sid_namespace: MultMultNone by default. Other valid option is "SkipResourceConstraints"
+            dependent_of: The action whose dependency pulled this one in, if any
+            template_section: The template section responsible for this action
+            requested_arns: ARNs implicated in the request, for provenance only
         """
         if sid_namespace == "SkipResourceConstraints":
             temp_sid_dict = {
@@ -384,6 +476,26 @@ class SidGroup:
                 self.sids[sid_namespace] = temp_sid_dict
         else:
             raise Exception("Please provide the action as a string, not a list.")
+        if sid_namespace == "SkipResourceConstraints":
+            kind = "skip_resource_constraints"
+            default_section = "skip-resource-constraints"
+        elif dependent_of:
+            kind = "dependent_action"
+            default_section = "wildcard-only"
+        else:
+            kind = "wildcard_only"
+            default_section = "wildcard-only"
+        self.origin_tracker.record(
+            sid_namespace,
+            action,
+            Origin(
+                kind=kind,
+                template_section=template_section or default_section,
+                requested_arns=list(requested_arns or []),
+                dependent_of=[dependent_of] if dependent_of else [],
+            ),
+            overwrite=bool(dependent_of),
+        )
         return self.sids
 
     def add_by_list_of_actions(self, supplied_actions: list[str]) -> dict[str, Any]:
@@ -434,7 +546,11 @@ class SidGroup:
         # Also, the user has no way of knowing what those dependent actions are beforehand.
         # TODO: This is, in fact, a great opportunity to introduce conditions. But we aren't there yet.
         for dep_action in dependent_actions:
-            self.add_action_without_resource_constraint(dep_action)
+            self.add_action_without_resource_constraint(
+                dep_action,
+                template_section="actions",
+                dependent_of=_dependent_parent(dep_action, supplied_actions),
+            )
         # Now, because add_by_arn_and_access_level() adds all actions under an access level, we have to
         # remove all actions that do not match the supplied_actions. This is done in-place.
         logger.debug("Purging actions that do not match the requested actions and dependent actions")
@@ -443,7 +559,7 @@ class SidGroup:
         self.remove_actions_not_matching_these(supplied_actions + dependent_actions)
         for action in actions_without_resource_constraints:
             logger.debug(f"Deliberately adding the action {action} without resource constraints")
-            self.add_action_without_resource_constraint(action)
+            self.add_action_without_resource_constraint(action, template_section="actions")
         logger.debug(
             "Removing actions that are in the wildcard arn (Resources = '*') as well as other statements that have "
             "resource constraints "
@@ -657,6 +773,53 @@ class SidGroup:
                     for action in actions_under_wildcard_resources_to_nuke:
                         if action in group["actions"]:
                             group["actions"].remove(action)
+
+
+def _dependent_parent(dependent_action: str, candidates: Iterable[str]) -> str | None:
+    """Pick the candidate action that actually declares ``dependent_action``."""
+    for candidate in sorted(candidates):
+        try:
+            service, name = candidate.split(":", 1)
+            rows = get_action_data(service, name).get(service, [])
+        except ValueError:
+            continue
+        for row in rows:
+            if any(dep.lower() == dependent_action.lower() for dep in row.get("dependent_actions", [])):
+                return candidate
+    return None
+
+
+def _attribute_rendered_actions(
+    explicit_actions: list[str], rendered: list[str]
+) -> list[dict[str, str]]:
+    """
+    Map each rendered entry back to the explicit actions it grants.
+
+    Without minimization the mapping is one-to-one.  With minimization a
+    rendered entry can be a wildcard; it is attributed to every explicit action
+    it covers so that a record never has to guess.
+    """
+    mapping: list[dict[str, str]] = []
+    for rendered_entry in sorted(rendered):
+        if "*" not in rendered_entry:
+            mapping.append({"action": rendered_entry, "pattern": rendered_entry})
+            continue
+        prefix = rendered_entry.split("*", 1)[0].lower()
+        matches = [action for action in explicit_actions if action.lower().startswith(prefix)]
+        for action in matches or [rendered_entry]:
+            mapping.append({"action": action, "pattern": rendered_entry})
+    return mapping
+
+
+def _remap_rendered_actions(
+    rendered_actions: dict[str, list[dict[str, str]]], sid_merges: dict[str, str]
+) -> dict[str, list[dict[str, str]]]:
+    if not sid_merges:
+        return rendered_actions
+    remapped: dict[str, list[dict[str, str]]] = {}
+    for sid, entries in rendered_actions.items():
+        remapped.setdefault(resolve_sid(sid, sid_merges), []).extend(entries)
+    return remapped
 
 
 def remove_actions_that_are_not_wildcard_arn_only(actions_list: list[str]) -> list[str]:
