@@ -46,6 +46,27 @@ OTEL_PYTHON_CONTEXT = "OTEL_PYTHON_CONTEXT"
 .. envvar:: OTEL_PYTHON_CONTEXT
 """
 
+OTEL_PYTHON_CONTEXT_GUARD = "OTEL_PYTHON_CONTEXT_GUARD"
+"""
+.. envvar:: OTEL_PYTHON_CONTEXT_GUARD
+
+Enables the optional runtime guard around the configured context runtime. The
+guard records owned attach/detach operations and their outcomes without
+changing how contexts propagate. Default: ``"false"``.
+
+The guard can also be enabled programmatically with
+``opentelemetry.context.guard.enable()``.
+"""
+
+OTEL_PYTHON_CONTEXT_GUARD_LOG = "OTEL_PYTHON_CONTEXT_GUARD_LOG"
+"""
+.. envvar:: OTEL_PYTHON_CONTEXT_GUARD_LOG
+
+Controls whether the runtime context guard emits log lines. Only the request
+correlation id and phase are logged; context values and baggage never are.
+Default: ``"false"``, which keeps records available in memory only.
+"""
+
 OTEL_PYTHON_ID_GENERATOR = "OTEL_PYTHON_ID_GENERATOR"
 """
 .. envvar:: OTEL_PYTHON_ID_GENERATOR

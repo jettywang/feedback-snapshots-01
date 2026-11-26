@@ -11,17 +11,17 @@ from uuid import uuid4
 # pylint: disable=wrong-import-position
 from opentelemetry.context.context import Context, _RuntimeContext
 from opentelemetry.context.contextvars_context import ContextVarsRuntimeContext
-from opentelemetry.environment_variables import OTEL_PYTHON_CONTEXT
+from opentelemetry.environment_variables import (
+    OTEL_PYTHON_CONTEXT,
+    OTEL_PYTHON_CONTEXT_GUARD,
+)
 
 logger = logging.getLogger(__name__)
 
 
-def _load_runtime_context() -> _RuntimeContext:
-    """Initialize the RuntimeContext
+def _load_delegate_runtime_context() -> _RuntimeContext:
+    """Load the configured RuntimeContext before optional guarding."""
 
-    Returns:
-        An instance of RuntimeContext.
-    """
     configured_context = os.environ.get(OTEL_PYTHON_CONTEXT)
     if not configured_context:
         return ContextVarsRuntimeContext()
@@ -39,6 +39,29 @@ def _load_runtime_context() -> _RuntimeContext:
             configured_context,
         )
         return ContextVarsRuntimeContext()
+
+
+def _load_runtime_context() -> _RuntimeContext:
+    """Initialize the RuntimeContext
+
+    Returns:
+        An instance of RuntimeContext, wrapped by the optional runtime guard
+        when :envvar:`OTEL_PYTHON_CONTEXT_GUARD` is set to ``true``.
+    """
+    runtime_context = _load_delegate_runtime_context()
+    if os.environ.get(OTEL_PYTHON_CONTEXT_GUARD, "").strip().lower() != "true":
+        return runtime_context
+
+    # pylint: disable=import-outside-toplevel
+    from opentelemetry.context.guard import (  # noqa: PLC0415
+        ContextRuntimeGuard,
+        guard_log_enabled_from_env,
+    )
+
+    return ContextRuntimeGuard(
+        runtime_context,
+        log_records=guard_log_enabled_from_env(),
+    )
 
 
 _RUNTIME_CONTEXT = _load_runtime_context()

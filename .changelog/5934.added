@@ -1,0 +1,5 @@
+`opentelemetry-api`: add an opt-in `opentelemetry.context.guard` runtime wrapper, enabled with
+`OTEL_PYTHON_CONTEXT_GUARD=true` or `guard.enable()`, that records owned attach/detach operations,
+invalid tokens, duplicate releases and cancellation outcomes without changing context propagation.
+Public log lines are limited to the request correlation id and phase; context values and baggage are
+never logged.
