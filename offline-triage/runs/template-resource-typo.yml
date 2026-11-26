@@ -1,0 +1,10 @@
+# 固定的审计读取模板（基准输入）。所有资源值均为虚构项目 fict-proj-audit。
+# 实验变体由 run_experiments.py 以字符串级替换派生，保证“只换一个变量”。
+mode: crud
+name: audit-read-fict-proj
+read:
+- arn:aws:kms:ap-southeast-2:111122223333:keystore/11111111-2222-3333-4444-555555555555
+- arn:aws:s3:::fict-proj-audit-logs
+- arn:aws:s3:::fict-proj-audit-logs/*
+list:
+- arn:aws:s3:::fict-proj-audit-logs

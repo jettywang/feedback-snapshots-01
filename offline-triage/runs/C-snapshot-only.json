@@ -1,0 +1,1272 @@
+{
+  "layers": {
+    "layer0_environment": {
+      "datastore_file_path": "/Users/apple/Documents/用户反馈项目/batches/feedback-20261120-backend-security-280-jettywang/prepared/FB-20261120-SEC-JW-191/workspace/offline-triage/runs/home-snap-no-resource-cond/.policy_sentry/iam-definition.json",
+      "datastore_schema_version": "v2",
+      "datastore_sha256": "9a073b2494f0150691488c31f4ddf6e0840698cfae40264a0df6313b80943fd9",
+      "is_bundled_datastore": false,
+      "template_path": "/Users/apple/Documents/用户反馈项目/batches/feedback-20261120-backend-security-280-jettywang/prepared/FB-20261120-SEC-JW-191/workspace/offline-triage/templates/audit-read.yml",
+      "template_sha256": "332325168d1c2283e066802bb73b095ffbb92552af035cdb92b880168a1d56b8"
+    },
+    "layer1_template_input": {
+      "requested_arns": [
+        {
+          "access_level": "Read",
+          "arn": "arn:aws:kms:ap-southeast-2:111122223333:key/11111111-2222-3333-4444-555555555555",
+          "parsed": {
+            "account": "111122223333",
+            "arn": "arn",
+            "partition": "aws",
+            "region": "ap-southeast-2",
+            "resource": "key",
+            "resource_path": "11111111-2222-3333-4444-555555555555",
+            "service": "kms"
+          },
+          "section": "read"
+        },
+        {
+          "access_level": "Read",
+          "arn": "arn:aws:s3:::fict-proj-audit-logs",
+          "parsed": {
+            "account": "",
+            "arn": "arn",
+            "partition": "aws",
+            "region": "",
+            "resource": "fict-proj-audit-logs",
+            "resource_path": "",
+            "service": "s3"
+          },
+          "section": "read"
+        },
+        {
+          "access_level": "Read",
+          "arn": "arn:aws:s3:::fict-proj-audit-logs/*",
+          "parsed": {
+            "account": "",
+            "arn": "arn",
+            "partition": "aws",
+            "region": "",
+            "resource": "fict-proj-audit-logs",
+            "resource_path": "*",
+            "service": "s3"
+          },
+          "section": "read"
+        },
+        {
+          "access_level": "List",
+          "arn": "arn:aws:s3:::fict-proj-audit-logs",
+          "parsed": {
+            "account": "",
+            "arn": "arn",
+            "partition": "aws",
+            "region": "",
+            "resource": "fict-proj-audit-logs",
+            "resource_path": "",
+            "service": "s3"
+          },
+          "section": "list"
+        }
+      ],
+      "template": {
+        "list": [
+          "arn:aws:s3:::fict-proj-audit-logs"
+        ],
+        "mode": "crud",
+        "name": "audit-read-fict-proj",
+        "read": [
+          "arn:aws:kms:ap-southeast-2:111122223333:key/11111111-2222-3333-4444-555555555555",
+          "arn:aws:s3:::fict-proj-audit-logs",
+          "arn:aws:s3:::fict-proj-audit-logs/*"
+        ]
+      }
+    },
+    "layer2_resource_match": [
+      {
+        "arn": "arn:aws:kms:ap-southeast-2:111122223333:key/11111111-2222-3333-4444-555555555555",
+        "candidates": [
+          {
+            "raw_arn": "arn:${Partition}:kms:${Region}:${Account}:key/${KeyId}",
+            "resource_type_name": "key"
+          }
+        ],
+        "match_ok": true,
+        "service_prefix": "kms"
+      },
+      {
+        "arn": "arn:aws:s3:::fict-proj-audit-logs",
+        "candidates": [
+          {
+            "raw_arn": "arn:${Partition}:s3:::${BucketName}",
+            "resource_type_name": "bucket"
+          }
+        ],
+        "match_ok": true,
+        "service_prefix": "s3"
+      },
+      {
+        "arn": "arn:aws:s3:::fict-proj-audit-logs/*",
+        "candidates": [
+          {
+            "raw_arn": "arn:${Partition}:s3:::${BucketName}/${ObjectName}",
+            "resource_type_name": "object"
+          }
+        ],
+        "match_ok": true,
+        "service_prefix": "s3"
+      },
+      {
+        "arn": "arn:aws:s3:::fict-proj-audit-logs",
+        "candidates": [
+          {
+            "raw_arn": "arn:${Partition}:s3:::${BucketName}",
+            "resource_type_name": "bucket"
+          }
+        ],
+        "match_ok": true,
+        "service_prefix": "s3"
+      }
+    ],
+    "layer3_action_condition_capability": [
+      {
+        "access_level": "Read",
+        "actions": [
+          "kms:DescribeKey",
+          "kms:GetKeyLastUsage",
+          "kms:GetKeyPolicy",
+          "kms:GetKeyRotationStatus",
+          "kms:GetParametersForImport",
+          "kms:GetPublicKey"
+        ],
+        "arn": "arn:aws:kms:ap-southeast-2:111122223333:key/11111111-2222-3333-4444-555555555555",
+        "condition_keys_available_to_raw_arn": [
+          "aws:ResourceTag/${TagKey}",
+          "kms:KeyOrigin",
+          "kms:KeyUsage",
+          "kms:MultiRegion",
+          "kms:MultiRegionKeyType",
+          "kms:ResourceAliases"
+        ],
+        "per_action_condition_keys": {
+          "kms:DescribeKey": [
+            "aws:ResourceTag/${TagKey}",
+            "kms:CallerAccount",
+            "kms:KeyOrigin",
+            "kms:KeyUsage",
+            "kms:MultiRegion",
+            "kms:MultiRegionKeyType",
+            "kms:RequestAlias",
+            "kms:ResourceAliases",
+            "kms:ViaService"
+          ],
+          "kms:GetKeyLastUsage": [
+            "aws:ResourceTag/${TagKey}",
+            "kms:CallerAccount",
+            "kms:KeyOrigin",
+            "kms:KeyUsage",
+            "kms:MultiRegion",
+            "kms:MultiRegionKeyType",
+            "kms:ResourceAliases",
+            "kms:ViaService"
+          ],
+          "kms:GetKeyPolicy": [
+            "aws:ResourceTag/${TagKey}",
+            "kms:CallerAccount",
+            "kms:KeyOrigin",
+            "kms:KeyUsage",
+            "kms:MultiRegion",
+            "kms:MultiRegionKeyType",
+            "kms:ResourceAliases",
+            "kms:ViaService"
+          ],
+          "kms:GetKeyRotationStatus": [
+            "aws:ResourceTag/${TagKey}",
+            "kms:CallerAccount",
+            "kms:KeyOrigin",
+            "kms:KeyUsage",
+            "kms:MultiRegion",
+            "kms:MultiRegionKeyType",
+            "kms:ResourceAliases",
+            "kms:ViaService"
+          ],
+          "kms:GetParametersForImport": [
+            "aws:ResourceTag/${TagKey}",
+            "kms:CallerAccount",
+            "kms:KeyOrigin",
+            "kms:KeyUsage",
+            "kms:MultiRegion",
+            "kms:MultiRegionKeyType",
+            "kms:ResourceAliases",
+            "kms:ViaService",
+            "kms:WrappingAlgorithm",
+            "kms:WrappingKeySpec"
+          ],
+          "kms:GetPublicKey": [
+            "aws:ResourceTag/${TagKey}",
+            "kms:CallerAccount",
+            "kms:KeyOrigin",
+            "kms:KeyUsage",
+            "kms:MultiRegion",
+            "kms:MultiRegionKeyType",
+            "kms:RequestAlias",
+            "kms:ResourceAliases",
+            "kms:ViaService"
+          ]
+        },
+        "raw_arn": "arn:${Partition}:kms:${Region}:${Account}:key/${KeyId}",
+        "resource_type_name": "key",
+        "service_level_condition_keys": [
+          "aws:RequestTag/${TagKey}",
+          "aws:ResourceTag/${TagKey}",
+          "aws:TagKeys",
+          "kms:BypassPolicyLockoutSafetyCheck",
+          "kms:CallerAccount",
+          "kms:CustomerMasterKeySpec",
+          "kms:CustomerMasterKeyUsage",
+          "kms:DataKeyPairSpec",
+          "kms:EncryptionAlgorithm",
+          "kms:EncryptionContext:${EncryptionContextKey}",
+          "kms:EncryptionContextKeys",
+          "kms:ExpirationModel",
+          "kms:GrantConstraintSourceArn",
+          "kms:GrantConstraintType",
+          "kms:GrantIsForAWSResource",
+          "kms:GrantOperations",
+          "kms:GranteePrincipal",
+          "kms:GranteeServicePrincipal",
+          "kms:KeyAgreementAlgorithm",
+          "kms:KeyOrigin",
+          "kms:KeySpec",
+          "kms:KeyUsage",
+          "kms:MacAlgorithm",
+          "kms:MessageType",
+          "kms:MultiRegion",
+          "kms:MultiRegionKeyType",
+          "kms:PrimaryRegion",
+          "kms:ReEncryptOnSameKey",
+          "kms:RecipientAttestation:ImageSha384",
+          "kms:RecipientAttestation:NitroTPMPCR0",
+          "kms:RecipientAttestation:NitroTPMPCR1",
+          "kms:RecipientAttestation:NitroTPMPCR10",
+          "kms:RecipientAttestation:NitroTPMPCR11",
+          "kms:RecipientAttestation:NitroTPMPCR12",
+          "kms:RecipientAttestation:NitroTPMPCR13",
+          "kms:RecipientAttestation:NitroTPMPCR14",
+          "kms:RecipientAttestation:NitroTPMPCR15",
+          "kms:RecipientAttestation:NitroTPMPCR16",
+          "kms:RecipientAttestation:NitroTPMPCR17",
+          "kms:RecipientAttestation:NitroTPMPCR18",
+          "kms:RecipientAttestation:NitroTPMPCR19",
+          "kms:RecipientAttestation:NitroTPMPCR2",
+          "kms:RecipientAttestation:NitroTPMPCR20",
+          "kms:RecipientAttestation:NitroTPMPCR21",
+          "kms:RecipientAttestation:NitroTPMPCR22",
+          "kms:RecipientAttestation:NitroTPMPCR23",
+          "kms:RecipientAttestation:NitroTPMPCR3",
+          "kms:RecipientAttestation:NitroTPMPCR4",
+          "kms:RecipientAttestation:NitroTPMPCR5",
+          "kms:RecipientAttestation:NitroTPMPCR6",
+          "kms:RecipientAttestation:NitroTPMPCR7",
+          "kms:RecipientAttestation:NitroTPMPCR8",
+          "kms:RecipientAttestation:NitroTPMPCR9",
+          "kms:RecipientAttestation:PCR0",
+          "kms:RecipientAttestation:PCR1",
+          "kms:RecipientAttestation:PCR10",
+          "kms:RecipientAttestation:PCR11",
+          "kms:RecipientAttestation:PCR12",
+          "kms:RecipientAttestation:PCR13",
+          "kms:RecipientAttestation:PCR14",
+          "kms:RecipientAttestation:PCR15",
+          "kms:RecipientAttestation:PCR16",
+          "kms:RecipientAttestation:PCR17",
+          "kms:RecipientAttestation:PCR18",
+          "kms:RecipientAttestation:PCR19",
+          "kms:RecipientAttestation:PCR2",
+          "kms:RecipientAttestation:PCR20",
+          "kms:RecipientAttestation:PCR21",
+          "kms:RecipientAttestation:PCR22",
+          "kms:RecipientAttestation:PCR23",
+          "kms:RecipientAttestation:PCR24",
+          "kms:RecipientAttestation:PCR25",
+          "kms:RecipientAttestation:PCR26",
+          "kms:RecipientAttestation:PCR27",
+          "kms:RecipientAttestation:PCR28",
+          "kms:RecipientAttestation:PCR29",
+          "kms:RecipientAttestation:PCR3",
+          "kms:RecipientAttestation:PCR30",
+          "kms:RecipientAttestation:PCR31",
+          "kms:RecipientAttestation:PCR4",
+          "kms:RecipientAttestation:PCR5",
+          "kms:RecipientAttestation:PCR6",
+          "kms:RecipientAttestation:PCR7",
+          "kms:RecipientAttestation:PCR8",
+          "kms:RecipientAttestation:PCR9",
+          "kms:ReplicaRegion",
+          "kms:RequestAlias",
+          "kms:ResourceAliases",
+          "kms:RetiringPrincipal",
+          "kms:RetiringServicePrincipal",
+          "kms:RotationPeriodInDays",
+          "kms:ScheduleKeyDeletionPendingWindowInDays",
+          "kms:SigningAlgorithm",
+          "kms:TrailingDaysWithoutKeyUsage",
+          "kms:ValidTo",
+          "kms:ViaService",
+          "kms:WrappingAlgorithm",
+          "kms:WrappingKeySpec"
+        ]
+      },
+      {
+        "access_level": "Read",
+        "actions": [
+          "s3:AllowVendedLogDeliveryForResource",
+          "s3:GetAccelerateConfiguration",
+          "s3:GetAnalyticsConfiguration",
+          "s3:GetBucketAbac",
+          "s3:GetBucketAcl",
+          "s3:GetBucketCORS",
+          "s3:GetBucketLocation",
+          "s3:GetBucketLogging",
+          "s3:GetBucketMetadataTableConfiguration",
+          "s3:GetBucketNotification",
+          "s3:GetBucketObjectLockConfiguration",
+          "s3:GetBucketOwnershipControls",
+          "s3:GetBucketPolicy",
+          "s3:GetBucketPolicyStatus",
+          "s3:GetBucketPublicAccessBlock",
+          "s3:GetBucketRequestPayment",
+          "s3:GetBucketTagging",
+          "s3:GetBucketVersioning",
+          "s3:GetBucketWebsite",
+          "s3:GetEncryptionConfiguration",
+          "s3:GetIntelligentTieringConfiguration",
+          "s3:GetInventoryConfiguration",
+          "s3:GetLifecycleConfiguration",
+          "s3:GetMetricsConfiguration",
+          "s3:GetReplicationConfiguration"
+        ],
+        "arn": "arn:aws:s3:::fict-proj-audit-logs",
+        "condition_keys_available_to_raw_arn": [
+          "aws:ResourceTag/${TagKey}",
+          "s3:BucketTag/${TagKey}"
+        ],
+        "per_action_condition_keys": {
+          "s3:AllowVendedLogDeliveryForResource": [
+            "aws:ResourceTag/${TagKey}",
+            "s3:BucketTag/${TagKey}",
+            "s3:deliverySourceArn",
+            "s3:logType",
+            "s3:resourceArnBeingAuthorized"
+          ],
+          "s3:GetAccelerateConfiguration": [
+            "aws:ResourceTag/${TagKey}",
+            "s3:BucketTag/${TagKey}",
+            "s3:ResourceAccount",
+            "s3:TlsVersion",
+            "s3:authType",
+            "s3:signatureAge",
+            "s3:signatureversion",
+            "s3:x-amz-content-sha256"
+          ],
+          "s3:GetAnalyticsConfiguration": [
+            "aws:ResourceTag/${TagKey}",
+            "s3:BucketTag/${TagKey}",
+            "s3:ResourceAccount",
+            "s3:TlsVersion",
+            "s3:authType",
+            "s3:signatureAge",
+            "s3:signatureversion",
+            "s3:x-amz-content-sha256"
+          ],
+          "s3:GetBucketAbac": [
+            "aws:ResourceTag/${TagKey}",
+            "s3:BucketTag/${TagKey}",
+            "s3:ResourceAccount",
+            "s3:TlsVersion",
+            "s3:authType",
+            "s3:signatureAge",
+            "s3:signatureversion",
+            "s3:x-amz-content-sha256"
+          ],
+          "s3:GetBucketAcl": [
+            "aws:ResourceTag/${TagKey}",
+            "s3:BucketTag/${TagKey}",
+            "s3:ResourceAccount",
+            "s3:TlsVersion",
+            "s3:authType",
+            "s3:signatureAge",
+            "s3:signatureversion",
+            "s3:x-amz-content-sha256"
+          ],
+          "s3:GetBucketCORS": [
+            "aws:ResourceTag/${TagKey}",
+            "s3:BucketTag/${TagKey}",
+            "s3:ResourceAccount",
+            "s3:TlsVersion",
+            "s3:authType",
+            "s3:signatureAge",
+            "s3:signatureversion",
+            "s3:x-amz-content-sha256"
+          ],
+          "s3:GetBucketLocation": [
+            "aws:ResourceTag/${TagKey}",
+            "s3:BucketTag/${TagKey}",
+            "s3:ResourceAccount",
+            "s3:TlsVersion",
+            "s3:authType",
+            "s3:signatureAge",
+            "s3:signatureversion",
+            "s3:x-amz-content-sha256"
+          ],
+          "s3:GetBucketLogging": [
+            "aws:ResourceTag/${TagKey}",
+            "s3:BucketTag/${TagKey}",
+            "s3:ResourceAccount",
+            "s3:TlsVersion",
+            "s3:authType",
+            "s3:signatureAge",
+            "s3:signatureversion",
+            "s3:x-amz-content-sha256"
+          ],
+          "s3:GetBucketMetadataTableConfiguration": [
+            "aws:ResourceTag/${TagKey}",
+            "s3:BucketTag/${TagKey}",
+            "s3:ResourceAccount",
+            "s3:TlsVersion",
+            "s3:authType",
+            "s3:signatureAge",
+            "s3:signatureversion",
+            "s3:x-amz-content-sha256"
+          ],
+          "s3:GetBucketNotification": [
+            "aws:ResourceTag/${TagKey}",
+            "s3:BucketTag/${TagKey}",
+            "s3:ResourceAccount",
+            "s3:TlsVersion",
+            "s3:authType",
+            "s3:signatureAge",
+            "s3:signatureversion",
+            "s3:x-amz-content-sha256"
+          ],
+          "s3:GetBucketObjectLockConfiguration": [
+            "aws:ResourceTag/${TagKey}",
+            "s3:BucketTag/${TagKey}",
+            "s3:ResourceAccount",
+            "s3:TlsVersion",
+            "s3:authType",
+            "s3:signatureAge",
+            "s3:signatureversion",
+            "s3:signatureversion"
+          ],
+          "s3:GetBucketOwnershipControls": [
+            "aws:ResourceTag/${TagKey}",
+            "s3:BucketTag/${TagKey}",
+            "s3:ResourceAccount",
+            "s3:TlsVersion",
+            "s3:authType",
+            "s3:signatureAge",
+            "s3:signatureversion",
+            "s3:x-amz-content-sha256"
+          ],
+          "s3:GetBucketPolicy": [
+            "aws:ResourceTag/${TagKey}",
+            "s3:BucketTag/${TagKey}",
+            "s3:ResourceAccount",
+            "s3:TlsVersion",
+            "s3:authType",
+            "s3:signatureAge",
+            "s3:signatureversion",
+            "s3:x-amz-content-sha256"
+          ],
+          "s3:GetBucketPolicyStatus": [
+            "aws:ResourceTag/${TagKey}",
+            "s3:BucketTag/${TagKey}",
+            "s3:ResourceAccount",
+            "s3:TlsVersion",
+            "s3:authType",
+            "s3:signatureAge",
+            "s3:signatureversion",
+            "s3:x-amz-content-sha256"
+          ],
+          "s3:GetBucketPublicAccessBlock": [
+            "aws:ResourceTag/${TagKey}",
+            "s3:BucketTag/${TagKey}",
+            "s3:ResourceAccount",
+            "s3:TlsVersion",
+            "s3:authType",
+            "s3:signatureAge",
+            "s3:signatureversion",
+            "s3:x-amz-content-sha256"
+          ],
+          "s3:GetBucketRequestPayment": [
+            "aws:ResourceTag/${TagKey}",
+            "s3:BucketTag/${TagKey}",
+            "s3:ResourceAccount",
+            "s3:TlsVersion",
+            "s3:authType",
+            "s3:signatureAge",
+            "s3:signatureversion",
+            "s3:x-amz-content-sha256"
+          ],
+          "s3:GetBucketTagging": [
+            "aws:ResourceTag/${TagKey}",
+            "s3:BucketTag/${TagKey}",
+            "s3:ResourceAccount",
+            "s3:TlsVersion",
+            "s3:authType",
+            "s3:signatureAge",
+            "s3:signatureversion",
+            "s3:x-amz-content-sha256"
+          ],
+          "s3:GetBucketVersioning": [
+            "aws:ResourceTag/${TagKey}",
+            "s3:BucketTag/${TagKey}",
+            "s3:ResourceAccount",
+            "s3:TlsVersion",
+            "s3:authType",
+            "s3:signatureAge",
+            "s3:signatureversion",
+            "s3:x-amz-content-sha256"
+          ],
+          "s3:GetBucketWebsite": [
+            "aws:ResourceTag/${TagKey}",
+            "s3:BucketTag/${TagKey}",
+            "s3:ResourceAccount",
+            "s3:TlsVersion",
+            "s3:authType",
+            "s3:signatureAge",
+            "s3:signatureversion",
+            "s3:x-amz-content-sha256"
+          ],
+          "s3:GetEncryptionConfiguration": [
+            "aws:ResourceTag/${TagKey}",
+            "s3:BucketTag/${TagKey}",
+            "s3:ResourceAccount",
+            "s3:TlsVersion",
+            "s3:authType",
+            "s3:signatureAge",
+            "s3:signatureversion",
+            "s3:x-amz-content-sha256"
+          ],
+          "s3:GetIntelligentTieringConfiguration": [
+            "aws:ResourceTag/${TagKey}",
+            "s3:BucketTag/${TagKey}",
+            "s3:ResourceAccount",
+            "s3:TlsVersion",
+            "s3:authType",
+            "s3:signatureAge",
+            "s3:signatureversion",
+            "s3:x-amz-content-sha256"
+          ],
+          "s3:GetInventoryConfiguration": [
+            "aws:ResourceTag/${TagKey}",
+            "s3:BucketTag/${TagKey}",
+            "s3:ResourceAccount",
+            "s3:TlsVersion",
+            "s3:authType",
+            "s3:signatureAge",
+            "s3:signatureversion",
+            "s3:x-amz-content-sha256"
+          ],
+          "s3:GetLifecycleConfiguration": [
+            "aws:ResourceTag/${TagKey}",
+            "s3:BucketTag/${TagKey}",
+            "s3:ResourceAccount",
+            "s3:TlsVersion",
+            "s3:authType",
+            "s3:signatureAge",
+            "s3:signatureversion",
+            "s3:x-amz-content-sha256"
+          ],
+          "s3:GetMetricsConfiguration": [
+            "aws:ResourceTag/${TagKey}",
+            "s3:BucketTag/${TagKey}",
+            "s3:ResourceAccount",
+            "s3:TlsVersion",
+            "s3:authType",
+            "s3:signatureAge",
+            "s3:signatureversion",
+            "s3:x-amz-content-sha256"
+          ],
+          "s3:GetReplicationConfiguration": [
+            "aws:ResourceTag/${TagKey}",
+            "s3:BucketTag/${TagKey}",
+            "s3:ResourceAccount",
+            "s3:TlsVersion",
+            "s3:authType",
+            "s3:signatureAge",
+            "s3:signatureversion",
+            "s3:x-amz-content-sha256"
+          ]
+        },
+        "raw_arn": "arn:${Partition}:s3:::${BucketName}",
+        "resource_type_name": "bucket",
+        "service_level_condition_keys": [
+          "aws:RequestTag/${TagKey}",
+          "aws:ResourceTag/${TagKey}",
+          "aws:TagKeys",
+          "s3:AccessGrantScope",
+          "s3:AccessGrantsInstanceArn",
+          "s3:AccessGrantsLocationScope",
+          "s3:AccessPointNetworkOrigin",
+          "s3:AccessPointTag/${TagKey}",
+          "s3:BucketTag/${TagKey}",
+          "s3:DataAccessPointAccount",
+          "s3:DataAccessPointArn",
+          "s3:ExistingJobOperation",
+          "s3:ExistingJobPriority",
+          "s3:ExistingObjectTag/<key>",
+          "s3:InventoryAccessibleOptionalFields",
+          "s3:JobSuspendedCause",
+          "s3:ObjectCreationOperation",
+          "s3:RequestJobOperation",
+          "s3:RequestJobPriority",
+          "s3:RequestObjectTag/<key>",
+          "s3:RequestObjectTagKeys",
+          "s3:ResourceAccount",
+          "s3:TlsVersion",
+          "s3:annotation-prefix",
+          "s3:authType",
+          "s3:delimiter",
+          "s3:deliverySourceArn",
+          "s3:destinationRegion",
+          "s3:if-match",
+          "s3:if-none-match",
+          "s3:isReplicationPauseRequest",
+          "s3:locationconstraint",
+          "s3:logType",
+          "s3:max-annotation-results",
+          "s3:max-keys",
+          "s3:object-lock-legal-hold",
+          "s3:object-lock-mode",
+          "s3:object-lock-remaining-retention-days",
+          "s3:object-lock-retain-until-date",
+          "s3:prefix",
+          "s3:resourceArnBeingAuthorized",
+          "s3:signatureAge",
+          "s3:signatureversion",
+          "s3:versionid",
+          "s3:x-amz-acl",
+          "s3:x-amz-bucket-namespace",
+          "s3:x-amz-content-sha256",
+          "s3:x-amz-copy-source",
+          "s3:x-amz-grant-full-control",
+          "s3:x-amz-grant-read",
+          "s3:x-amz-grant-read-acp",
+          "s3:x-amz-grant-write",
+          "s3:x-amz-grant-write-acp",
+          "s3:x-amz-metadata-directive",
+          "s3:x-amz-object-annotation-directive",
+          "s3:x-amz-object-if-match",
+          "s3:x-amz-object-ownership",
+          "s3:x-amz-server-side-encryption",
+          "s3:x-amz-server-side-encryption-aws-kms-key-id",
+          "s3:x-amz-server-side-encryption-customer-algorithm",
+          "s3:x-amz-storage-class",
+          "s3:x-amz-website-redirect-location"
+        ]
+      },
+      {
+        "access_level": "Read",
+        "actions": [
+          "s3:GetObject",
+          "s3:GetObjectAcl",
+          "s3:GetObjectAnnotation",
+          "s3:GetObjectAttributes",
+          "s3:GetObjectLegalHold",
+          "s3:GetObjectRetention",
+          "s3:GetObjectTagging",
+          "s3:GetObjectTorrent",
+          "s3:GetObjectVersion",
+          "s3:GetObjectVersionAcl",
+          "s3:GetObjectVersionAnnotation",
+          "s3:GetObjectVersionAnnotationForReplication",
+          "s3:GetObjectVersionAttributes",
+          "s3:GetObjectVersionForReplication",
+          "s3:GetObjectVersionTagging",
+          "s3:GetObjectVersionTorrent"
+        ],
+        "arn": "arn:aws:s3:::fict-proj-audit-logs/*",
+        "condition_keys_available_to_raw_arn": [
+          "aws:ResourceTag/${TagKey}",
+          "s3:BucketTag/${TagKey}"
+        ],
+        "per_action_condition_keys": {
+          "s3:GetObject": [
+            "aws:ResourceTag/${TagKey}",
+            "s3:AccessGrantsInstanceArn",
+            "s3:BucketTag/${TagKey}",
+            "s3:ExistingObjectTag/<key>",
+            "s3:ResourceAccount",
+            "s3:TlsVersion",
+            "s3:authType",
+            "s3:signatureAge",
+            "s3:signatureversion",
+            "s3:x-amz-content-sha256"
+          ],
+          "s3:GetObjectAcl": [
+            "aws:ResourceTag/${TagKey}",
+            "s3:AccessGrantsInstanceArn",
+            "s3:BucketTag/${TagKey}",
+            "s3:ExistingObjectTag/<key>",
+            "s3:ResourceAccount",
+            "s3:TlsVersion",
+            "s3:authType",
+            "s3:signatureAge",
+            "s3:signatureversion",
+            "s3:x-amz-content-sha256"
+          ],
+          "s3:GetObjectAnnotation": [
+            "aws:ResourceTag/${TagKey}",
+            "s3:BucketTag/${TagKey}",
+            "s3:ExistingObjectTag/<key>",
+            "s3:ResourceAccount",
+            "s3:TlsVersion",
+            "s3:authType",
+            "s3:signatureAge",
+            "s3:signatureversion",
+            "s3:x-amz-content-sha256"
+          ],
+          "s3:GetObjectAttributes": [
+            "aws:ResourceTag/${TagKey}",
+            "s3:BucketTag/${TagKey}",
+            "s3:ExistingObjectTag/<key>",
+            "s3:ResourceAccount",
+            "s3:TlsVersion",
+            "s3:authType",
+            "s3:signatureAge",
+            "s3:signatureversion",
+            "s3:x-amz-content-sha256"
+          ],
+          "s3:GetObjectLegalHold": [
+            "aws:ResourceTag/${TagKey}",
+            "s3:BucketTag/${TagKey}",
+            "s3:ResourceAccount",
+            "s3:TlsVersion",
+            "s3:authType",
+            "s3:signatureAge",
+            "s3:signatureversion",
+            "s3:x-amz-content-sha256"
+          ],
+          "s3:GetObjectRetention": [
+            "aws:ResourceTag/${TagKey}",
+            "s3:BucketTag/${TagKey}",
+            "s3:ResourceAccount",
+            "s3:TlsVersion",
+            "s3:authType",
+            "s3:signatureAge",
+            "s3:signatureversion",
+            "s3:x-amz-content-sha256"
+          ],
+          "s3:GetObjectTagging": [
+            "aws:ResourceTag/${TagKey}",
+            "s3:BucketTag/${TagKey}",
+            "s3:ExistingObjectTag/<key>",
+            "s3:ResourceAccount",
+            "s3:TlsVersion",
+            "s3:authType",
+            "s3:signatureAge",
+            "s3:signatureversion",
+            "s3:x-amz-content-sha256"
+          ],
+          "s3:GetObjectTorrent": [
+            "aws:ResourceTag/${TagKey}",
+            "s3:BucketTag/${TagKey}",
+            "s3:ResourceAccount",
+            "s3:TlsVersion",
+            "s3:authType",
+            "s3:signatureAge",
+            "s3:signatureversion",
+            "s3:x-amz-content-sha256"
+          ],
+          "s3:GetObjectVersion": [
+            "aws:ResourceTag/${TagKey}",
+            "s3:AccessGrantsInstanceArn",
+            "s3:BucketTag/${TagKey}",
+            "s3:ExistingObjectTag/<key>",
+            "s3:ResourceAccount",
+            "s3:TlsVersion",
+            "s3:authType",
+            "s3:signatureAge",
+            "s3:signatureversion",
+            "s3:versionid",
+            "s3:x-amz-content-sha256"
+          ],
+          "s3:GetObjectVersionAcl": [
+            "aws:ResourceTag/${TagKey}",
+            "s3:AccessGrantsInstanceArn",
+            "s3:BucketTag/${TagKey}",
+            "s3:ExistingObjectTag/<key>",
+            "s3:ResourceAccount",
+            "s3:TlsVersion",
+            "s3:authType",
+            "s3:signatureAge",
+            "s3:signatureversion",
+            "s3:versionid",
+            "s3:x-amz-content-sha256"
+          ],
+          "s3:GetObjectVersionAnnotation": [
+            "aws:ResourceTag/${TagKey}",
+            "s3:BucketTag/${TagKey}",
+            "s3:ExistingObjectTag/<key>",
+            "s3:ResourceAccount",
+            "s3:TlsVersion",
+            "s3:authType",
+            "s3:signatureAge",
+            "s3:signatureversion",
+            "s3:versionid",
+            "s3:x-amz-content-sha256"
+          ],
+          "s3:GetObjectVersionAnnotationForReplication": [
+            "aws:ResourceTag/${TagKey}",
+            "s3:BucketTag/${TagKey}",
+            "s3:ResourceAccount",
+            "s3:TlsVersion",
+            "s3:authType",
+            "s3:signatureAge",
+            "s3:signatureversion",
+            "s3:x-amz-content-sha256"
+          ],
+          "s3:GetObjectVersionAttributes": [
+            "aws:ResourceTag/${TagKey}",
+            "s3:BucketTag/${TagKey}",
+            "s3:ExistingObjectTag/<key>",
+            "s3:ResourceAccount",
+            "s3:TlsVersion",
+            "s3:authType",
+            "s3:signatureAge",
+            "s3:signatureversion",
+            "s3:versionid",
+            "s3:x-amz-content-sha256"
+          ],
+          "s3:GetObjectVersionForReplication": [
+            "aws:ResourceTag/${TagKey}",
+            "s3:BucketTag/${TagKey}",
+            "s3:ResourceAccount",
+            "s3:TlsVersion",
+            "s3:authType",
+            "s3:signatureAge",
+            "s3:signatureversion",
+            "s3:x-amz-content-sha256"
+          ],
+          "s3:GetObjectVersionTagging": [
+            "aws:ResourceTag/${TagKey}",
+            "s3:BucketTag/${TagKey}",
+            "s3:ExistingObjectTag/<key>",
+            "s3:ResourceAccount",
+            "s3:TlsVersion",
+            "s3:authType",
+            "s3:signatureAge",
+            "s3:signatureversion",
+            "s3:versionid",
+            "s3:x-amz-content-sha256"
+          ],
+          "s3:GetObjectVersionTorrent": [
+            "aws:ResourceTag/${TagKey}",
+            "s3:BucketTag/${TagKey}",
+            "s3:ResourceAccount",
+            "s3:TlsVersion",
+            "s3:authType",
+            "s3:signatureAge",
+            "s3:signatureversion",
+            "s3:versionid",
+            "s3:x-amz-content-sha256"
+          ]
+        },
+        "raw_arn": "arn:${Partition}:s3:::${BucketName}/${ObjectName}",
+        "resource_type_name": "object",
+        "service_level_condition_keys": [
+          "aws:RequestTag/${TagKey}",
+          "aws:ResourceTag/${TagKey}",
+          "aws:TagKeys",
+          "s3:AccessGrantScope",
+          "s3:AccessGrantsInstanceArn",
+          "s3:AccessGrantsLocationScope",
+          "s3:AccessPointNetworkOrigin",
+          "s3:AccessPointTag/${TagKey}",
+          "s3:BucketTag/${TagKey}",
+          "s3:DataAccessPointAccount",
+          "s3:DataAccessPointArn",
+          "s3:ExistingJobOperation",
+          "s3:ExistingJobPriority",
+          "s3:ExistingObjectTag/<key>",
+          "s3:InventoryAccessibleOptionalFields",
+          "s3:JobSuspendedCause",
+          "s3:ObjectCreationOperation",
+          "s3:RequestJobOperation",
+          "s3:RequestJobPriority",
+          "s3:RequestObjectTag/<key>",
+          "s3:RequestObjectTagKeys",
+          "s3:ResourceAccount",
+          "s3:TlsVersion",
+          "s3:annotation-prefix",
+          "s3:authType",
+          "s3:delimiter",
+          "s3:deliverySourceArn",
+          "s3:destinationRegion",
+          "s3:if-match",
+          "s3:if-none-match",
+          "s3:isReplicationPauseRequest",
+          "s3:locationconstraint",
+          "s3:logType",
+          "s3:max-annotation-results",
+          "s3:max-keys",
+          "s3:object-lock-legal-hold",
+          "s3:object-lock-mode",
+          "s3:object-lock-remaining-retention-days",
+          "s3:object-lock-retain-until-date",
+          "s3:prefix",
+          "s3:resourceArnBeingAuthorized",
+          "s3:signatureAge",
+          "s3:signatureversion",
+          "s3:versionid",
+          "s3:x-amz-acl",
+          "s3:x-amz-bucket-namespace",
+          "s3:x-amz-content-sha256",
+          "s3:x-amz-copy-source",
+          "s3:x-amz-grant-full-control",
+          "s3:x-amz-grant-read",
+          "s3:x-amz-grant-read-acp",
+          "s3:x-amz-grant-write",
+          "s3:x-amz-grant-write-acp",
+          "s3:x-amz-metadata-directive",
+          "s3:x-amz-object-annotation-directive",
+          "s3:x-amz-object-if-match",
+          "s3:x-amz-object-ownership",
+          "s3:x-amz-server-side-encryption",
+          "s3:x-amz-server-side-encryption-aws-kms-key-id",
+          "s3:x-amz-server-side-encryption-customer-algorithm",
+          "s3:x-amz-storage-class",
+          "s3:x-amz-website-redirect-location"
+        ]
+      },
+      {
+        "access_level": "List",
+        "actions": [
+          "s3:ListBucket",
+          "s3:ListBucketMultipartUploads",
+          "s3:ListBucketVersions",
+          "s3:ListTagsForResource"
+        ],
+        "arn": "arn:aws:s3:::fict-proj-audit-logs",
+        "condition_keys_available_to_raw_arn": [
+          "aws:ResourceTag/${TagKey}",
+          "s3:BucketTag/${TagKey}"
+        ],
+        "per_action_condition_keys": {
+          "s3:ListBucket": [
+            "aws:ResourceTag/${TagKey}",
+            "s3:AccessGrantsInstanceArn",
+            "s3:BucketTag/${TagKey}",
+            "s3:ResourceAccount",
+            "s3:TlsVersion",
+            "s3:authType",
+            "s3:delimiter",
+            "s3:max-keys",
+            "s3:prefix",
+            "s3:signatureAge",
+            "s3:signatureversion",
+            "s3:x-amz-content-sha256"
+          ],
+          "s3:ListBucketMultipartUploads": [
+            "aws:ResourceTag/${TagKey}",
+            "aws:ResourceTag/${TagKey}",
+            "s3:AccessGrantsInstanceArn",
+            "s3:AccessPointNetworkOrigin",
+            "s3:AccessPointTag/${TagKey}",
+            "s3:BucketTag/${TagKey}",
+            "s3:DataAccessPointAccount",
+            "s3:DataAccessPointArn",
+            "s3:ResourceAccount",
+            "s3:TlsVersion",
+            "s3:authType",
+            "s3:signatureAge",
+            "s3:signatureversion",
+            "s3:x-amz-content-sha256"
+          ],
+          "s3:ListBucketVersions": [
+            "aws:ResourceTag/${TagKey}",
+            "s3:AccessGrantsInstanceArn",
+            "s3:BucketTag/${TagKey}",
+            "s3:ResourceAccount",
+            "s3:TlsVersion",
+            "s3:authType",
+            "s3:delimiter",
+            "s3:max-keys",
+            "s3:prefix",
+            "s3:signatureAge",
+            "s3:signatureversion",
+            "s3:x-amz-content-sha256"
+          ],
+          "s3:ListTagsForResource": [
+            "aws:ResourceTag/${TagKey}",
+            "s3:BucketTag/${TagKey}",
+            "s3:ResourceAccount",
+            "s3:TlsVersion",
+            "s3:authType",
+            "s3:signatureAge",
+            "s3:signatureversion",
+            "s3:x-amz-content-sha256"
+          ]
+        },
+        "raw_arn": "arn:${Partition}:s3:::${BucketName}",
+        "resource_type_name": "bucket",
+        "service_level_condition_keys": [
+          "aws:RequestTag/${TagKey}",
+          "aws:ResourceTag/${TagKey}",
+          "aws:TagKeys",
+          "s3:AccessGrantScope",
+          "s3:AccessGrantsInstanceArn",
+          "s3:AccessGrantsLocationScope",
+          "s3:AccessPointNetworkOrigin",
+          "s3:AccessPointTag/${TagKey}",
+          "s3:BucketTag/${TagKey}",
+          "s3:DataAccessPointAccount",
+          "s3:DataAccessPointArn",
+          "s3:ExistingJobOperation",
+          "s3:ExistingJobPriority",
+          "s3:ExistingObjectTag/<key>",
+          "s3:InventoryAccessibleOptionalFields",
+          "s3:JobSuspendedCause",
+          "s3:ObjectCreationOperation",
+          "s3:RequestJobOperation",
+          "s3:RequestJobPriority",
+          "s3:RequestObjectTag/<key>",
+          "s3:RequestObjectTagKeys",
+          "s3:ResourceAccount",
+          "s3:TlsVersion",
+          "s3:annotation-prefix",
+          "s3:authType",
+          "s3:delimiter",
+          "s3:deliverySourceArn",
+          "s3:destinationRegion",
+          "s3:if-match",
+          "s3:if-none-match",
+          "s3:isReplicationPauseRequest",
+          "s3:locationconstraint",
+          "s3:logType",
+          "s3:max-annotation-results",
+          "s3:max-keys",
+          "s3:object-lock-legal-hold",
+          "s3:object-lock-mode",
+          "s3:object-lock-remaining-retention-days",
+          "s3:object-lock-retain-until-date",
+          "s3:prefix",
+          "s3:resourceArnBeingAuthorized",
+          "s3:signatureAge",
+          "s3:signatureversion",
+          "s3:versionid",
+          "s3:x-amz-acl",
+          "s3:x-amz-bucket-namespace",
+          "s3:x-amz-content-sha256",
+          "s3:x-amz-copy-source",
+          "s3:x-amz-grant-full-control",
+          "s3:x-amz-grant-read",
+          "s3:x-amz-grant-read-acp",
+          "s3:x-amz-grant-write",
+          "s3:x-amz-grant-write-acp",
+          "s3:x-amz-metadata-directive",
+          "s3:x-amz-object-annotation-directive",
+          "s3:x-amz-object-if-match",
+          "s3:x-amz-object-ownership",
+          "s3:x-amz-server-side-encryption",
+          "s3:x-amz-server-side-encryption-aws-kms-key-id",
+          "s3:x-amz-server-side-encryption-customer-algorithm",
+          "s3:x-amz-storage-class",
+          "s3:x-amz-website-redirect-location"
+        ]
+      }
+    ],
+    "layer4_final_sid": {
+      "internal_sid_group": {
+        "KmsReadKey": {
+          "access_level": "Read",
+          "actions": [
+            "kms:DescribeKey",
+            "kms:GetKeyLastUsage",
+            "kms:GetKeyPolicy",
+            "kms:GetKeyRotationStatus",
+            "kms:GetParametersForImport",
+            "kms:GetPublicKey"
+          ],
+          "arn": [
+            "arn:aws:kms:ap-southeast-2:111122223333:key/11111111-2222-3333-4444-555555555555"
+          ],
+          "arn_format": "arn:${Partition}:kms:${Region}:${Account}:key/${KeyId}",
+          "conditions": [],
+          "service": "kms"
+        },
+        "S3ListBucket": {
+          "access_level": "List",
+          "actions": [
+            "s3:ListBucket",
+            "s3:ListBucketMultipartUploads",
+            "s3:ListBucketVersions",
+            "s3:ListTagsForResource"
+          ],
+          "arn": [
+            "arn:aws:s3:::fict-proj-audit-logs"
+          ],
+          "arn_format": "arn:${Partition}:s3:::${BucketName}",
+          "conditions": [],
+          "service": "s3"
+        },
+        "S3ReadBucket": {
+          "access_level": "Read",
+          "actions": [
+            "s3:AllowVendedLogDeliveryForResource",
+            "s3:GetAccelerateConfiguration",
+            "s3:GetAnalyticsConfiguration",
+            "s3:GetBucketAbac",
+            "s3:GetBucketAcl",
+            "s3:GetBucketCORS",
+            "s3:GetBucketLocation",
+            "s3:GetBucketLogging",
+            "s3:GetBucketMetadataTableConfiguration",
+            "s3:GetBucketNotification",
+            "s3:GetBucketObjectLockConfiguration",
+            "s3:GetBucketOwnershipControls",
+            "s3:GetBucketPolicy",
+            "s3:GetBucketPolicyStatus",
+            "s3:GetBucketPublicAccessBlock",
+            "s3:GetBucketRequestPayment",
+            "s3:GetBucketTagging",
+            "s3:GetBucketVersioning",
+            "s3:GetBucketWebsite",
+            "s3:GetEncryptionConfiguration",
+            "s3:GetIntelligentTieringConfiguration",
+            "s3:GetInventoryConfiguration",
+            "s3:GetLifecycleConfiguration",
+            "s3:GetMetricsConfiguration",
+            "s3:GetReplicationConfiguration"
+          ],
+          "arn": [
+            "arn:aws:s3:::fict-proj-audit-logs"
+          ],
+          "arn_format": "arn:${Partition}:s3:::${BucketName}",
+          "conditions": [],
+          "service": "s3"
+        },
+        "S3ReadObject": {
+          "access_level": "Read",
+          "actions": [
+            "s3:GetObject",
+            "s3:GetObjectAcl",
+            "s3:GetObjectAnnotation",
+            "s3:GetObjectAttributes",
+            "s3:GetObjectLegalHold",
+            "s3:GetObjectRetention",
+            "s3:GetObjectTagging",
+            "s3:GetObjectTorrent",
+            "s3:GetObjectVersion",
+            "s3:GetObjectVersionAcl",
+            "s3:GetObjectVersionAnnotation",
+            "s3:GetObjectVersionAnnotationForReplication",
+            "s3:GetObjectVersionAttributes",
+            "s3:GetObjectVersionForReplication",
+            "s3:GetObjectVersionTagging",
+            "s3:GetObjectVersionTorrent"
+          ],
+          "arn": [
+            "arn:aws:s3:::fict-proj-audit-logs/*"
+          ],
+          "arn_format": "arn:${Partition}:s3:::${BucketName}/${ObjectName}",
+          "conditions": [],
+          "service": "s3"
+        }
+      },
+      "rendered_policy": {
+        "Statement": [
+          {
+            "Action": [
+              "kms:DescribeKey",
+              "kms:GetKeyLastUsage",
+              "kms:GetKeyPolicy",
+              "kms:GetKeyRotationStatus",
+              "kms:GetParametersForImport",
+              "kms:GetPublicKey"
+            ],
+            "Effect": "Allow",
+            "Resource": [
+              "arn:aws:kms:ap-southeast-2:111122223333:key/11111111-2222-3333-4444-555555555555"
+            ],
+            "Sid": "KmsReadKey"
+          },
+          {
+            "Action": [
+              "s3:AllowVendedLogDeliveryForResource",
+              "s3:GetAccelerateConfiguration",
+              "s3:GetAnalyticsConfiguration",
+              "s3:GetBucketAbac",
+              "s3:GetBucketAcl",
+              "s3:GetBucketCORS",
+              "s3:GetBucketLocation",
+              "s3:GetBucketLogging",
+              "s3:GetBucketMetadataTableConfiguration",
+              "s3:GetBucketNotification",
+              "s3:GetBucketObjectLockConfiguration",
+              "s3:GetBucketOwnershipControls",
+              "s3:GetBucketPolicy",
+              "s3:GetBucketPolicyStatus",
+              "s3:GetBucketPublicAccessBlock",
+              "s3:GetBucketRequestPayment",
+              "s3:GetBucketTagging",
+              "s3:GetBucketVersioning",
+              "s3:GetBucketWebsite",
+              "s3:GetEncryptionConfiguration",
+              "s3:GetIntelligentTieringConfiguration",
+              "s3:GetInventoryConfiguration",
+              "s3:GetLifecycleConfiguration",
+              "s3:GetMetricsConfiguration",
+              "s3:GetReplicationConfiguration"
+            ],
+            "Effect": "Allow",
+            "Resource": [
+              "arn:aws:s3:::fict-proj-audit-logs"
+            ],
+            "Sid": "S3ReadBucket"
+          },
+          {
+            "Action": [
+              "s3:GetObject",
+              "s3:GetObjectAcl",
+              "s3:GetObjectAnnotation",
+              "s3:GetObjectAttributes",
+              "s3:GetObjectLegalHold",
+              "s3:GetObjectRetention",
+              "s3:GetObjectTagging",
+              "s3:GetObjectTorrent",
+              "s3:GetObjectVersion",
+              "s3:GetObjectVersionAcl",
+              "s3:GetObjectVersionAnnotation",
+              "s3:GetObjectVersionAnnotationForReplication",
+              "s3:GetObjectVersionAttributes",
+              "s3:GetObjectVersionForReplication",
+              "s3:GetObjectVersionTagging",
+              "s3:GetObjectVersionTorrent"
+            ],
+            "Effect": "Allow",
+            "Resource": [
+              "arn:aws:s3:::fict-proj-audit-logs/*"
+            ],
+            "Sid": "S3ReadObject"
+          },
+          {
+            "Action": [
+              "s3:ListBucket",
+              "s3:ListBucketMultipartUploads",
+              "s3:ListBucketVersions",
+              "s3:ListTagsForResource"
+            ],
+            "Effect": "Allow",
+            "Resource": [
+              "arn:aws:s3:::fict-proj-audit-logs"
+            ],
+            "Sid": "S3ListBucket"
+          }
+        ],
+        "Version": "2012-10-17"
+      }
+    }
+  },
+  "run_name": "C-snapshot-only"
+}
