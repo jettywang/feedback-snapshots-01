@@ -11,7 +11,7 @@
 # under the License.
 
 import collections
-from collections.abc import MutableMapping
+from collections.abc import Iterable, Mapping, MutableMapping
 from contextlib import AbstractContextManager
 import datetime
 import functools
@@ -38,7 +38,9 @@ import keystoneauth1
 from keystoneauth1 import _utils as utils
 from keystoneauth1 import discover
 from keystoneauth1 import exceptions
+from keystoneauth1 import outbound
 from keystoneauth1 import plugin
+from keystoneauth1.outbound import OutboundPolicy, OutboundScope
 
 try:
     import netaddr
@@ -394,8 +396,43 @@ class Session:
         connect_retries: int = 0,
         tls_ciphers: str | None = None,
         tls_min_version: TLSVersionT | None = None,
+        outbound_policy: (OutboundPolicy | Mapping[str, Any] | None) = None,
+        outbound_scope: OutboundScope | Mapping[str, Any] | None = None,
+        discovery_addresses: Iterable[str] | None = None,
+        business_addresses: Iterable[str] | None = None,
+        **kwargs: Any,
     ):
+        alias_policy = outbound.pop_constructor_policy_kwargs(kwargs)
+        if kwargs:
+            raise TypeError(
+                "Session.__init__() got unexpected keyword argument(s): "
+                f"{', '.join(sorted(kwargs))}"
+            )
+
+        policy = outbound.OutboundPolicy.coerce(
+            outbound_policy or outbound_scope
+        )
+        address_policy = None
+        if discovery_addresses is not None or business_addresses is not None:
+            address_policy = outbound.OutboundPolicy(
+                discovery_addresses=discovery_addresses,
+                business_addresses=business_addresses,
+            )
+        if policy is None:
+            policy = alias_policy or address_policy
+        elif address_policy is not None:
+            for address in address_policy.discovery_addresses:
+                policy.add_address(outbound.DISCOVERY, address)
+            for address in address_policy.business_addresses:
+                policy.add_address(outbound.BUSINESS, address)
+        elif alias_policy is not None:
+            for address in alias_policy.discovery_addresses:
+                policy.add_address(outbound.DISCOVERY, address)
+            for address in alias_policy.business_addresses:
+                policy.add_address(outbound.BUSINESS, address)
+
         self.auth = auth
+        self.outbound_policy = policy
         self.tls_ciphers = tls_ciphers
         self.tls_min_version = tls_min_version
         self.session = _construct_session(
@@ -906,6 +943,31 @@ class Session:
         )
         rate_semaphore = rate_semaphore or self._rate_semaphore
 
+        outbound_phase = (
+            outbound.pop_phase_kwarg(kwargs)
+            or outbound.current_phase()
+            or outbound.BUSINESS
+        )
+        request_policy = outbound.pop_policy_kwarg(kwargs)
+        request_alias_policy = outbound.pop_constructor_policy_kwargs(kwargs)
+        outbound_policy = request_policy or self.outbound_policy
+        if outbound_policy is not None:
+            outbound_policy = outbound.OutboundPolicy.coerce(outbound_policy)
+        if request_alias_policy is not None:
+            if outbound_policy is None:
+                outbound_policy = request_alias_policy
+            else:
+                outbound_policy = outbound.OutboundPolicy(
+                    discovery_addresses=(
+                        outbound_policy.discovery_addresses
+                        | request_alias_policy.discovery_addresses
+                    ),
+                    business_addresses=(
+                        outbound_policy.business_addresses
+                        | request_alias_policy.business_addresses
+                    ),
+                )
+
         headers = kwargs.setdefault('headers', {})
         if microversion:
             self._set_microversion_headers(
@@ -918,8 +980,19 @@ class Session:
         if authenticated is None:
             authenticated = bool(auth or self.auth)
 
+        if (
+            outbound_policy is not None
+            and outbound_phase == outbound.DISCOVERY
+            and getattr(outbound_policy, 'public_auth', None) is None
+        ):
+            # Catalog/version discovery has a public identity boundary.  An
+            # explicit authenticated=True fallback must not turn a public
+            # query into a business request.
+            authenticated = False
+
         if authenticated:
-            auth_headers = self.get_auth_headers(auth)
+            with outbound.phase_scope(outbound.IDENTITY):
+                auth_headers = self.get_auth_headers(auth)
 
             if auth_headers is None:
                 msg = 'No valid authentication is available'
@@ -1014,6 +1087,8 @@ class Session:
 
         # Bug #1766235: some headers may be bytes
         headers = _sanitize_headers(headers)
+        if outbound_policy is not None:
+            outbound.apply_credential_boundary(outbound_phase, headers)
         kwargs['headers'] = headers
 
         kwargs.setdefault('verify', self.verify)
@@ -1061,6 +1136,8 @@ class Session:
             rate_semaphore,
             connect_retry_delays,
             status_code_retry_delays,
+            outbound_phase,
+            outbound_policy,
         )
 
         try:
@@ -1126,7 +1203,8 @@ class Session:
         # and then retrying the request. This is only tried once.
         if resp.status_code == 401 and authenticated and allow_reauth:
             if self.invalidate(auth):
-                auth_headers = self.get_auth_headers(auth)
+                with outbound.phase_scope(outbound.IDENTITY):
+                    auth_headers = self.get_auth_headers(auth)
 
                 if auth_headers is not None:
                     headers.update(auth_headers)
@@ -1171,6 +1249,8 @@ class Session:
         rate_semaphore: AbstractContextManager[None],
         connect_retry_delays: _Retries,
         status_code_retry_delays: _Retries,
+        outbound_phase: str = outbound.BUSINESS,
+        outbound_policy: outbound.OutboundPolicy | None = None,
         **kwargs: Any,
     ) -> requests.Response:
         # NOTE(jamielennox): We handle redirection manually because the
@@ -1183,6 +1263,23 @@ class Session:
         # redirects rather than per request limits. Otherwise the extreme case
         # could be redirects * retries requests. This will be sufficient in
         # most cases and can be fixed properly if there's ever a need.
+
+        # Re-evaluate the mutable policy for every actual transport send.
+        # This is the single choke point used by the initial request, manual
+        # redirects and all recursive retry paths.
+        if outbound_policy is not None:
+            outbound.apply_credential_boundary(
+                outbound_phase, kwargs.get('headers')
+            )
+            decision = outbound_policy.authorize(
+                outbound_phase,
+                url,
+                headers=kwargs.get('headers'),
+                method=method,
+            )
+            outbound_policy.record_send(
+                decision, kwargs.get('headers'), method
+            )
 
         try:
             try:
@@ -1232,6 +1329,8 @@ class Session:
                 connect_retries=connect_retries - 1,
                 connect_retry_delays=connect_retry_delays,
                 status_code_retry_delays=status_code_retry_delays,
+                outbound_phase=outbound_phase,
+                outbound_policy=outbound_policy,
                 **kwargs,
             )
 
@@ -1276,8 +1375,9 @@ class Session:
                 # This request actually worked so we can reset the delay count.
                 connect_retry_delays.reset()
                 status_code_retry_delays.reset()
+                redirect_url = urllib.parse.urljoin(url, location)
                 new_resp = self._send_request(
-                    location,
+                    redirect_url,
                     method,
                     redirect,
                     log,
@@ -1289,6 +1389,8 @@ class Session:
                     retriable_status_codes=retriable_status_codes,
                     connect_retry_delays=connect_retry_delays,
                     status_code_retry_delays=status_code_retry_delays,
+                    outbound_phase=outbound_phase,
+                    outbound_policy=outbound_policy,
                     **kwargs,
                 )
 
@@ -1335,6 +1437,8 @@ class Session:
                 rate_semaphore=rate_semaphore,
                 connect_retry_delays=connect_retry_delays,
                 status_code_retry_delays=status_code_retry_delays,
+                outbound_phase=outbound_phase,
+                outbound_policy=outbound_policy,
                 **kwargs,
             )
 

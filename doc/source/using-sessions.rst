@@ -610,3 +610,39 @@ logger at the ``DEBUG`` level, and the strings ``REQ:``, ``RESP:`` and
 .. _Microversions: https://specs.openstack.org/openstack/api-wg/guidelines/microversion_specification.html#version-discovery
 .. _python logging: https://docs.python.org/3/library/logging.html
 .. _logger: https://docs.python.org/3/library/logging.html#logging.Logger
+
+Outbound network scopes
+-----------------------
+
+When discovery endpoints and business API endpoints are in different network
+zones, configure the two outbound scopes separately:
+
+.. code-block:: python
+
+   from keystoneauth1 import outbound
+   from keystoneauth1 import session
+
+   policy = outbound.OutboundPolicy(
+       discovery_addresses=[
+           "http://catalog-public.example",
+           "http://version-public.example",
+       ],
+       business_addresses=[
+           "http://compute-service.example",
+       ],
+   )
+   sess = session.Session(auth=auth, outbound_policy=policy)
+
+Version discovery is marked as the ``discovery`` phase. Business calls use the
+``business`` phase. The policy is evaluated immediately before every transport
+send, including redirect targets, connection/status retries and the retry
+after re-authentication. The lists are mutable; call
+``revoke_business_address`` to stop a later retry from reaching a withdrawn
+destination.
+
+Discovery requests do not inherit ``X-Auth-Token``, ``X-Service-Token`` or
+``Authorization`` business credentials, even when the same origin is also
+listed in the business scope. Identity/token requests made while obtaining
+authentication headers use the discovery address scope and are recorded as the
+``identity`` phase. Each policy also keeps a secret-free ``sends`` ledger for
+tests and diagnostics.

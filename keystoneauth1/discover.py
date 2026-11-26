@@ -33,6 +33,7 @@ import os_service_types
 
 from keystoneauth1 import _utils as utils
 from keystoneauth1 import exceptions
+from keystoneauth1 import outbound
 
 if TYPE_CHECKING:
     from keystoneauth1 import adapter as ks_adapter
@@ -135,19 +136,20 @@ def get_version_data(
     if effective_header:
         headers['OpenStack-API-Version'] = effective_header
 
-    try:
+    with outbound.phase_scope(outbound.DISCOVERY):
         try:
-            resp = session.get(
-                url, headers=headers, authenticated=authenticated
-            )
-        except exceptions.Unauthorized:
-            resp = session.get(url, headers=headers, authenticated=True)
-    except exceptions.NotAcceptable:
-        if version_header is not None or service_type != 'key-manager':
-            raise
-        # Older Barbican deployments may reject the automatic probe. Retain
-        # legacy discovery without claiming a microversion range.
-        return get_version_data(session, url, authenticated=authenticated)
+            try:
+                resp = session.get(
+                    url, headers=headers, authenticated=authenticated
+                )
+            except exceptions.Unauthorized:
+                resp = session.get(url, headers=headers, authenticated=True)
+        except exceptions.NotAcceptable:
+            if version_header is not None or service_type != 'key-manager':
+                raise
+            # Older Barbican deployments may reject the automatic probe. Retain
+            # legacy discovery without claiming a microversion range.
+            return get_version_data(session, url, authenticated=authenticated)
 
     try:
         body_resp = resp.json()

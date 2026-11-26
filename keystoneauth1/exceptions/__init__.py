@@ -19,5 +19,6 @@ from keystoneauth1.exceptions.connection import *  # noqa
 from keystoneauth1.exceptions.discovery import *  # noqa
 from keystoneauth1.exceptions.http import *  # noqa
 from keystoneauth1.exceptions.oidc import *  # noqa
+from keystoneauth1.exceptions.outbound import *  # noqa
 from keystoneauth1.exceptions.response import *  # noqa
 from keystoneauth1.exceptions.service_providers import *  # noqa

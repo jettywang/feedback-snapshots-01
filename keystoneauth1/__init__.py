@@ -12,5 +12,9 @@
 
 import importlib.metadata
 
+from keystoneauth1.outbound import OutboundPolicy, OutboundScope
+
 
 __version__ = importlib.metadata.version('keystoneauth1')
+
+__all__ = ('OutboundPolicy', 'OutboundScope', '__version__')
