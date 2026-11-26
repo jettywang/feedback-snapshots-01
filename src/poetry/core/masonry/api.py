@@ -7,11 +7,16 @@ from __future__ import annotations
 import logging
 
 from pathlib import Path
+from typing import TYPE_CHECKING
 from typing import Any
 
 from poetry.core.factory import Factory
 from poetry.core.masonry.builders.sdist import SdistBuilder
 from poetry.core.masonry.builders.wheel import WheelBuilder
+
+
+if TYPE_CHECKING:
+    import os
 
 
 log = logging.getLogger(__name__)
@@ -89,6 +94,30 @@ def build_editable(
         Path(wheel_directory),
         metadata_directory=metadata_path,
         editable=True,
+        config_settings=config_settings,
+    )
+
+
+def validate_editable_install(
+    project_directory: str | os.PathLike[str] | None = None,
+    config_settings: dict[str, Any] | None = None,
+    approved_source_roots: list[str] | None = None,
+) -> Any:
+    """Validate the search roots an editable wheel would add.
+
+    This is the optional pre-release validation entry point.  It compares the
+    roots that would actually be written to the editable ``.pth`` against the
+    approved source roots passed explicitly, provided via config settings /
+    ``[tool.poetry] approved-source-roots`` or the environment.
+
+    Returns an ``EditableRootReport`` and raises
+    ``UnapprovedEditableRootError`` when a root is outside the approved set.
+    """
+    from poetry.core.masonry.utils.editable_roots import validate_editable_project
+
+    return validate_editable_project(
+        project_directory,
+        approved_source_roots,
         config_settings=config_settings,
     )
 

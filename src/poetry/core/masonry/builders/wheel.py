@@ -28,19 +28,26 @@ from poetry.core import __version__
 from poetry.core.constraints.version import parse_constraint
 from poetry.core.masonry.builders.builder import Builder
 from poetry.core.masonry.builders.sdist import SdistBuilder
+from poetry.core.masonry.utils.editable_roots import UnapprovedEditableRootError
 from poetry.core.masonry.utils.helpers import distribution_name
 from poetry.core.masonry.utils.helpers import normalize_file_permissions
-from poetry.core.masonry.utils.package_include import PackageInclude
 
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
+    from collections.abc import Sequence
 
     from packaging.utils import NormalizedName
 
+    from poetry.core.masonry.utils.editable_roots import EditableRootEntry
+    from poetry.core.masonry.utils.editable_roots import EditableRootPolicy
+    from poetry.core.masonry.utils.editable_roots import EditableRootReport
     from poetry.core.poetry import Poetry
 
     ZipInfoTimestamp = tuple[int, int, int, int, int, int]
+
+
+__all__ = ["UnapprovedEditableRootError", "WheelBuilder"]
 
 wheel_file_template = """\
 Wheel-Version: 1.0
@@ -63,6 +70,11 @@ class WheelBuilder(Builder):
         editable: bool = False,
         metadata_directory: Path | None = None,
         config_settings: dict[str, Any] | None = None,
+        approved_source_roots: Sequence[str | Path] | EditableRootPolicy | None = None,
+        allowed_source_roots: Sequence[str | Path] | EditableRootPolicy | None = None,
+        approved_roots: Sequence[str | Path] | EditableRootPolicy | None = None,
+        allowed_roots: Sequence[str | Path] | EditableRootPolicy | None = None,
+        editable_root_policy: EditableRootPolicy | None = None,
     ) -> None:
         super().__init__(poetry, executable=executable, config_settings=config_settings)
 
@@ -72,6 +84,52 @@ class WheelBuilder(Builder):
             self._original_path = original.parent
         self._editable = editable
         self._metadata_directory = metadata_directory
+        policy, values = self._normalize_root_arguments(
+            editable_root_policy=editable_root_policy,
+            approved_source_roots=approved_source_roots,
+            allowed_source_roots=allowed_source_roots,
+            approved_roots=approved_roots,
+            allowed_roots=allowed_roots,
+        )
+        self._explicit_root_policy = policy
+        self._explicit_root_values = values
+
+    @staticmethod
+    def _normalize_root_arguments(
+        **candidates: Any,
+    ) -> tuple[EditableRootPolicy | None, Sequence[str | Path] | None]:
+        from poetry.core.masonry.utils.editable_roots import EditableRootPolicy
+
+        for candidate in candidates.values():
+            if isinstance(candidate, EditableRootPolicy):
+                return candidate, None
+        for name, candidate in candidates.items():
+            if name != "editable_root_policy" and candidate is not None:
+                return None, candidate
+        return None, None
+
+    @cached_property
+    def _root_policy(self) -> EditableRootPolicy | None:
+        """Resolve the opt-in approved-root policy for this build.
+
+        Precedence: an explicit policy/roots passed to the builder, then PEP
+        517 config settings, then ``[tool.poetry]`` configuration, then the
+        environment.  Relative roots always resolve against this workspace,
+        so a relocated project re-resolves them on the next build.
+        """
+        from poetry.core.masonry.utils.editable_roots import EditableRootPolicy
+
+        if isinstance(self._explicit_root_policy, EditableRootPolicy):
+            return self._explicit_root_policy
+        if self._explicit_root_values is not None:
+            return EditableRootPolicy(
+                self._explicit_root_values, project_root=self._path
+            )
+        return EditableRootPolicy.from_config(
+            self._poetry.local_config,
+            self._config_settings,
+            project_root=self._path,
+        )
 
     @classmethod
     def make_in(
@@ -83,6 +141,11 @@ class WheelBuilder(Builder):
         editable: bool = False,
         metadata_directory: Path | None = None,
         config_settings: dict[str, Any] | None = None,
+        approved_source_roots: Sequence[str | Path] | EditableRootPolicy | None = None,
+        allowed_source_roots: Sequence[str | Path] | EditableRootPolicy | None = None,
+        approved_roots: Sequence[str | Path] | EditableRootPolicy | None = None,
+        allowed_roots: Sequence[str | Path] | EditableRootPolicy | None = None,
+        editable_root_policy: EditableRootPolicy | None = None,
     ) -> str:
         wb = cls(
             poetry,
@@ -91,6 +154,11 @@ class WheelBuilder(Builder):
             editable=editable,
             metadata_directory=metadata_directory,
             config_settings=config_settings,
+            approved_source_roots=approved_source_roots,
+            allowed_source_roots=allowed_source_roots,
+            approved_roots=approved_roots,
+            allowed_roots=allowed_roots,
+            editable_root_policy=editable_root_policy,
         )
         wb.build(target_dir=directory)
 
@@ -118,32 +186,43 @@ class WheelBuilder(Builder):
         new_mode = normalize_file_permissions(st_mode)
         temp_path.chmod(new_mode)
 
-        with (
-            os.fdopen(fd, "w+b") as fd_file,
-            zipfile.ZipFile(
-                fd_file, mode="w", compression=zipfile.ZIP_DEFLATED
-            ) as zip_file,
-        ):
-            if self._editable:
-                self._build(zip_file)
-                self._add_pth(zip_file)
-            elif self._poetry.package.build_should_generate_setup():
-                self._copy_module(zip_file)
-                self._build(zip_file)
-            else:
-                self._build(zip_file)
-                self._copy_module(zip_file)
+        try:
+            with (
+                os.fdopen(fd, "w+b") as fd_file,
+                zipfile.ZipFile(
+                    fd_file, mode="w", compression=zipfile.ZIP_DEFLATED
+                ) as zip_file,
+            ):
+                if self._editable:
+                    # Fail closed before any build script side effects and
+                    # before a wheel is finalized. `_add_pth` enforces the
+                    # same gate again on the exact bytes to be written.
+                    self.validate_editable_roots()
+                    self._build(zip_file)
+                    self._add_pth(zip_file)
+                elif self._poetry.package.build_should_generate_setup():
+                    self._copy_module(zip_file)
+                    self._build(zip_file)
+                else:
+                    self._build(zip_file)
+                    self._copy_module(zip_file)
 
-            self._copy_file_scripts(zip_file)
+                self._copy_file_scripts(zip_file)
 
-            if self._metadata_directory is None:
-                with TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:
-                    metadata_directory = self.prepare_metadata(Path(temp_dir))
-                    self._copy_dist_info(zip_file, metadata_directory)
-            else:
-                self._copy_dist_info(zip_file, self._metadata_directory)
+                if self._metadata_directory is None:
+                    with TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:
+                        metadata_directory = self.prepare_metadata(Path(temp_dir))
+                        self._copy_dist_info(zip_file, metadata_directory)
+                else:
+                    self._copy_dist_info(zip_file, self._metadata_directory)
 
-            self._write_record(zip_file)
+                self._write_record(zip_file)
+        except BaseException:
+            # A rejected editable root (or any build failure) must not leave a
+            # half-written wheel behind - validation happens before move.
+            with contextlib.suppress(OSError):
+                temp_path.unlink()
+            raise
 
         wheel_path = target_dir / self.wheel_filename
         if wheel_path.exists():
@@ -153,17 +232,45 @@ class WheelBuilder(Builder):
         logger.info(f"Built {self.wheel_filename}")
         return wheel_path
 
+    def _editable_root_entries(self) -> list[EditableRootEntry]:
+        """Return the labeled search roots this editable wheel will add."""
+        from poetry.core.masonry.utils.editable_roots import entries_from_includes
+
+        return entries_from_includes(self._module.includes)
+
+    def get_editable_search_roots(self) -> list[Path]:
+        """Sorted unique resolved roots that are written to the ``.pth``."""
+        return sorted({entry.path for entry in self._editable_root_entries()})
+
+    def validate_editable_roots(self) -> EditableRootReport | None:
+        """Run the opt-in approved-root check without (re)writing the wheel.
+
+        Returns the report when a policy is configured (raising on
+        violations), otherwise ``None`` because the check is not enabled.
+        """
+        policy = self._root_policy
+        if policy is None:
+            return None
+        return policy.validate(self._editable_root_entries())
+
     def _add_pth(self, wheel: zipfile.ZipFile) -> None:
-        paths = set()
-        for include in self._module.includes:
-            if isinstance(include, PackageInclude) and (
-                include.is_module() or include.is_package()
-            ):
-                paths.add(include.base.resolve().as_posix())
+        entries = self._editable_root_entries()
+
+        # Security gate: compare exactly the search paths about to be written
+        # against the configured approved source roots.  This only runs for
+        # editable wheels and is a no-op unless approval was configured.
+        policy = self._root_policy
+        if policy is not None:
+            policy.validate(entries)
+
+        paths = sorted(
+            {entry.path for entry in entries},
+            key=lambda path: path.as_posix(),
+        )
 
         content = ""
         for path in paths:
-            content += path + os.linesep
+            content += path.as_posix() + os.linesep
 
         pth_file = Path(self._module.name).with_suffix(".pth")
 
