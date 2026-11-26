@@ -251,6 +251,7 @@ class BaseIdentityPlugin(plugin.BaseAuthPlugin, metaclass=abc.ABCMeta):
             # reasons.
             allow_version_hack = False
             project_id = self.get_project_id(session)
+            endpoint_data.project_id = project_id
         else:
             if not service_type:
                 LOG.warning(
@@ -277,6 +278,7 @@ class BaseIdentityPlugin(plugin.BaseAuthPlugin, metaclass=abc.ABCMeta):
             )
             if not endpoint_data:
                 return None
+            endpoint_data.project_id = project_id
 
         if skip_discovery:
             return endpoint_data

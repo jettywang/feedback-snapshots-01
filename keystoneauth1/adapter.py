@@ -12,9 +12,12 @@
 
 import argparse
 from collections.abc import MutableMapping
+import hashlib
 import logging
 import os
+import threading
 from typing import Any
+import urllib.parse
 import warnings
 
 import requests
@@ -22,8 +25,30 @@ import requests.structures
 
 from keystoneauth1 import _fair_semaphore
 from keystoneauth1 import discover
+from keystoneauth1 import exceptions
 from keystoneauth1 import plugin
+from keystoneauth1 import project as project_ownership
 from keystoneauth1 import session as _session
+
+
+ProjectConstraint = project_ownership.ProjectConstraint
+ProjectOwnership = project_ownership.ProjectOwnership
+ProjectAttestation = project_ownership.ProjectAttestation
+ProjectBoundary = project_ownership.ProjectBoundary
+ProjectGuard = project_ownership.ProjectGuard
+ProjectState = project_ownership.ProjectOwnershipState
+STATE_STALE = project_ownership.STATE_STALE
+STATE_VERIFIED = project_ownership.STATE_VERIFIED
+STATE_CATALOG_UNAVAILABLE = (
+    project_ownership.STATE_CATALOG_UNAVAILABLE
+)
+STATE_MISMATCH = project_ownership.STATE_MISMATCH
+STATE_BLOCKED = project_ownership.STATE_BLOCKED
+STATE_SENT = project_ownership.STATE_SENT
+ProjectOwnershipError = exceptions.ProjectOwnershipError
+ProjectMismatch = exceptions.ProjectMismatch
+StaleProjectEndpoint = exceptions.StaleProjectEndpoint
+ProjectCatalogUnavailable = exceptions.ProjectCatalogUnavailable
 
 
 class _BaseAdapter:
@@ -128,6 +153,7 @@ class _BaseAdapter:
     raise_exc: bool | None
     connect_retry_delay: float | None
     status_code_retry_delay: float | None
+    project_constraint: ProjectConstraint | None
 
     def __init__(
         self,
@@ -158,12 +184,128 @@ class _BaseAdapter:
         concurrency: int | None = None,
         connect_retry_delay: float | None = None,
         status_code_retry_delay: float | None = None,
+        project_constraint: project_ownership.ProjectConstraint
+        | str
+        | list[str]
+        | tuple[str, ...]
+        | set[str]
+        | bool
+        | None = None,
+        project_id: str | None = None,
+        allowed_project_ids: (
+            str | list[str] | tuple[str, ...] | set[str] | None
+        ) = None,
+        required_project_id: str | None = None,
+        project_verifier: Any | None = None,
+        **kwargs: Any,
     ):
         if version and (min_version or max_version):
             raise TypeError(
                 "version is mutually exclusive with min_version and"
                 " max_version"
             )
+
+        project_aliases = (
+            'expected_project_id',
+            'expected_project',
+            'required_project',
+            'owner_project_id',
+            'bound_project_id',
+        )
+        for name in project_aliases:
+            value = kwargs.pop(name, None)
+            if value and not required_project_id and not project_id:
+                required_project_id = value
+
+        project_value = kwargs.pop('project', None)
+        if project_value and not project_id and not required_project_id:
+            project_identifier = getattr(project_value, 'id', project_value)
+            if isinstance(project_identifier, dict):
+                project_identifier = project_identifier.get('id')
+            required_project_id = str(project_identifier)
+
+        alias_ids = kwargs.pop('project_ids', None)
+        if alias_ids is not None and allowed_project_ids is None:
+            allowed_project_ids = alias_ids
+        alias_allowed = kwargs.pop('allowed_projects', None)
+        if alias_allowed is not None and allowed_project_ids is None:
+            allowed_project_ids = alias_allowed
+        alias_allowed_project = kwargs.pop('allowed_project', None)
+        if (
+            alias_allowed_project is not None
+            and allowed_project_ids is None
+        ):
+            allowed_project_ids = alias_allowed_project
+        required_ids = kwargs.pop('required_project_ids', None)
+        if required_ids is not None and allowed_project_ids is None:
+            allowed_project_ids = required_ids
+
+        for name in ('project_boundary', 'project_guard', 'project_scope'):
+            value = kwargs.pop(name, None)
+            if value is not None and project_constraint is None:
+                project_constraint = value
+
+        for name in (
+            'ownership_constraint',
+            'project_affinity',
+            'project_policy',
+            'project_validator',
+        ):
+            value = kwargs.pop(name, None)
+            if value is not None and project_constraint is None:
+                project_constraint = value
+
+        wait_timeout = kwargs.pop(
+            'project_wait_timeout',
+            kwargs.pop('project_constraint_timeout', None),
+        )
+        retry_interval = kwargs.pop('project_retry_interval', None)
+        if kwargs:
+            unexpected = next(iter(kwargs))
+            raise TypeError(
+                f'{type(self).__name__}.__init__() got an unexpected '
+                f'keyword argument {unexpected!r}'
+            )
+
+        constraint_options: dict[str, Any] = {}
+        if project_verifier is not None:
+            constraint_options['verifier'] = project_verifier
+        if wait_timeout is not None:
+            constraint_options['wait_timeout'] = wait_timeout
+        if retry_interval is not None:
+            constraint_options['retry_interval'] = retry_interval
+
+        if project_constraint is not None:
+            self.project_constraint = ProjectConstraint.coerce(
+                project_constraint, **constraint_options
+            )
+        elif project_id or required_project_id or allowed_project_ids:
+            effective_project_id = project_id or required_project_id
+            self.project_constraint = project_ownership.ProjectConstraint(
+                project_id=effective_project_id,
+                allowed_project_ids=allowed_project_ids,
+                **constraint_options,
+            )
+        elif constraint_options:
+            self.project_constraint = project_ownership.ProjectConstraint(
+                auto_bind=True, **constraint_options
+            )
+        else:
+            self.project_constraint = None
+
+        self._project_lock = threading.RLock()
+        self._project_binding: discover.EndpointData | None = None
+        self._project_attestation: ProjectAttestation | None = None
+        self._project_auth_epoch = 0
+        self._project_token_fingerprint: str | None = None
+        self._project_stop_reason: BaseException | None = None
+        if isinstance(project_id, str) and project_id:
+            self.project_id = project_id
+        elif self.project_constraint is not None:
+            self.project_id = self.project_constraint.project_id
+        else:
+            self.project_id = None
+
         # NOTE(jamielennox): when adding new parameters to adapter please also
         # add them to the adapter call in httpclient.HTTPClient.__init__ as
         # well as to load_adapter_from_argparse below if the argument is
@@ -225,6 +367,668 @@ class _BaseAdapter:
             kwargs.setdefault('max_version', self.max_version)
         if self.allow_version_hack is not None:
             kwargs.setdefault('allow_version_hack', self.allow_version_hack)
+
+    @property
+    def required_project_id(self) -> str | None:
+        return self.project_id
+
+    @property
+    def allowed_project_ids(self) -> frozenset[str]:
+        if self.project_constraint is None:
+            return frozenset()
+        return self.project_constraint.allowed_project_ids
+
+    @property
+    def project_state(self) -> str | None:
+        attestation = self._project_attestation
+        if attestation is not None:
+            return attestation.state
+        binding = self._project_binding
+        if binding is not None:
+            return getattr(binding, 'ownership_state', None)
+        return None
+
+    @property
+    def endpoint_ownership_state(self) -> str | None:
+        return self.project_state
+
+    @property
+    def ownership_state(self) -> str | None:
+        return self.project_state
+
+    @property
+    def endpoint_state(self) -> str | None:
+        return self.project_state
+
+    @property
+    def selection_state(self) -> str | None:
+        return self.project_state
+
+    @property
+    def constraint_state(self) -> str | None:
+        return self.project_state
+
+    @property
+    def status(self) -> str | None:
+        return self.project_state
+
+    @property
+    def state(self) -> str | None:
+        return self.project_state
+
+    @property
+    def selection_status(self) -> str | None:
+        return self.project_state
+
+    @property
+    def ownership_status(self) -> str | None:
+        return self.project_state
+
+    @property
+    def bound_project_id(self) -> str | None:
+        attestation = self._project_attestation
+        if attestation is not None and attestation.project_id:
+            return attestation.project_id
+        return self.project_id
+
+    @property
+    def owner_project_id(self) -> str | None:
+        return self.bound_project_id
+
+    @property
+    def active_project_id(self) -> str | None:
+        return self.bound_project_id
+
+    @property
+    def selected_endpoint_data(self) -> discover.EndpointData | None:
+        return self._project_binding
+
+    @property
+    def verified_endpoint_data(self) -> discover.EndpointData | None:
+        if self.project_state in {
+            project_ownership.STATE_VERIFIED,
+            project_ownership.STATE_READY,
+            project_ownership.STATE_SENT,
+        }:
+            return self._project_binding
+        return None
+
+    @property
+    def actual_sends(self) -> list[dict[str, Any]]:
+        return self.project_send_records
+
+    @property
+    def sent_requests(self) -> list[dict[str, Any]]:
+        return self.project_send_records
+
+    @property
+    def project_events(self) -> list[dict[str, Any]]:
+        if self.project_constraint is None:
+            return []
+        return self.project_constraint.events
+
+    @property
+    def project_observations(self) -> list[dict[str, Any]]:
+        return self.project_events
+
+    @property
+    def project_errors(self) -> list[BaseException]:
+        if self.project_constraint is None:
+            return []
+        return self.project_constraint.stop_reasons
+
+    @property
+    def project_attestation(
+        self,
+    ) -> ProjectAttestation | None:
+        return self._project_attestation
+
+    @property
+    def last_project_attestation(
+        self,
+    ) -> ProjectAttestation | None:
+        return self._project_attestation
+
+    @property
+    def bound_endpoint_data(self) -> discover.EndpointData | None:
+        return self._project_binding
+
+    @property
+    def project_send_records(self) -> list[dict[str, Any]]:
+        if self.project_constraint is None:
+            return []
+        return self.project_constraint.sends
+
+    @property
+    def project_stop_reason(self) -> BaseException | None:
+        return self._project_stop_reason
+
+    def _project_auth_evidence(
+        self, auth: plugin.BaseAuthPlugin | None
+    ) -> tuple[str | None, int | str]:
+        effective_auth = auth or self.auth or getattr(
+            self.session, 'auth', None
+        )
+        try:
+            current_project_id = self.session.get_project_id(auth or self.auth)
+        except exceptions.MissingAuthPlugin:
+            current_project_id = None
+
+        if not current_project_id and effective_auth is not None:
+            candidate = getattr(effective_auth, 'project_id', None)
+            if callable(candidate):
+                try:
+                    candidate = candidate(self.session)
+                except TypeError:
+                    candidate = candidate()
+                except Exception:  # noqa: S110 - optional evidence
+                    candidate = None
+            if candidate:
+                current_project_id = str(candidate)
+
+        explicit_generation = None
+        for name in (
+            'auth_generation',
+            'generation',
+            'auth_revision',
+            'token_generation',
+        ):
+            value = getattr(effective_auth, name, None)
+            if callable(value):
+                try:
+                    value = value()
+                except Exception:  # noqa: S110 - optional evidence
+                    value = None
+            if value is not None:
+                explicit_generation = value
+                break
+
+        fingerprint = None
+        try:
+            token = self.session.get_token(auth or self.auth)
+        except Exception:  # noqa: S110 - project ID is the primary evidence
+            token = None
+        if token:
+            fingerprint = hashlib.sha256(str(token).encode()).hexdigest()[:16]
+
+        with self._project_lock:
+            if fingerprint is not None:
+                if fingerprint != self._project_token_fingerprint:
+                    self._project_token_fingerprint = fingerprint
+                    self._project_auth_epoch += 1
+                generation: int | str = self._project_auth_epoch
+            else:
+                generation = self._project_auth_epoch or 1
+
+        if explicit_generation is not None:
+            generation = explicit_generation
+        return current_project_id, generation
+
+    def _attest_project_endpoint(
+        self,
+        endpoint_data: discover.EndpointData,
+        auth: plugin.BaseAuthPlugin | None,
+        *,
+        source: str,
+        constraint: ProjectConstraint | None = None,
+        expected_project_id: str | None = None,
+    ) -> project_ownership.ProjectAttestation:
+        constraint = constraint or self.project_constraint
+        if constraint is None:
+            raise exceptions.ProjectConstraintError(
+                "Project attestation requested without a constraint."
+            )
+
+        current_project_id, generation = self._project_auth_evidence(auth)
+        if expected_project_id is not None:
+            expected_project_id = str(expected_project_id)
+            if current_project_id != expected_project_id:
+                exc = exceptions.ProjectMismatch(
+                    f"Request requires project {expected_project_id!r}, but "
+                    f"current authentication evidence is "
+                    f"{current_project_id!r}.",
+                    project_id=current_project_id,
+                    expected_project_ids=[expected_project_id],
+                    state=project_ownership.STATE_MISMATCH,
+                    reason='per-request project constraint failed',
+                    url=getattr(endpoint_data, 'url', None),
+                )
+                constraint.stop(exc)
+                raise exc
+
+        attestation = constraint.attest_endpoint_data(
+            endpoint_data,
+            current_project_id,
+            source=source,
+            auth_generation=generation,
+        )
+        self.project_id = attestation.project_id or self.project_id
+
+        with self._project_lock:
+            self._project_binding = endpoint_data
+            self._project_attestation = attestation
+            self._project_stop_reason = None
+        return attestation
+
+    def _mark_project_catalog_unavailable(
+        self,
+        error: BaseException | None,
+        *,
+        url: str | None = None,
+        constraint: ProjectConstraint | None = None,
+    ) -> exceptions.ProjectEndpointError:
+        constraint = constraint or self.project_constraint
+        with self._project_lock:
+            previous = self._project_attestation
+            project_id = previous.project_id if previous else self.project_id
+            context = {
+                'project_id': project_id,
+                'url': url or (previous.url if previous else None),
+            }
+
+            if previous is not None and self._project_binding is not None:
+                stale = project_ownership.ProjectAttestation(
+                    project_id=previous.project_id,
+                    allowed_project_ids=constraint.allowed_project_ids
+                    if constraint
+                    else None,
+                    state=project_ownership.STATE_STALE,
+                    source=previous.source,
+                    url=previous.url,
+                    catalog_url=previous.catalog_url,
+                    service_url=previous.service_url,
+                    service_type=previous.service_type,
+                    interface=previous.interface,
+                    region_name=previous.region_name,
+                    api_version=previous.api_version,
+                    auth_generation=previous.auth_generation,
+                    reason=(
+                        'fresh catalog evidence is unavailable: '
+                        f'{error}'
+                        if error
+                        else 'fresh catalog evidence returned no endpoint'
+                    ),
+                )
+                self._project_attestation = stale
+                self._project_binding.ownership_state = (
+                    project_ownership.STATE_STALE
+                )
+                exc: exceptions.ProjectEndpointError = (
+                    exceptions.StaleProjectEndpoint(
+                        "Project endpoint selection is stale; wait for the "
+                        "correct catalog to recover or use a verified stop "
+                        "reason.",
+                        state=project_ownership.STATE_STALE,
+                        reason=stale.reason,
+                        **context,
+                    )
+                )
+            else:
+                unavailable = project_ownership.ProjectAttestation(
+                    project_id=project_id,
+                    allowed_project_ids=constraint.allowed_project_ids
+                    if constraint
+                    else None,
+                    state=project_ownership.STATE_CATALOG_UNAVAILABLE,
+                    reason=str(error) if error else 'endpoint not found',
+                    url=url,
+                )
+                self._project_attestation = unavailable
+                exc = exceptions.ProjectCatalogUnavailable(
+                    state=project_ownership.STATE_CATALOG_UNAVAILABLE,
+                    reason=unavailable.reason,
+                    **context,
+                )
+
+            self._project_stop_reason = exc
+            if constraint is not None:
+                constraint.stop(exc)
+            if error is not None:
+                exc.__cause__ = error
+            return exc
+
+    def _fetch_project_endpoint_data(
+        self,
+        auth: plugin.BaseAuthPlugin | None,
+        discovery_kwargs: dict[str, Any],
+    ) -> tuple[discover.EndpointData | None, BaseException | None]:
+        effective_auth = auth or self.auth
+        discovery_error: BaseException | None = None
+        try:
+            endpoint_data = self.session.get_endpoint_data(
+                effective_auth, **discovery_kwargs
+            )
+        except Exception as exc:  # noqa: BLE001 - fallback below
+            endpoint_data = None
+            discovery_error = exc
+
+        if endpoint_data is not None:
+            return endpoint_data, discovery_error
+
+        # Light-weight in-memory auth doubles frequently implement only
+        # get_endpoint().  Turn that catalog URL into an EndpointData so the
+        # same ownership checks still apply to the actual send.
+        endpoint_url = self.session.get_endpoint(
+            effective_auth, **discovery_kwargs
+        )
+        if not endpoint_url:
+            return None, discovery_error
+
+        interface = discovery_kwargs.get('interface')
+        endpoint_data = discover.EndpointData(
+            catalog_url=endpoint_url,
+            service_url=endpoint_url,
+            service_type=discovery_kwargs.get('service_type'),
+            service_name=discovery_kwargs.get('service_name'),
+            interface=interface if isinstance(interface, str) else None,
+            region_name=discovery_kwargs.get('region_name'),
+        )
+        return endpoint_data, discovery_error
+
+    def _record_project_failure(
+        self,
+        exc: exceptions.ProjectConstraintError,
+        *,
+        constraint: ProjectConstraint | None = None,
+        endpoint_data: discover.EndpointData | None = None,
+    ) -> exceptions.ProjectConstraintError:
+        constraint = constraint or self.project_constraint
+        state = getattr(exc, 'state', None)
+        if not state:
+            if isinstance(exc, exceptions.ProjectOwnershipError):
+                state = project_ownership.STATE_MISMATCH
+            else:
+                state = project_ownership.STATE_BLOCKED
+
+        with self._project_lock:
+            previous = self._project_attestation
+            project_id = (
+                getattr(exc, 'project_id', None)
+                or (previous.project_id if previous else None)
+                or self.project_id
+            )
+            failure = project_ownership.ProjectAttestation(
+                project_id=project_id,
+                allowed_project_ids=(
+                    constraint.allowed_project_ids if constraint else None
+                ),
+                state=state,
+                source=previous.source if previous else 'send',
+                url=getattr(exc, 'url', None)
+                or (previous.url if previous else None),
+                service_type=previous.service_type if previous else None,
+                interface=previous.interface if previous else None,
+                region_name=previous.region_name if previous else None,
+                api_version=previous.api_version if previous else None,
+                reason=getattr(exc, 'reason', None) or str(exc),
+            )
+            self._project_attestation = failure
+            self._project_stop_reason = exc
+            binding = endpoint_data or self._project_binding
+            if binding is not None:
+                binding.ownership_state = state
+                if endpoint_data is not None:
+                    self._project_binding = endpoint_data
+            if constraint is not None:
+                constraint.stop(exc)
+                constraint.record(failure)
+        return exc
+
+    def _install_project_send_guard(
+        self,
+        kwargs: dict[str, Any],
+        constraint: ProjectConstraint,
+        attestation: ProjectAttestation,
+    ) -> None:
+        existing_guard = kwargs.get('send_guard')
+
+        def send_guard(
+            url: str,
+            method: str,
+            request_kwargs: dict[str, Any],
+        ) -> None:
+            if existing_guard is not None:
+                existing_guard(
+                    url=url,
+                    method=method,
+                    request_kwargs=request_kwargs,
+                )
+            constraint.check_send_url(
+                url,
+                attestation,
+                method=method,
+                headers=request_kwargs.get('headers'),
+            )
+
+        kwargs['send_guard'] = send_guard
+
+        existing_requests_auth = kwargs.get('requests_auth')
+
+        def project_requests_auth(
+            prepared_request: requests.PreparedRequest,
+        ) -> requests.PreparedRequest:
+            if existing_requests_auth is not None:
+                result = existing_requests_auth(prepared_request)
+                if result is not None:
+                    prepared_request = result
+            ownership = attestation.to_dict()
+            for attr, value in (
+                ('keystoneauth_project_id', attestation.project_id),
+                ('keystoneauth_api_version', attestation.api_version),
+                ('keystoneauth_project_attestation', ownership),
+                ('project_id', attestation.project_id),
+                ('api_version', attestation.api_version),
+                ('project_ownership', attestation.state),
+            ):
+                setattr(prepared_request, attr, value)
+            return prepared_request
+
+        kwargs['requests_auth'] = project_requests_auth
+
+    def _prepare_project_constrained_request(
+        self,
+        url: str,
+        method: str,
+        kwargs: dict[str, Any],
+        endpoint_filter: dict[str, Any],
+        constraint: ProjectConstraint | None = None,
+        expected_project_id: str | None = None,
+        extra_constraint: ProjectConstraint | None = None,
+    ) -> ProjectAttestation | None:
+        constraint = constraint or self.project_constraint
+        if constraint is None:
+            return None
+
+        auth = kwargs.get('auth', self.auth)
+        discovery_kwargs = dict(endpoint_filter)
+        if 'allow' in kwargs:
+            discovery_kwargs.setdefault('allow', kwargs['allow'])
+        endpoint_override = kwargs.get('endpoint_override')
+        if endpoint_override:
+            discovery_kwargs['endpoint_override'] = endpoint_override
+
+        parsed_url = urllib.parse.urlparse(url)
+        can_refresh = bool(
+            discovery_kwargs.get('service_type')
+            or discovery_kwargs.get('endpoint_override')
+            or endpoint_override
+        )
+
+        endpoint_data = None
+        refresh_error: BaseException | None = None
+        if can_refresh:
+            try:
+                endpoint_data, refresh_error = (
+                    self._fetch_project_endpoint_data(auth, discovery_kwargs)
+                )
+            except exceptions.ProjectConstraintError:
+                raise
+            except Exception as exc:  # noqa: BLE001 - classified below
+                refresh_error = exc
+
+        if endpoint_data is not None:
+            try:
+                attestation = self._attest_project_endpoint(
+                    endpoint_data,
+                    auth,
+                    source='catalog+discovery',
+                    constraint=constraint,
+                    expected_project_id=expected_project_id,
+                )
+                if extra_constraint is not None:
+                    extra_constraint.check_project(
+                        attestation.project_id, url=endpoint_data.url
+                    )
+            except exceptions.ProjectConstraintError as exc:
+                self._record_project_failure(
+                    exc,
+                    constraint=constraint,
+                    endpoint_data=endpoint_data,
+                )
+                raise
+
+            if endpoint_data.url and not parsed_url.netloc:
+                kwargs['endpoint_override'] = endpoint_data.url
+
+            self._install_project_send_guard(
+                kwargs, constraint, attestation
+            )
+            return attestation
+
+        current_project_id, _generation = self._project_auth_evidence(auth)
+        try:
+            if (
+                expected_project_id is not None
+                and current_project_id != expected_project_id
+            ):
+                raise exceptions.ProjectMismatch(
+                    f"Request requires project {expected_project_id!r}, but "
+                    f"current authentication evidence is "
+                    f"{current_project_id!r}.",
+                    project_id=current_project_id,
+                    expected_project_ids=[expected_project_id],
+                    state=project_ownership.STATE_MISMATCH,
+                    reason='per-request project constraint failed',
+                    url=url,
+                )
+            constraint.check_project(current_project_id, url=url)
+            if extra_constraint is not None:
+                extra_constraint.check_project(current_project_id, url=url)
+        except exceptions.ProjectConstraintError as exc:
+            self._record_project_failure(exc, constraint=constraint)
+            raise
+
+        if not parsed_url.netloc or can_refresh:
+            raise self._mark_project_catalog_unavailable(
+                refresh_error, url=url, constraint=constraint
+            )
+
+        # For an absolute URL without catalog filters, caller-supplied URL
+        # evidence plus the current project identity is sufficient.  A
+        # previously verified catalog binding is preferred when available.
+        with self._project_lock:
+            previous = self._project_attestation
+            binding = self._project_binding
+        if (
+            previous is not None
+            and previous.verified
+            and binding is not None
+            and project_ownership.urls_share_endpoint(
+                previous.url or '', url
+            )
+        ):
+            self._install_project_send_guard(
+                kwargs, constraint, previous
+            )
+            return previous
+
+        direct_data = discover.EndpointData(
+            catalog_url=url,
+            service_url=url,
+            project_id=current_project_id,
+        )
+        try:
+            direct_attestation = self._attest_project_endpoint(
+                direct_data,
+                auth,
+                source='request-url',
+                constraint=constraint,
+                expected_project_id=expected_project_id,
+            )
+        except exceptions.ProjectConstraintError as exc:
+            self._record_project_failure(exc, constraint=constraint)
+            raise
+        self._install_project_send_guard(
+            kwargs, constraint, direct_attestation
+        )
+        return direct_attestation
+
+    def wait_for_project_endpoint(
+        self,
+        timeout: float | None = None,
+        interval: float | None = None,
+    ) -> project_ownership.ProjectAttestation:
+        """Re-run catalog/discovery until fresh project evidence succeeds."""
+        constraint = self.project_constraint
+        if constraint is None:
+            raise exceptions.ProjectConstraintError(
+                "This adapter has no project constraint."
+            )
+
+        def ready() -> ProjectAttestation | None:
+            try:
+                endpoint_data = self.get_endpoint_data()
+            except Exception:  # noqa: BLE001 - polling classifier
+                return None
+            return self._project_attestation if endpoint_data else None
+
+        return constraint.wait(ready, timeout=timeout, interval=interval)
+
+    wait_until_ready = wait_for_project_endpoint
+    wait_for_endpoint = wait_for_project_endpoint
+    wait_for_project_recovery = wait_for_project_endpoint
+    wait_for_catalog_recovery = wait_for_project_endpoint
+
+    def _extract_request_project_constraint(
+        self, kwargs: dict[str, Any]
+    ) -> tuple[
+        ProjectConstraint | None,
+        str | None,
+        ProjectConstraint | None,
+    ]:
+        request_project_id = kwargs.pop('project_id', None)
+        required_project_id = kwargs.pop('required_project_id', None)
+        if required_project_id and not request_project_id:
+            request_project_id = required_project_id
+        allowed_project_ids = kwargs.pop('allowed_project_ids', None)
+        raw_constraint = kwargs.pop('project_constraint', None)
+        verifier = kwargs.pop('project_verifier', None)
+
+        request_constraint = None
+        if raw_constraint is not None:
+            request_constraint = (
+                ProjectConstraint.coerce(raw_constraint)
+            )
+        elif request_project_id or allowed_project_ids or verifier:
+            request_constraint = project_ownership.ProjectConstraint(
+                project_id=request_project_id,
+                allowed_project_ids=allowed_project_ids,
+                verifier=verifier,
+            )
+
+        if self.project_constraint is None:
+            return request_constraint, None, None
+
+        if request_constraint is None:
+            return self.project_constraint, None, None
+
+        # A per-request constraint can narrow or observe the global adapter
+        # policy, but it must not replace the global ownership check.
+        return (
+            self.project_constraint,
+            request_project_id,
+            request_constraint,
+        )
 
     def _request(
         self, url: str, method: str, **kwargs: Any
@@ -291,6 +1095,22 @@ class _BaseAdapter:
         if self.raise_exc is not None:
             kwargs.setdefault('raise_exc', self.raise_exc)
 
+        (
+            effective_constraint,
+            expected_project_id,
+            extra_constraint,
+        ) = self._extract_request_project_constraint(kwargs)
+        if effective_constraint is not None:
+            self._prepare_project_constrained_request(
+                url,
+                method,
+                kwargs,
+                endpoint_filter,
+                constraint=effective_constraint,
+                expected_project_id=expected_project_id,
+                extra_constraint=extra_constraint,
+            )
+
         return self.session.request(url, method, **kwargs)
 
     def get_token(
@@ -317,6 +1137,10 @@ class _BaseAdapter:
             plugin is not available.
         :returns: An endpoint if available or None.
         """
+        if self.project_constraint is not None:
+            endpoint_data = self.get_endpoint_data(auth, **kwargs)
+            return endpoint_data.url if endpoint_data is not None else None
+
         if self.endpoint_override:
             return self.endpoint_override
 
@@ -324,7 +1148,9 @@ class _BaseAdapter:
         return self.session.get_endpoint(auth or self.auth, **kwargs)
 
     def get_endpoint_data(
-        self, auth: plugin.BaseAuthPlugin | None = None
+        self,
+        auth: plugin.BaseAuthPlugin | None = None,
+        **overrides: Any,
     ) -> discover.EndpointData | None:
         """Get the endpoint data for this Adapter's endpoint.
 
@@ -340,12 +1166,40 @@ class _BaseAdapter:
         if self.endpoint_override:
             kwargs['endpoint_override'] = self.endpoint_override
 
-        return self.session.get_endpoint_data(auth or self.auth, **kwargs)
+        expected_project_id = overrides.pop('project_id', None)
+        request_constraint = ProjectConstraint.coerce(
+            overrides.pop('project_constraint', None)
+        )
+        kwargs.update(overrides)
+
+        endpoint_data = self.session.get_endpoint_data(
+            auth or self.auth, **kwargs
+        )
+        constraint = request_constraint or self.project_constraint
+        if expected_project_id and constraint is None:
+            constraint = project_ownership.ProjectConstraint(
+                project_id=expected_project_id
+            )
+        if constraint is not None:
+            if endpoint_data is None:
+                self._mark_project_catalog_unavailable(
+                    None, constraint=constraint
+                )
+            else:
+                self._attest_project_endpoint(
+                    endpoint_data,
+                    auth or self.auth,
+                    source='discovery',
+                    constraint=constraint,
+                    expected_project_id=expected_project_id,
+                )
+        return endpoint_data
 
     def get_all_version_data(
         self,
         interface: str | list[str] | None = 'public',
         region_name: str | None = None,
+        auth: plugin.BaseAuthPlugin | None = None,
     ) -> dict[str, dict[str, dict[str, list[discover.VersionData]]]]:
         """Get data about all versions of a service.
 
@@ -359,11 +1213,27 @@ class _BaseAdapter:
             dictionaries keyed by interface with values being a list of
             :class:`~keystoneauth1.discover.VersionData`.
         """
-        return self.session.get_all_version_data(
+        version_data = self.session.get_all_version_data(
+            auth=auth or self.auth,
             interface=interface,
             region_name=region_name,
             service_type=self.service_type,
         )
+        if self.project_constraint is not None and version_data:
+            project_id, generation = self._project_auth_evidence(
+                auth or self.auth
+            )
+            attestation = self.project_constraint.check_project(project_id)
+            for regions in version_data.values():
+                for services in regions.values():
+                    for versions in services.values():
+                        for version in versions:
+                            version['project_id'] = attestation.project_id
+                            version['auth_generation'] = generation
+                            version['ownership_state'] = (
+                                project_ownership.STATE_VERIFIED
+                            )
+        return version_data
 
     def get_api_major_version(
         self, auth: plugin.BaseAuthPlugin | None = None, **kwargs: Any
@@ -388,7 +1258,34 @@ class _BaseAdapter:
         :param auth: The auth plugin to invalidate. Overrides the plugin on the
             session. (optional)
         """
-        return self.session.invalidate(auth or self.auth)
+        effective_auth = auth or self.auth
+        result = self.session.invalidate(effective_auth)
+        if result and self.project_constraint is not None:
+            with self._project_lock:
+                self._project_token_fingerprint = None
+                if self._project_attestation is not None:
+                    stale = project_ownership.ProjectAttestation(
+                        project_id=self._project_attestation.project_id,
+                        allowed_project_ids=(
+                            self.project_constraint.allowed_project_ids
+                        ),
+                        state=project_ownership.STATE_STALE,
+                        source=self._project_attestation.source,
+                        url=self._project_attestation.url,
+                        catalog_url=self._project_attestation.catalog_url,
+                        service_url=self._project_attestation.service_url,
+                        service_type=self._project_attestation.service_type,
+                        interface=self._project_attestation.interface,
+                        region_name=self._project_attestation.region_name,
+                        api_version=self._project_attestation.api_version,
+                        reason='authentication evidence was invalidated',
+                    )
+                    self._project_attestation = stale
+                    if self._project_binding is not None:
+                        self._project_binding.ownership_state = (
+                            project_ownership.STATE_STALE
+                        )
+        return result
 
     def get_user_id(
         self, auth: plugin.BaseAuthPlugin | None = None

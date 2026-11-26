@@ -1107,6 +1107,12 @@ class EndpointData:
         next_min_version: str | None = None,
         not_before: str | None = None,
         status: str | None = None,
+        project_id: str | None = None,
+        owner_project_id: str | None = None,
+        bound_project_id: str | None = None,
+        project_ownership: Any | None = None,
+        ownership_state: str | None = None,
+        auth_generation: int | str | None = None,
     ):
         self.catalog_url = catalog_url
         self.service_url = service_url
@@ -1125,6 +1131,10 @@ class EndpointData:
         self.status = status
         self.api_version = api_version or _version_from_url(self.url)
 
+        self.project_id = project_id or owner_project_id or bound_project_id
+        self.project_ownership = project_ownership
+        self.ownership_state = ownership_state
+        self.auth_generation = auth_generation
         self._saved_project_id: str | None = None
         self._catalog_matches_version = False
         self._catalog_matches_exactly: bool = False
@@ -1149,6 +1159,10 @@ class EndpointData:
             next_min_version=self.next_min_version,
             not_before=self.not_before,
             status=self.status,
+            project_id=self.project_id,
+            project_ownership=self.project_ownership,
+            ownership_state=self.ownership_state,
+            auth_generation=self.auth_generation,
         )
         # Save cached discovery object - but we don't want to
         # actually provide a constructor argument
@@ -1184,6 +1198,31 @@ class EndpointData:
     @property
     def url(self) -> str | None:
         return self.service_url or self.catalog_url
+
+    @property
+    def owner_project_id(self) -> str | None:
+        return self.project_id
+
+    @owner_project_id.setter
+    def owner_project_id(self, value: str | None) -> None:
+        self.project_id = value
+
+    @property
+    def bound_project_id(self) -> str | None:
+        return self.project_id
+
+    @bound_project_id.setter
+    def bound_project_id(self, value: str | None) -> None:
+        self.project_id = value
+
+    @property
+    def project_verified(self) -> bool:
+        ownership = self.project_ownership
+        if ownership is not None:
+            verified = getattr(ownership, 'verified', None)
+            if verified is not None:
+                return bool(verified)
+        return self.ownership_state in {'verified', 'ready', 'sent'}
 
     def get_current_versioned_data(
         self,

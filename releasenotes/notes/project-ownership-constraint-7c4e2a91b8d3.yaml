@@ -1,0 +1,10 @@
+---
+features:
+  - |
+    Adapters now accept an optional ``project_constraint`` (or
+    ``project_id``/``allowed_project_ids``) to bind catalog and discovery
+    evidence to the authenticated OpenStack project. Constrained adapters
+    re-check project ownership before business requests are sent and expose
+    verified, stale, blocked and mismatch ownership states. Shared discovery
+    caches remain usable by other projects while ownership metadata stays
+    adapter-local.

@@ -11,7 +11,7 @@
 # under the License.
 
 import collections
-from collections.abc import MutableMapping
+from collections.abc import Callable, MutableMapping
 from contextlib import AbstractContextManager
 import datetime
 import functools
@@ -787,6 +787,7 @@ class Session:
         global_request_id: str | None = None,
         connect_retry_delay: float | None = None,
         status_code_retry_delay: float | None = None,
+        send_guard: Callable[..., Any] | None = None,
         **kwargs: Any,
     ) -> requests.Response:
         """Send an HTTP request with the specified characteristics.
@@ -1061,6 +1062,7 @@ class Session:
             rate_semaphore,
             connect_retry_delays,
             status_code_retry_delays,
+            send_guard,
         )
 
         try:
@@ -1171,6 +1173,7 @@ class Session:
         rate_semaphore: AbstractContextManager[None],
         connect_retry_delays: _Retries,
         status_code_retry_delays: _Retries,
+        send_guard: Callable[..., Any] | None = None,
         **kwargs: Any,
     ) -> requests.Response:
         # NOTE(jamielennox): We handle redirection manually because the
@@ -1183,6 +1186,9 @@ class Session:
         # redirects rather than per request limits. Otherwise the extreme case
         # could be redirects * retries requests. This will be sufficient in
         # most cases and can be fixed properly if there's ever a need.
+
+        if send_guard is not None:
+            send_guard(url=url, method=method, request_kwargs=kwargs)
 
         try:
             try:
@@ -1232,6 +1238,7 @@ class Session:
                 connect_retries=connect_retries - 1,
                 connect_retry_delays=connect_retry_delays,
                 status_code_retry_delays=status_code_retry_delays,
+                send_guard=send_guard,
                 **kwargs,
             )
 
@@ -1289,6 +1296,7 @@ class Session:
                     retriable_status_codes=retriable_status_codes,
                     connect_retry_delays=connect_retry_delays,
                     status_code_retry_delays=status_code_retry_delays,
+                    send_guard=send_guard,
                     **kwargs,
                 )
 
@@ -1335,6 +1343,7 @@ class Session:
                 rate_semaphore=rate_semaphore,
                 connect_retry_delays=connect_retry_delays,
                 status_code_retry_delays=status_code_retry_delays,
+                send_guard=send_guard,
                 **kwargs,
             )
 
