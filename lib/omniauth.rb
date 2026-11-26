@@ -14,6 +14,11 @@ module OmniAuth
   autoload :Test,     'omniauth/test'
   autoload :Form,     'omniauth/form'
   autoload :AuthHash, 'omniauth/auth_hash'
+  autoload :AuthView, 'omniauth/auth_view'
+  autoload :IdentityCallbacks, 'omniauth/identity_callbacks'
+  autoload :IdentityDispatcher, 'omniauth/identity_dispatcher'
+  autoload :IdentityReceipt, 'omniauth/identity_receipt'
+  autoload :IdentityRedactor, 'omniauth/identity_redactor'
   autoload :FailureEndpoint, 'omniauth/failure_endpoint'
   autoload :AuthenticityTokenProtection, 'omniauth/authenticity_token_protection'
 
@@ -48,6 +53,7 @@ module OmniAuth
         :mock_auth => {:default => AuthHash.new('provider' => 'default', 'uid' => '1234', 'info' => {'name' => 'Example User'})},
         :silence_get_warning => false,
         :allowed_hosts => nil,
+        :failure_auth_fields => [],
         :max_remembered_sign_ins => Strategy::SignIns::MAX_REMEMBERED_SIGN_INS,
         :max_remembered_params_bytesize => Strategy::SignIns::MAX_REMEMBERED_PARAMS_BYTESIZE
       }
@@ -135,6 +141,14 @@ module OmniAuth
       camelizations[name.to_s] = camelized.to_s
     end
 
+    def auth_views
+      @auth_views ||= AuthView::Registry.new
+    end
+
+    def identity_callbacks
+      @identity_callbacks ||= IdentityCallbacks::Registry.new
+    end
+
     def max_remembered_sign_ins=(value)
       raise ArgumentError.new('max_remembered_sign_ins must be an Integer of at least 1') unless value.instance_of?(Integer) && value >= 1
 
@@ -148,10 +162,11 @@ module OmniAuth
     end
 
     attr_reader :max_remembered_sign_ins, :max_remembered_params_bytesize
+    attr_writer :auth_views, :identity_callbacks
     attr_writer :on_failure, :before_callback_phase, :before_options_phase, :before_request_phase, :after_request_phase, :request_validation_phase
     attr_accessor :failure_raise_out_environments, :path_prefix, :allowed_request_methods, :form_css,
                   :test_mode, :mock_auth, :full_host, :camelizations, :logger, :silence_get_warning,
-                  :allowed_hosts
+                  :allowed_hosts, :failure_auth_fields
   end
 
   def self.config

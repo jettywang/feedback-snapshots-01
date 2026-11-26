@@ -29,6 +29,7 @@ describe OmniAuth::Configuration do
         :allowed_request_methods => [:post],
         :mock_auth => {:default => {'provider' => 'default', 'uid' => '1234', 'info' => {'name' => 'Example User'}}},
         :silence_get_warning => false,
+        :failure_auth_fields => [],
         :max_remembered_sign_ins => 3,
         :max_remembered_params_bytesize => 512
       )

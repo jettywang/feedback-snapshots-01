@@ -3,6 +3,7 @@ require 'omniauth/key_store'
 require 'omniauth/strategy/class_methods'
 require 'omniauth/strategy/fetchers'
 require 'omniauth/strategy/hosts'
+require 'omniauth/strategy/identity_dispatch'
 require 'omniauth/strategy/paths'
 require 'omniauth/strategy/sign_ins'
 require 'omniauth/strategy/test_mode'
@@ -17,6 +18,7 @@ module OmniAuth
   module Strategy # rubocop:disable Metrics/ModuleLength
     include Fetchers
     include Hosts
+    include IdentityDispatch
     include Paths
     include SignIns
     include TestMode
@@ -267,6 +269,7 @@ module OmniAuth
     end
 
     def call_app!(app_env = env)
+      dispatch_identity_callbacks!(app_env)
       @app.call(app_env)
     rescue StandardError
       app_env['omniauth.error.app'] = true
@@ -310,9 +313,10 @@ module OmniAuth
       env['omniauth.error'] = exception
       env['omniauth.error.type'] = message_key.to_sym
       env['omniauth.error.strategy'] = self
+      failure_receipt = attach_failure_material!(message_key, exception)
 
       if exception
-        log :error, "Authentication failure! #{message_key}: #{exception.class}, #{exception.message}"
+        log :error, "Authentication failure! #{message_key}: #{exception.class}, #{failure_receipt.public_message}"
       else
         log :error, "Authentication failure! #{message_key} encountered."
       end

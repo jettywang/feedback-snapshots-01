@@ -337,6 +337,40 @@ The default `on_failure` raises the error in development and otherwise
 redirects to `/auth/failure` with the `message`, `strategy`, and
 `origin` as query string parameters.
 
+## Layered identity views
+
+Plugins that do not need the complete auth hash can be registered as
+identity callbacks with their own allow-list. OmniAuth gives every callback
+and its failure receipt a fresh deep copy, so mutating nested fields cannot
+affect the strategy, another callback, or `omniauth.auth`.
+
+```ruby
+OmniAuth.config.identity_callbacks.register(
+  :audit_plugin,
+  fields: [
+    'provider',
+    'uid',
+    'info.name',
+    {'extra.plugin_summary' => 'summary'}
+  ]
+) do |identity, env|
+  Audit.record!(identity)
+end
+```
+
+Each view also contains `correlation_id` (or `env['omniauth.correlation_id']`
+when one was supplied). A callback exception is captured in
+`env['omniauth.failure_materials']`; processing continues with the next
+callback and the Rack application. Receipt and log identity fields use the
+same allow-list, and private identity values embedded in an exception message
+are filtered.
+
+The existing full identity remains available to the application as
+`env['omniauth.auth']`. Named application views registered in
+`OmniAuth.config.auth_views` are also materialized in
+`env['omniauth.auth_views']`; otherwise `OmniAuth::AuthView.project` can
+build one on demand.
+
 ## Session Cookies and SameSite
 OmniAuth keeps its state between the request and callback phases (for
 example the OAuth `state` parameter, `omniauth.origin`, and
