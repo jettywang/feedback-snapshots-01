@@ -1,0 +1,25 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "BedrockReadApplicationinferenceprofile",
+      "Effect": "Allow",
+      "Action": [
+        "bedrock:GetInferenceProfile"
+      ],
+      "Resource": [
+        "arn:${Partition}:bedrock:${Region}:${Account}:application-inference-profile/${ResourceId}"
+      ]
+    },
+    {
+      "Sid": "BedrockReadInferenceprofile",
+      "Effect": "Allow",
+      "Action": [
+        "bedrock:GetInferenceProfile"
+      ],
+      "Resource": [
+        "arn:${Partition}:bedrock:${Region}:${Account}:inference-profile/${ResourceId}"
+      ]
+    }
+  ]
+}

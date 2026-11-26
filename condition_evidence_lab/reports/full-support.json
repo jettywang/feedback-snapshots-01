@@ -1,0 +1,219 @@
+{
+  "schema_version": "1.0",
+  "condition_compiler": "SidGroup.get_rendered_policy",
+  "request": {
+    "template": {
+      "mode": "actions",
+      "name": "self-service-approved-project-tag-read",
+      "actions": [
+        "bedrock:GetInferenceProfile"
+      ]
+    },
+    "condition_block": {
+      "condition_key_string": "aws:ResourceTag/Project",
+      "condition_type_string": "StringEquals",
+      "condition_value": "proj-approved-204"
+    },
+    "condition": {
+      "StringEquals": {
+        "aws:ResourceTag/Project": "proj-approved-204"
+      }
+    }
+  },
+  "catalog": {
+    "source": "bundled:policy_sentry/shared/data/iam-definition.json",
+    "overlay": "test/files/condition_evidence/overlays/full-support.json"
+  },
+  "summary": {
+    "statements": 2,
+    "resource_checks": 2,
+    "covered": 2,
+    "known_unsupported": 0,
+    "unverifiable": 0,
+    "not_enforced": 0,
+    "blocked": 0
+  },
+  "publishable": true,
+  "release_status": "publishable",
+  "gate": {
+    "passed": true,
+    "unresolved_checks": 0,
+    "required_evidence_count": 0
+  },
+  "required_evidence": [],
+  "items": [
+    {
+      "action": "bedrock:GetInferenceProfile",
+      "resource": "arn:${Partition}:bedrock:${Region}:${Account}:application-inference-profile/${ResourceId}",
+      "raw_arn": "arn:${Partition}:bedrock:${Region}:${Account}:application-inference-profile/${ResourceId}",
+      "resource_type": "application-inference-profile",
+      "documented_condition_keys": [
+        "aws:ResourceTag/${TagKey}"
+      ],
+      "resource_condition_keys": [
+        "aws:ResourceTag/${TagKey}"
+      ],
+      "raw_arn_condition_keys": [
+        "aws:ResourceTag/${TagKey}"
+      ],
+      "matching_condition_keys": [
+        "aws:ResourceTag/${TagKey}"
+      ],
+      "support_status": "supported",
+      "reason_code": "condition_supported",
+      "reason": "The action/resource catalog record lists a matching condition key.",
+      "statement_index": 0,
+      "sid": "BedrockReadApplicationinferenceprofile",
+      "effect": "Allow",
+      "condition_key_string": "aws:ResourceTag/Project",
+      "expected_condition": {
+        "StringEquals": {
+          "aws:ResourceTag/Project": "proj-approved-204"
+        }
+      },
+      "actual_statement_condition": {
+        "StringEquals": {
+          "aws:ResourceTag/Project": "proj-approved-204"
+        }
+      },
+      "condition_enforced": true,
+      "status": "covered",
+      "publishable": true,
+      "required_evidence": null
+    },
+    {
+      "action": "bedrock:GetInferenceProfile",
+      "resource": "arn:${Partition}:bedrock:${Region}:${Account}:inference-profile/${ResourceId}",
+      "raw_arn": "arn:${Partition}:bedrock:${Region}:${Account}:inference-profile/${ResourceId}",
+      "resource_type": "inference-profile",
+      "documented_condition_keys": [
+        "aws:ResourceTag/${TagKey}"
+      ],
+      "resource_condition_keys": [
+        "aws:ResourceTag/${TagKey}"
+      ],
+      "raw_arn_condition_keys": [
+        "aws:ResourceTag/${TagKey}"
+      ],
+      "matching_condition_keys": [
+        "aws:ResourceTag/${TagKey}"
+      ],
+      "support_status": "supported",
+      "reason_code": "condition_supported",
+      "reason": "The action/resource catalog record lists a matching condition key.",
+      "statement_index": 1,
+      "sid": "BedrockReadInferenceprofile",
+      "effect": "Allow",
+      "condition_key_string": "aws:ResourceTag/Project",
+      "expected_condition": {
+        "StringEquals": {
+          "aws:ResourceTag/Project": "proj-approved-204"
+        }
+      },
+      "actual_statement_condition": {
+        "StringEquals": {
+          "aws:ResourceTag/Project": "proj-approved-204"
+        }
+      },
+      "condition_enforced": true,
+      "status": "covered",
+      "publishable": true,
+      "required_evidence": null
+    }
+  ],
+  "base_policy": {
+    "Version": "2012-10-17",
+    "Statement": [
+      {
+        "Sid": "BedrockReadApplicationinferenceprofile",
+        "Effect": "Allow",
+        "Action": [
+          "bedrock:GetInferenceProfile"
+        ],
+        "Resource": [
+          "arn:${Partition}:bedrock:${Region}:${Account}:application-inference-profile/${ResourceId}"
+        ]
+      },
+      {
+        "Sid": "BedrockReadInferenceprofile",
+        "Effect": "Allow",
+        "Action": [
+          "bedrock:GetInferenceProfile"
+        ],
+        "Resource": [
+          "arn:${Partition}:bedrock:${Region}:${Account}:inference-profile/${ResourceId}"
+        ]
+      }
+    ]
+  },
+  "rendered_policy": {
+    "Version": "2012-10-17",
+    "Statement": [
+      {
+        "Sid": "BedrockReadApplicationinferenceprofile",
+        "Effect": "Allow",
+        "Action": [
+          "bedrock:GetInferenceProfile"
+        ],
+        "Resource": [
+          "arn:${Partition}:bedrock:${Region}:${Account}:application-inference-profile/${ResourceId}"
+        ],
+        "Condition": {
+          "StringEquals": {
+            "aws:ResourceTag/Project": "proj-approved-204"
+          }
+        }
+      },
+      {
+        "Sid": "BedrockReadInferenceprofile",
+        "Effect": "Allow",
+        "Action": [
+          "bedrock:GetInferenceProfile"
+        ],
+        "Resource": [
+          "arn:${Partition}:bedrock:${Region}:${Account}:inference-profile/${ResourceId}"
+        ],
+        "Condition": {
+          "StringEquals": {
+            "aws:ResourceTag/Project": "proj-approved-204"
+          }
+        }
+      }
+    ]
+  },
+  "publishable_policy": {
+    "Version": "2012-10-17",
+    "Statement": [
+      {
+        "Sid": "BedrockReadApplicationinferenceprofile",
+        "Effect": "Allow",
+        "Action": [
+          "bedrock:GetInferenceProfile"
+        ],
+        "Resource": [
+          "arn:${Partition}:bedrock:${Region}:${Account}:application-inference-profile/${ResourceId}"
+        ],
+        "Condition": {
+          "StringEquals": {
+            "aws:ResourceTag/Project": "proj-approved-204"
+          }
+        }
+      },
+      {
+        "Sid": "BedrockReadInferenceprofile",
+        "Effect": "Allow",
+        "Action": [
+          "bedrock:GetInferenceProfile"
+        ],
+        "Resource": [
+          "arn:${Partition}:bedrock:${Region}:${Account}:inference-profile/${ResourceId}"
+        ],
+        "Condition": {
+          "StringEquals": {
+            "aws:ResourceTag/Project": "proj-approved-204"
+          }
+        }
+      }
+    ]
+  }
+}

@@ -1,0 +1,9 @@
+{
+  "bedrock": {
+    "resources": {
+      "inference-profile": {
+        "condition_keys": []
+      }
+    }
+  }
+}

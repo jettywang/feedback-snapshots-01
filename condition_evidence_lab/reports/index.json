@@ -1,0 +1,90 @@
+{
+  "scenarios": {
+    "full-support": {
+      "title_zh": "完全支持",
+      "release_status": "publishable",
+      "publishable": true,
+      "summary": {
+        "statements": 2,
+        "resource_checks": 2,
+        "covered": 2,
+        "known_unsupported": 0,
+        "unverifiable": 0,
+        "not_enforced": 0,
+        "blocked": 0
+      },
+      "required_evidence": [],
+      "report_json": "full-support.json",
+      "report_markdown": "full-support.md",
+      "base_policy": "full-support.base-policy.json",
+      "candidate_policy": "full-support.candidate-policy.json",
+      "publishable_policy": "full-support.publishable-policy.json"
+    },
+    "primary-only": {
+      "title_zh": "只支持第一类资源",
+      "release_status": "blocked_needs_evidence",
+      "publishable": false,
+      "summary": {
+        "statements": 2,
+        "resource_checks": 2,
+        "covered": 1,
+        "known_unsupported": 1,
+        "unverifiable": 0,
+        "not_enforced": 0,
+        "blocked": 1
+      },
+      "required_evidence": [
+        {
+          "statement_index": 1,
+          "sid": "BedrockReadInferenceprofile",
+          "action": "bedrock:GetInferenceProfile",
+          "resource": "arn:${Partition}:bedrock:${Region}:${Account}:inference-profile/${ResourceId}",
+          "raw_arn": "arn:${Partition}:bedrock:${Region}:${Account}:inference-profile/${ResourceId}",
+          "resource_type": "inference-profile",
+          "support_status": "known_unsupported",
+          "status": "catalog_unsupported_uncovered",
+          "reason_code": "catalog_reports_unsupported",
+          "required_evidence": "审批人必须为 bedrock:GetInferenceProfile 在资源 inference-profile 上的使用提供补偿控制证据或明确风险接受；目录已表明该资源不支持条件键 aws:ResourceTag/Project。"
+        }
+      ],
+      "report_json": "primary-only.json",
+      "report_markdown": "primary-only.md",
+      "base_policy": "primary-only.base-policy.json",
+      "candidate_policy": "primary-only.candidate-policy.json",
+      "publishable_policy": null
+    },
+    "old-missing": {
+      "title_zh": "旧目录缺项",
+      "release_status": "blocked_needs_evidence",
+      "publishable": false,
+      "summary": {
+        "statements": 2,
+        "resource_checks": 2,
+        "covered": 1,
+        "known_unsupported": 0,
+        "unverifiable": 1,
+        "not_enforced": 0,
+        "blocked": 1
+      },
+      "required_evidence": [
+        {
+          "statement_index": 1,
+          "sid": "BedrockReadInferenceprofile",
+          "action": "bedrock:GetInferenceProfile",
+          "resource": "arn:${Partition}:bedrock:${Region}:${Account}:inference-profile/${ResourceId}",
+          "raw_arn": "arn:${Partition}:bedrock:${Region}:${Account}:inference-profile/${ResourceId}",
+          "resource_type": "inference-profile",
+          "support_status": "unverifiable",
+          "status": "unverifiable_uncovered",
+          "reason_code": "catalog_condition_field_missing",
+          "required_evidence": "审批人必须补充 bedrock:GetInferenceProfile 在资源 inference-profile 上的目录缺项/资源证据，确认条件键 aws:ResourceTag/Project 是否可落实；当前旧目录资料不足，无法验证支持状态。"
+        }
+      ],
+      "report_json": "old-missing.json",
+      "report_markdown": "old-missing.md",
+      "base_policy": "old-missing.base-policy.json",
+      "candidate_policy": "old-missing.candidate-policy.json",
+      "publishable_policy": null
+    }
+  }
+}

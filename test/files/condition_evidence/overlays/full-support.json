@@ -1,0 +1,11 @@
+{
+  "bedrock": {
+    "resources": {
+      "inference-profile": {
+        "condition_keys": [
+          "aws:ResourceTag/${TagKey}"
+        ]
+      }
+    }
+  }
+}

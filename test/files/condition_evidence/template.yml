@@ -1,0 +1,4 @@
+mode: actions
+name: self-service-approved-project-tag-read
+actions:
+  - bedrock:GetInferenceProfile

@@ -19,6 +19,7 @@ def policy_sentry() -> None:
 
 policy_sentry.add_command(command.initialize.initialize_command)
 policy_sentry.add_command(command.write_policy.write_policy)
+policy_sentry.add_command(command.write_policy_evidence.write_policy_evidence)
 policy_sentry.add_command(command.create_template.create_template)
 policy_sentry.add_command(command.query.query)
 

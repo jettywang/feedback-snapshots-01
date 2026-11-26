@@ -1,0 +1,185 @@
+{
+  "schema_version": "1.0",
+  "condition_compiler": "SidGroup.get_rendered_policy",
+  "request": {
+    "template": {
+      "mode": "actions",
+      "name": "self-service-approved-project-tag-read",
+      "actions": [
+        "bedrock:GetInferenceProfile"
+      ]
+    },
+    "condition_block": {
+      "condition_key_string": "aws:ResourceTag/Project",
+      "condition_type_string": "StringEquals",
+      "condition_value": "proj-approved-204"
+    },
+    "condition": {
+      "StringEquals": {
+        "aws:ResourceTag/Project": "proj-approved-204"
+      }
+    }
+  },
+  "catalog": {
+    "source": "bundled:policy_sentry/shared/data/iam-definition.json",
+    "overlay": "test/files/condition_evidence/overlays/old-missing.json"
+  },
+  "summary": {
+    "statements": 2,
+    "resource_checks": 2,
+    "covered": 1,
+    "known_unsupported": 0,
+    "unverifiable": 1,
+    "not_enforced": 0,
+    "blocked": 1
+  },
+  "publishable": false,
+  "release_status": "blocked_needs_evidence",
+  "gate": {
+    "passed": false,
+    "unresolved_checks": 1,
+    "required_evidence_count": 1
+  },
+  "required_evidence": [
+    {
+      "statement_index": 1,
+      "sid": "BedrockReadInferenceprofile",
+      "action": "bedrock:GetInferenceProfile",
+      "resource": "arn:${Partition}:bedrock:${Region}:${Account}:inference-profile/${ResourceId}",
+      "raw_arn": "arn:${Partition}:bedrock:${Region}:${Account}:inference-profile/${ResourceId}",
+      "resource_type": "inference-profile",
+      "support_status": "unverifiable",
+      "status": "unverifiable_uncovered",
+      "reason_code": "catalog_condition_field_missing",
+      "required_evidence": "审批人必须补充 bedrock:GetInferenceProfile 在资源 inference-profile 上的目录缺项/资源证据，确认条件键 aws:ResourceTag/Project 是否可落实；当前旧目录资料不足，无法验证支持状态。"
+    }
+  ],
+  "items": [
+    {
+      "action": "bedrock:GetInferenceProfile",
+      "resource": "arn:${Partition}:bedrock:${Region}:${Account}:application-inference-profile/${ResourceId}",
+      "raw_arn": "arn:${Partition}:bedrock:${Region}:${Account}:application-inference-profile/${ResourceId}",
+      "resource_type": "application-inference-profile",
+      "documented_condition_keys": [
+        "aws:ResourceTag/${TagKey}"
+      ],
+      "resource_condition_keys": [
+        "aws:ResourceTag/${TagKey}"
+      ],
+      "raw_arn_condition_keys": [
+        "aws:ResourceTag/${TagKey}"
+      ],
+      "matching_condition_keys": [
+        "aws:ResourceTag/${TagKey}"
+      ],
+      "support_status": "supported",
+      "reason_code": "condition_supported",
+      "reason": "The action/resource catalog record lists a matching condition key.",
+      "statement_index": 0,
+      "sid": "BedrockReadApplicationinferenceprofile",
+      "effect": "Allow",
+      "condition_key_string": "aws:ResourceTag/Project",
+      "expected_condition": {
+        "StringEquals": {
+          "aws:ResourceTag/Project": "proj-approved-204"
+        }
+      },
+      "actual_statement_condition": {
+        "StringEquals": {
+          "aws:ResourceTag/Project": "proj-approved-204"
+        }
+      },
+      "condition_enforced": true,
+      "status": "covered",
+      "publishable": true,
+      "required_evidence": null
+    },
+    {
+      "action": "bedrock:GetInferenceProfile",
+      "resource": "arn:${Partition}:bedrock:${Region}:${Account}:inference-profile/${ResourceId}",
+      "raw_arn": "arn:${Partition}:bedrock:${Region}:${Account}:inference-profile/${ResourceId}",
+      "resource_type": "inference-profile",
+      "documented_condition_keys": [],
+      "resource_condition_keys": [],
+      "raw_arn_condition_keys": [],
+      "matching_condition_keys": [],
+      "support_status": "unverifiable",
+      "reason_code": "catalog_condition_field_missing",
+      "reason": "The old catalog is incomplete (resources.inference-profile.condition_keys); support cannot be verified from the catalog.",
+      "raw_arn_condition_keys_error": "KeyError: 'condition_keys'",
+      "missing_records": [
+        "resources.inference-profile.condition_keys"
+      ],
+      "statement_index": 1,
+      "sid": "BedrockReadInferenceprofile",
+      "effect": "Allow",
+      "condition_key_string": "aws:ResourceTag/Project",
+      "expected_condition": {
+        "StringEquals": {
+          "aws:ResourceTag/Project": "proj-approved-204"
+        }
+      },
+      "actual_statement_condition": null,
+      "condition_enforced": false,
+      "status": "unverifiable_uncovered",
+      "publishable": false,
+      "required_evidence": "审批人必须补充 bedrock:GetInferenceProfile 在资源 inference-profile 上的目录缺项/资源证据，确认条件键 aws:ResourceTag/Project 是否可落实；当前旧目录资料不足，无法验证支持状态。"
+    }
+  ],
+  "base_policy": {
+    "Version": "2012-10-17",
+    "Statement": [
+      {
+        "Sid": "BedrockReadApplicationinferenceprofile",
+        "Effect": "Allow",
+        "Action": [
+          "bedrock:GetInferenceProfile"
+        ],
+        "Resource": [
+          "arn:${Partition}:bedrock:${Region}:${Account}:application-inference-profile/${ResourceId}"
+        ]
+      },
+      {
+        "Sid": "BedrockReadInferenceprofile",
+        "Effect": "Allow",
+        "Action": [
+          "bedrock:GetInferenceProfile"
+        ],
+        "Resource": [
+          "arn:${Partition}:bedrock:${Region}:${Account}:inference-profile/${ResourceId}"
+        ]
+      }
+    ]
+  },
+  "rendered_policy": {
+    "Version": "2012-10-17",
+    "Statement": [
+      {
+        "Sid": "BedrockReadApplicationinferenceprofile",
+        "Effect": "Allow",
+        "Action": [
+          "bedrock:GetInferenceProfile"
+        ],
+        "Resource": [
+          "arn:${Partition}:bedrock:${Region}:${Account}:application-inference-profile/${ResourceId}"
+        ],
+        "Condition": {
+          "StringEquals": {
+            "aws:ResourceTag/Project": "proj-approved-204"
+          }
+        }
+      },
+      {
+        "Sid": "BedrockReadInferenceprofile",
+        "Effect": "Allow",
+        "Action": [
+          "bedrock:GetInferenceProfile"
+        ],
+        "Resource": [
+          "arn:${Partition}:bedrock:${Region}:${Account}:inference-profile/${ResourceId}"
+        ]
+      }
+    ]
+  },
+  "publishable_policy": null
+}

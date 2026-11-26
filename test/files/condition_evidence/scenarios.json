@@ -1,0 +1,29 @@
+{
+  "full-support": {
+    "title_zh": "完全支持",
+    "overlay": "overlays/full-support.json",
+    "expected_release_status": "publishable",
+    "expected_resource_types": [
+      "application-inference-profile",
+      "inference-profile"
+    ]
+  },
+  "primary-only": {
+    "title_zh": "只支持第一类资源",
+    "overlay": "overlays/primary-only.json",
+    "expected_release_status": "blocked_needs_evidence",
+    "expected_unresolved_resource_types": [
+      "inference-profile"
+    ],
+    "expected_reason_code": "catalog_reports_unsupported"
+  },
+  "old-missing": {
+    "title_zh": "旧目录缺项",
+    "overlay": "overlays/old-missing.json",
+    "expected_release_status": "blocked_needs_evidence",
+    "expected_unresolved_resource_types": [
+      "inference-profile"
+    ],
+    "expected_reason_code": "catalog_condition_field_missing"
+  }
+}

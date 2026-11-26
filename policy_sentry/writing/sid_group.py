@@ -256,14 +256,16 @@ class SidGroup:
             logger.debug(f"{sid} SID has the actions: {actions}")
             logger.debug(f"{sid} SID has the resources: {group['arn']}")
             if not match_found:
-                statements.append(
-                    {
-                        "Sid": sid,
-                        "Effect": effect,
-                        "Action": actions,
-                        "Resource": group["arn"],
-                    }
-                )
+                statement = {
+                    "Sid": sid,
+                    "Effect": effect,
+                    "Action": actions,
+                    "Resource": group["arn"],
+                }
+                condition = group.get("condition")
+                if isinstance(condition, dict) and condition:
+                    statement["Condition"] = condition
+                statements.append(statement)
 
         if sids_to_be_changed:
             for stmt in statements:
