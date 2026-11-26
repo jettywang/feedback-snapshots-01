@@ -62,6 +62,7 @@ class SdistBuilder(Builder):
         target_dir: Path | None = None,
     ) -> Path:
         logger.info("Building <info>sdist</info>")
+        self._run_patch_check()
         target_dir = target_dir or self.default_target_dir
 
         if not target_dir.exists():

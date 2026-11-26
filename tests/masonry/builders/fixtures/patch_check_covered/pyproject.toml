@@ -1,0 +1,40 @@
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
+
+[project]
+name = "patch-check-demo"
+version = "1.0.0"
+description = "Simulated release exercising the offline patch coverage check"
+requires-python = ">=3.9,<3.14"
+dependencies = [
+    "urllib3 (>=1.26.18) ; python_version < '3.10'",
+    "urllib3 (>=2.0.7) ; python_version >= '3.10'",
+    # Loose on purpose, but unreachable: requires-python starts at 3.9, so
+    # this combination is not declared as supported and must never block
+    # the release.
+    "urllib3 (>=1.0) ; python_version < '3.8'",
+]
+
+[project.optional-dependencies]
+tls = [
+    "cryptography (>=41.0.7) ; python_version < '3.12'",
+    "cryptography (>=41.0.7) ; python_version >= '3.12' and sys_platform == 'linux'",
+    # Tightened branch: the fix floor now also holds off Linux.
+    "cryptography (>=41.0.7) ; python_version >= '3.12' and sys_platform != 'linux'",
+]
+legacy = [
+    # Overlapping extra: pulls the same library, fully fixed everywhere.
+    "cryptography (>=41.0.7)",
+]
+fast = [
+    # Only reachable on two platforms; every other platform is not a
+    # declared combination for this extra and must not block the release.
+    "orjson (>=3.9.10) ; sys_platform == 'win32'",
+    "orjson (>=3.9.10) ; sys_platform == 'darwin'",
+]
+
+[tool.poetry.patch-check.fixes]
+urllib3 = ">=1.26.18"
+cryptography = ">=41.0.7"
+orjson = ">=3.9.10"

@@ -92,6 +92,13 @@ class Builder:
     def build(self, target_dir: Path | None) -> Path:
         raise NotImplementedError
 
+    def _run_patch_check(self) -> None:
+        """Verify that declared dependency fixes cover every supported
+        release combination (offline; identical for sdist and wheel)."""
+        from poetry.core.masonry.utils.patch_check import check_patch_coverage
+
+        check_patch_coverage(self._poetry)
+
     def find_excluded_files(self, fmt: str | None = None) -> set[str]:
         if self._excluded_files is None:
             from poetry.core.vcs import get_vcs

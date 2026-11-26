@@ -107,6 +107,9 @@ class WheelBuilder(Builder):
     ) -> Path:
         logger.info("Building wheel")
 
+        if not self._editable:
+            self._run_patch_check()
+
         target_dir = target_dir or self.default_target_dir
         if not target_dir.exists():
             target_dir.mkdir(parents=True)

@@ -214,6 +214,20 @@
     "build": {
       "$ref": "#/definitions/build-section"
     },
+    "patch-check": {
+      "type": "object",
+      "description": "Offline build-time check that declared dependency fixes cover every supported release combination.",
+      "additionalProperties": false,
+      "properties": {
+        "fixes": {
+          "type": "object",
+          "description": "A hash of dependency names mapped to the version constraint that the fix requires in every supported release combination.",
+          "additionalProperties": {
+            "type": "string"
+          }
+        }
+      }
+    },
     "scripts": {
       "type": "object",
       "description": "A hash of scripts to be installed.",

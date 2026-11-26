@@ -1,6 +1,13 @@
 # Change Log
 
 
+## [Unreleased]
+
+### Added
+
+- Add an offline patch coverage check, configured via `[tool.poetry.patch-check.fixes]`, that gates sdist and wheel builds when a declared dependency fix does not cover every supported release combination (declared `requires-python` range x reachable extra/marker branches).
+
+
 ## [2.5.0] - 2026-09-19
 
 ### Added
