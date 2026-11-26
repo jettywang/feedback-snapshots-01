@@ -81,6 +81,11 @@ class ProcessorMetrics:
             ERROR_TYPE: "recursion",
         }
 
+        self._fair_quota_exceeded_attrs = {
+            **self._standard_attrs,
+            ERROR_TYPE: "fair_quota_exceeded",
+        }
+
         if signal == "traces":
             create_processed = create_otel_sdk_processor_span_processed
             create_queue_capacity = create_otel_sdk_processor_span_queue_capacity
@@ -123,6 +128,8 @@ class ProcessorMetrics:
             self._processed.add(count, self._already_shutdown_attrs)
         elif error_type == "recursion":
             self._processed.add(count, self._recursion_attrs)
+        elif error_type == "fair_quota_exceeded":
+            self._processed.add(count, self._fair_quota_exceeded_attrs)
         else:
             self._processed.add(count, self._dropped_attrs)
 

@@ -1,0 +1,1 @@
+`opentelemetry-sdk`: add configurable per-source fair queue quotas to `BatchSpanProcessor` and `BatchLogRecordProcessor`, including the `OTEL_BSP_FAIR_QUOTAS` and `OTEL_BLRP_FAIR_QUOTAS` environment variables, work-conserving borrowing of idle reservations, per-source drop records and the `fair_quota_exceeded` drop reason.

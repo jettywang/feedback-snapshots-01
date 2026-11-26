@@ -6,6 +6,7 @@ import collections.abc
 import logging
 import sys
 import typing
+from collections.abc import Callable
 from enum import Enum
 from os import environ, linesep
 
@@ -25,6 +26,7 @@ from opentelemetry.sdk._shared_internal._processor_metrics import (
 )
 from opentelemetry.sdk.environment_variables import (
     OTEL_BSP_EXPORT_TIMEOUT,
+    OTEL_BSP_FAIR_QUOTAS,
     OTEL_BSP_MAX_EXPORT_BATCH_SIZE,
     OTEL_BSP_MAX_QUEUE_SIZE,
     OTEL_BSP_SCHEDULE_DELAY,
@@ -32,6 +34,7 @@ from opentelemetry.sdk.environment_variables import (
 )
 from opentelemetry.sdk.environment_variables._internal import (
     parse_boolean_environment_variable,
+    parse_fair_quotas_environment_variable,
 )
 from opentelemetry.sdk.trace import ReadableSpan, Span, SpanProcessor
 from opentelemetry.semconv._incubating.attributes.otel_attributes import (
@@ -153,6 +156,7 @@ class BatchSpanProcessor(SpanProcessor):
     - :envvar:`OTEL_BSP_MAX_QUEUE_SIZE`
     - :envvar:`OTEL_BSP_MAX_EXPORT_BATCH_SIZE`
     - :envvar:`OTEL_BSP_EXPORT_TIMEOUT`
+    - :envvar:`OTEL_BSP_FAIR_QUOTAS`
 
     All the logic for emitting spans, shutting down etc. resides in the `BatchProcessor` class.
     """
@@ -165,6 +169,8 @@ class BatchSpanProcessor(SpanProcessor):
         max_export_batch_size: int | None = None,
         export_timeout_millis: float | None = None,
         *,
+        fair_quotas: collections.abc.Mapping[str, int] | None = None,
+        source_key_extractor: Callable[[ReadableSpan], str] | None = None,
         meter_provider: MeterProvider | None = None,
     ):
         if max_queue_size is None:
@@ -179,6 +185,9 @@ class BatchSpanProcessor(SpanProcessor):
         # Not used. No way currently to pass timeout to export.
         if export_timeout_millis is None:
             export_timeout_millis = BatchSpanProcessor._default_export_timeout_millis()
+
+        if fair_quotas is None:
+            fair_quotas = parse_fair_quotas_environment_variable(OTEL_BSP_FAIR_QUOTAS)
 
         BatchSpanProcessor._validate_arguments(
             max_queue_size,
@@ -201,6 +210,8 @@ class BatchSpanProcessor(SpanProcessor):
                 capacity=max_queue_size,
                 enabled=parse_boolean_environment_variable(OTEL_PYTHON_SDK_INTERNAL_METRICS_ENABLED),
             ),
+            fair_quotas=fair_quotas,
+            source_key_extractor=source_key_extractor,
         )
 
     # Added for backward compatibility. Not recommended to directly access/use underlying exporter.
@@ -218,6 +229,15 @@ class BatchSpanProcessor(SpanProcessor):
         if not (span.context and span.context.trace_flags.sampled):
             return
         self._batch_processor.emit(span)
+
+    def source_occupancy(self) -> dict[str, int]:
+        return self._batch_processor.source_occupancy()
+
+    def dropped_summary(self) -> dict[str, dict[str, int]]:
+        return self._batch_processor.dropped_summary()
+
+    def drop_records(self) -> tuple:
+        return self._batch_processor.drop_records()
 
     def shutdown(self):
         return self._batch_processor.shutdown()

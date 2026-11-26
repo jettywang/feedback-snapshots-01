@@ -149,6 +149,30 @@ The :envvar:`OTEL_BSP_MAX_EXPORT_BATCH_SIZE` represents the maximum batch size f
 Default: 512
 """
 
+OTEL_BSP_FAIR_QUOTAS = "OTEL_BSP_FAIR_QUOTAS"
+"""
+.. envvar:: OTEL_BSP_FAIR_QUOTAS
+
+The :envvar:`OTEL_BSP_FAIR_QUOTAS` represents the per-source queue quota reservations of the
+BatchSpanProcessor as a JSON object mapping source keys (by default the telemetry ``service.name``)
+to non-negative integer queue slots, e.g. ``{"checkout": 256, "auth": 512}``. The sum of the quotas
+must not exceed :envvar:`OTEL_BSP_MAX_QUEUE_SIZE`. Unused reservations stay available to other
+sources until their owner needs them. Invalid values are ignored.
+Default: no per-source quotas
+"""
+
+OTEL_BLRP_FAIR_QUOTAS = "OTEL_BLRP_FAIR_QUOTAS"
+"""
+.. envvar:: OTEL_BLRP_FAIR_QUOTAS
+
+The :envvar:`OTEL_BLRP_FAIR_QUOTAS` represents the per-source queue quota reservations of the
+BatchLogRecordProcessor as a JSON object mapping source keys (by default the telemetry
+``service.name``) to non-negative integer queue slots, e.g. ``{"checkout": 256, "auth": 512}``.
+The sum of the quotas must not exceed :envvar:`OTEL_BLRP_MAX_QUEUE_SIZE`. Unused reservations stay
+available to other sources until their owner needs them. Invalid values are ignored.
+Default: no per-source quotas
+"""
+
 OTEL_ATTRIBUTE_COUNT_LIMIT = "OTEL_ATTRIBUTE_COUNT_LIMIT"
 """
 .. envvar:: OTEL_ATTRIBUTE_COUNT_LIMIT

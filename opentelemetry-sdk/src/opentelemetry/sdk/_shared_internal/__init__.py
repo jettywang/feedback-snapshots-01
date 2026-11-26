@@ -24,9 +24,16 @@ from opentelemetry.context import (
     detach,
     set_value,
 )
+from opentelemetry.sdk._shared_internal._fair_quota import (
+    DEFAULT_SOURCE_KEY,
+    DropReason,
+    FairQuotaGate,
+    QueuedTelemetry,
+)
 from opentelemetry.sdk._shared_internal._processor_metrics import (
     ProcessorMetricsT,
 )
+from opentelemetry.semconv.attributes.service_attributes import SERVICE_NAME
 from opentelemetry.util._once import Once
 
 
@@ -76,6 +83,12 @@ _logger = logging.getLogger(__name__)
 _logger.addFilter(DuplicateFilter())
 
 
+def _default_source_key_extractor(telemetry: Telemetry) -> str:
+    resource = getattr(telemetry, "resource", None)
+    attributes = getattr(resource, "attributes", None) or {}
+    return str(attributes.get(SERVICE_NAME, DEFAULT_SOURCE_KEY))
+
+
 class BatchProcessor(Generic[Telemetry]):
     """This class can be used with exporter's that implement the above
     Exporter interface to buffer and send telemetry in batch through
@@ -90,6 +103,8 @@ class BatchProcessor(Generic[Telemetry]):
         max_queue_size: int,
         exporting: str,
         metrics: ProcessorMetricsT,
+        fair_quotas: collections.abc.Mapping[str, int] | None = None,
+        source_key_extractor: collections.abc.Callable[[Telemetry], str] | None = None,
     ):
         self._bsp_reset_once = Once()
         self._exporter = exporter
@@ -102,6 +117,14 @@ class BatchProcessor(Generic[Telemetry]):
         self._export_timeout_millis = export_timeout_millis
         # Deque is thread safe.
         self._queue = collections.deque([], max_queue_size)
+        if fair_quotas is not None or source_key_extractor is not None:
+            self._fair_quota_gate: FairQuotaGate[Telemetry] | None = FairQuotaGate(
+                max_queue_size,
+                fair_quotas or {},
+                source_key_extractor or _default_source_key_extractor,
+            )
+        else:
+            self._fair_quota_gate = None
         self._worker_thread = threading.Thread(
             name=f"OtelBatch{exporting}RecordProcessor",
             target=self.worker,
@@ -143,6 +166,8 @@ class BatchProcessor(Generic[Telemetry]):
         self._export_lock = threading.Lock()
         self._worker_awaken = threading.Event()
         self._queue.clear()
+        if self._fair_quota_gate is not None:
+            self._fair_quota_gate.reset()
         self._worker_thread = threading.Thread(
             name=f"OtelBatch{self._exporting}RecordProcessor",
             target=self.worker,
@@ -185,7 +210,14 @@ class BatchProcessor(Generic[Telemetry]):
                     len(self._queue),
                 )
                 # Oldest records are at the back, so pop from there.
-                batch = [self._queue.pop() for _ in range(count)]
+                queued_entries = [self._queue.pop() for _ in range(count)]
+                if self._fair_quota_gate is not None:
+                    for entry in queued_entries:
+                        self._fair_quota_gate.release(entry)
+                batch = [
+                    entry.data if isinstance(entry, QueuedTelemetry) else entry
+                    for entry in queued_entries
+                ]
                 # Record on submission to the exporter.
                 self._metrics.finish_items(count)
                 try:
@@ -198,18 +230,49 @@ class BatchProcessor(Generic[Telemetry]):
         if self._shutdown:
             _logger.info("Shutdown called, ignoring %s.", self._exporting)
             self._metrics.drop_items(1, "already_shutdown")
+            if self._fair_quota_gate is not None:
+                self._fair_quota_gate.record_external_drop(data, DropReason.ALREADY_SHUTDOWN)
             return
         if self._pid != os.getpid():
             self._bsp_reset_once.do_once(self._at_fork_reinit)
-        if len(self._queue) == self._max_queue_size:
-            _logger.warning("Queue full, dropping %s.", self._exporting)
-            self._metrics.drop_items(1)
-        # This will drop a log from the right side if the queue is at _max_queue_size.
-        self._queue.appendleft(data)
+        if self._fair_quota_gate is not None:
+            decision = self._fair_quota_gate.admit(data)
+            if isinstance(decision, DropReason):
+                if decision is DropReason.QUEUE_FULL:
+                    _logger.warning("Queue full, dropping %s.", self._exporting)
+                else:
+                    _logger.warning("Fair quota exceeded, dropping %s.", self._exporting)
+                self._metrics.drop_items(1, decision.value)
+                return
+            queued: QueuedTelemetry[Telemetry] | Telemetry = decision
+        else:
+            if len(self._queue) == self._max_queue_size:
+                _logger.warning("Queue full, dropping %s.", self._exporting)
+                self._metrics.drop_items(1)
+            queued = data
+        self._queue.appendleft(queued)
         if (
             self._schedule_delay == 0 or len(self._queue) >= self._max_export_batch_size
         ) and not self._worker_awaken.is_set():
             self._worker_awaken.set()
+
+    def source_occupancy(self) -> dict[str, int]:
+        """Returns the number of queued items currently held by each source."""
+        if self._fair_quota_gate is None:
+            return {}
+        return self._fair_quota_gate.occupancy()
+
+    def dropped_summary(self) -> dict[str, dict[str, int]]:
+        """Returns drop counters per source and drop reason."""
+        if self._fair_quota_gate is None:
+            return {}
+        return self._fair_quota_gate.dropped_summary()
+
+    def drop_records(self) -> tuple:
+        """Returns the ordered trail of recorded rejections."""
+        if self._fair_quota_gate is None:
+            return ()
+        return self._fair_quota_gate.drop_records()
 
     def shutdown(self, timeout_millis: int = 30000):
         if self._shutdown:

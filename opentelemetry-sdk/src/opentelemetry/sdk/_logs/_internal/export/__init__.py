@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import abc
+import collections.abc
 import copy
 import enum
 import logging
@@ -37,6 +38,7 @@ from opentelemetry.sdk._shared_internal._processor_metrics import (
 )
 from opentelemetry.sdk.environment_variables import (
     OTEL_BLRP_EXPORT_TIMEOUT,
+    OTEL_BLRP_FAIR_QUOTAS,
     OTEL_BLRP_MAX_EXPORT_BATCH_SIZE,
     OTEL_BLRP_MAX_QUEUE_SIZE,
     OTEL_BLRP_SCHEDULE_DELAY,
@@ -44,6 +46,7 @@ from opentelemetry.sdk.environment_variables import (
 )
 from opentelemetry.sdk.environment_variables._internal import (
     parse_boolean_environment_variable,
+    parse_fair_quotas_environment_variable,
 )
 from opentelemetry.sdk.resources import Resource
 from opentelemetry.semconv._incubating.attributes.otel_attributes import (
@@ -258,6 +261,7 @@ class BatchLogRecordProcessor(LogRecordProcessor):
     - :envvar:`OTEL_BLRP_MAX_QUEUE_SIZE`
     - :envvar:`OTEL_BLRP_MAX_EXPORT_BATCH_SIZE`
     - :envvar:`OTEL_BLRP_EXPORT_TIMEOUT`
+    - :envvar:`OTEL_BLRP_FAIR_QUOTAS`
 
     All the logic for emitting logs, shutting down etc. resides in the BatchProcessor class.
     """
@@ -270,6 +274,8 @@ class BatchLogRecordProcessor(LogRecordProcessor):
         export_timeout_millis: float | None = None,
         max_queue_size: int | None = None,
         *,
+        fair_quotas: collections.abc.Mapping[str, int] | None = None,
+        source_key_extractor: Callable[[ReadableLogRecord], str] | None = None,
         meter_provider: MeterProvider | None = None,
     ):
         if max_queue_size is None:
@@ -283,6 +289,9 @@ class BatchLogRecordProcessor(LogRecordProcessor):
         # Not used. No way currently to pass timeout to export.
         if export_timeout_millis is None:
             export_timeout_millis = BatchLogRecordProcessor._default_export_timeout_millis()
+
+        if fair_quotas is None:
+            fair_quotas = parse_fair_quotas_environment_variable(OTEL_BLRP_FAIR_QUOTAS)
 
         BatchLogRecordProcessor._validate_arguments(
             max_queue_size,
@@ -305,6 +314,8 @@ class BatchLogRecordProcessor(LogRecordProcessor):
                 capacity=max_queue_size,
                 enabled=parse_boolean_environment_variable(OTEL_PYTHON_SDK_INTERNAL_METRICS_ENABLED),
             ),
+            fair_quotas=fair_quotas,
+            source_key_extractor=source_key_extractor,
         )
 
     def on_emit(self, log_record: ReadWriteLogRecord) -> None:
@@ -323,6 +334,15 @@ class BatchLogRecordProcessor(LogRecordProcessor):
             limits=log_record.limits,
         )
         return self._batch_processor.emit(readable_log_record)
+
+    def source_occupancy(self) -> dict[str, int]:
+        return self._batch_processor.source_occupancy()
+
+    def dropped_summary(self) -> dict[str, dict[str, int]]:
+        return self._batch_processor.dropped_summary()
+
+    def drop_records(self) -> tuple:
+        return self._batch_processor.drop_records()
 
     def shutdown(self):
         return self._batch_processor.shutdown()
