@@ -26,11 +26,60 @@ __all__ = (
     'UnsupportedParameters',
     'OptionError',
     'MissingRequiredOptions',
+    'OperationAuthorizationError',
+    'MissingUserCredentials',
+    'MissingUserCredential',
+    'MissingServiceCredentials',
+    'MissingServiceCredential',
+    'ServiceScopeMismatch',
 )
 
 
 class AuthPluginException(base.ClientException):
     message = "Unknown error with authentication plugins."
+
+
+class OperationAuthorizationError(AuthPluginException):
+    """An operation's approved identities cannot be supplied."""
+
+    message = "The operation authorization could not be satisfied."
+    reason = 'operation_authorization_error'
+
+
+class MissingUserCredentials(OperationAuthorizationError):
+    """No user credential is available for a user-authenticated operation."""
+
+    message = "Missing user credentials for the authorized operation."
+    reason = 'missing_user_credentials'
+
+
+class MissingServiceCredentials(OperationAuthorizationError):
+    """No service credential is available for a dual-identity operation."""
+
+    message = "Missing service credentials for the authorized operation."
+    reason = 'missing_service_credentials'
+
+
+class ServiceScopeMismatch(OperationAuthorizationError):
+    """The service credential is not scoped as approved for the operation."""
+
+    message = "The service credential scope does not match the authorization."
+    reason = 'service_scope_mismatch'
+
+    def __init__(self, expected: object = None, actual: object = None):
+        self.expected = expected
+        self.actual = actual
+        if expected is None or actual is None:
+            super().__init__(self.message)
+        else:
+            super().__init__(
+                f"The service credential scope {actual!r} does not match "
+                f"the authorized scope {expected!r}."
+            )
+
+
+MissingUserCredential = MissingUserCredentials
+MissingServiceCredential = MissingServiceCredentials
 
 
 class MissingAuthPlugin(AuthPluginException):

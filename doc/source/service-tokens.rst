@@ -136,6 +136,67 @@ another service alongside the calling service's own credentials:
 Every HTTP request sent through ``sess`` will contain both ``X-Auth-Token`` and
 ``X-Service-Token`` headers.
 
+Operation Authorization
+-----------------------
+
+Some operations only need the user's identity, while privileged operations
+must be approved for both the user and service identities. Pass an
+:class:`~keystoneauth1.operation_authorization.OperationAuthorization` with a
+request to make the outgoing headers match that approval:
+
+.. code-block:: python
+
+    from keystoneauth1.operation_authorization import OperationAuthorization
+
+    # A normal query sends X-Auth-Token only.
+    sess.get(
+        'https://service.example/v1/things',
+        operation_authorization=OperationAuthorization.user_only(),
+    )
+
+    # A privileged operation sends both headers. The service credential's
+    # project/domain/system scope is checked when an approved scope is given.
+    dual = OperationAuthorization.dual_identity(
+        service_scope={'project_id': service_project_id},
+    )
+    sess.post(
+        'https://service.example/v1/privileged-action',
+        operation_authorization=dual,
+    )
+
+The same approval is used for the initial request, 401 invalidation, and the
+re-authenticated retry. Use
+:meth:`~keystoneauth1.service_token.ServiceTokenAuthWrapper.for_operation`
+when the approval should travel with a request-specific auth object, or
+:meth:`~keystoneauth1.service_token.ServiceTokenAuthWrapper.authorize` to bind
+it for a context:
+
+.. code-block:: python
+
+    request_auth = auth.for_operation(dual)
+    sess.post(url, auth=request_auth)
+
+    with auth.authorize(OperationAuthorization.user_only()) as user_auth:
+        sess.get(url, auth=user_auth)
+
+User-only approvals never fetch, validate, invalidate, or send the service
+token. A dual-identity approval raises distinct
+:class:`~keystoneauth1.exceptions.auth_plugins.MissingUserCredentials`,
+:class:`~keystoneauth1.exceptions.auth_plugins.MissingServiceCredentials`, and
+:class:`~keystoneauth1.exceptions.auth_plugins.ServiceScopeMismatch` errors
+before an incomplete identity set can be sent. Because the approval is
+request-local (or context-local), re-authentication for one request cannot
+change another request's approved identity set.
+
+A concurrent in-memory double covering one query and one dual-identity
+re-authentication is available in
+``keystoneauth1/tests/unit/test_operation_authorization.py``. Run the standalone
+recording demo with:
+
+.. code-block:: shell
+
+    python examples/operation_authorization_demo.py
+
 Using with an Adapter
 ---------------------
 
@@ -272,3 +333,6 @@ invalidates both the ``user_auth`` and ``service_auth`` token caches:
 If an HTTP request fails with an HTTP 401 Unauthorized status,
 :class:`~keystoneauth1.session.Session` invokes this method automatically to
 ensure that expired tokens on either side are refreshed on the subsequent retry.
+When the request has an operation authorization, only the approved identities
+are invalidated; the same authorization is enforced again before retry headers
+are produced.

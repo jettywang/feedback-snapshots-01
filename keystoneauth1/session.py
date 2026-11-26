@@ -38,6 +38,7 @@ import keystoneauth1
 from keystoneauth1 import _utils as utils
 from keystoneauth1 import discover
 from keystoneauth1 import exceptions
+from keystoneauth1 import operation_authorization as op_authorization
 from keystoneauth1 import plugin
 
 try:
@@ -769,6 +770,12 @@ class Session:
         authenticated: bool | None = None,
         endpoint_filter: dict[str, Any] | None = None,
         auth: plugin.BaseAuthPlugin | None = None,
+        operation_authorization: (
+            op_authorization.OperationAuthorization
+            | str
+            | dict[str, Any]
+            | None
+        ) = None,
         requests_auth: requests.auth.AuthBase | None = None,
         raise_exc: bool = True,
         allow_reauth: bool = True,
@@ -831,6 +838,9 @@ class Session:
         :param auth: The auth plugin to use when authenticating this request.
             This will override the plugin that is attached to the session (if
             any). (optional)
+        :param operation_authorization: The identities approved for this
+            request. Auth wrappers that support operation authorization use
+            it to keep initial and re-authenticated requests consistent.
         :param requests_auth: A requests library auth plugin that cannot be
             passed via kwarg because the `auth` kwarg collides with our own
             auth plugins. (optional)
@@ -882,6 +892,12 @@ class Session:
             failure, or to indicate an error response code.
         :returns: The response to the request.
         """
+        operation_authorization = (
+            op_authorization.pop_request_operation_authorization(
+                kwargs, operation_authorization
+            )
+        )
+
         # If a logger is passed in, use it and do not log requests, responses
         # and bodies separately.
         if logger:
@@ -919,7 +935,9 @@ class Session:
             authenticated = bool(auth or self.auth)
 
         if authenticated:
-            auth_headers = self.get_auth_headers(auth)
+            auth_headers = self.get_auth_headers(
+                auth, operation_authorization=operation_authorization
+            )
 
             if auth_headers is None:
                 msg = 'No valid authentication is available'
@@ -1125,8 +1143,12 @@ class Session:
         # handle getting a 401 Unauthorized response by invalidating the plugin
         # and then retrying the request. This is only tried once.
         if resp.status_code == 401 and authenticated and allow_reauth:
-            if self.invalidate(auth):
-                auth_headers = self.get_auth_headers(auth)
+            if self.invalidate(
+                auth, operation_authorization=operation_authorization
+            ):
+                auth_headers = self.get_auth_headers(
+                    auth, operation_authorization=operation_authorization
+                )
 
                 if auth_headers is not None:
                     headers.update(auth_headers)
@@ -1395,12 +1417,22 @@ class Session:
         return auth
 
     def get_auth_headers(
-        self, auth: plugin.BaseAuthPlugin | None = None
+        self,
+        auth: plugin.BaseAuthPlugin | None = None,
+        operation_authorization: (
+            op_authorization.OperationAuthorization
+            | str
+            | dict[str, Any]
+            | None
+        ) = None,
     ) -> dict[str, str] | None:
         """Return auth headers as provided by the auth plugin.
 
         :param auth: The auth plugin to use for token. Overrides the plugin
                      on the session. (optional)
+        :param operation_authorization: The identities approved for this
+                     operation. Auth plugins that support operation
+                     authorization enforce this contract. (optional)
 
         :raises keystoneauth1.exceptions.auth.AuthorizationFailure:
             if a new token fetch fails.
@@ -1410,6 +1442,12 @@ class Session:
         :returns: Authentication headers or None for failure.
         """
         auth = self._auth_required(auth, 'fetch a token')
+        approval = op_authorization.resolve_operation_authorization(
+            operation_authorization, auth
+        )
+        if approval is not None:
+            with op_authorization.operation_authorization_context(approval):
+                return auth.get_headers(self)
         return auth.get_headers(self)
 
     def get_token(
@@ -1567,13 +1605,30 @@ class Session:
 
         return params
 
-    def invalidate(self, auth: plugin.BaseAuthPlugin | None = None) -> bool:
+    def invalidate(
+        self,
+        auth: plugin.BaseAuthPlugin | None = None,
+        operation_authorization: (
+            op_authorization.OperationAuthorization
+            | str
+            | dict[str, Any]
+            | None
+        ) = None,
+    ) -> bool:
         """Invalidate an authentication plugin.
 
         :param auth: The auth plugin to invalidate. Overrides the plugin on the
             session. (optional)
+        :param operation_authorization: The operation whose approved identities
+            should be invalidated. (optional)
         """
         auth = self._auth_required(auth, 'validate')
+        approval = op_authorization.resolve_operation_authorization(
+            operation_authorization, auth
+        )
+        if approval is not None:
+            with op_authorization.operation_authorization_context(approval):
+                return auth.invalidate()
         return auth.invalidate()
 
     def get_user_id(

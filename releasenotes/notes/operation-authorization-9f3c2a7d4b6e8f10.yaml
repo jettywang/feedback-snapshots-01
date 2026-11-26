@@ -1,0 +1,9 @@
+---
+features:
+  - |
+    ``ServiceTokenAuthWrapper`` and ``Session.request`` now accept an optional
+    ``OperationAuthorization``. Requests can be approved as user-only or
+    dual-identity, with an optional expected service scope. The same approval
+    is enforced for initial requests and 401 retries, while missing user
+    credentials, missing service credentials, and service scope mismatches
+    raise distinct exceptions.
