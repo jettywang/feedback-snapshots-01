@@ -1,0 +1,28 @@
+========================================================================
+Wheel 证据清册  evidence_tampered-0.1.0-py3-none-any.whl
+========================================================================
+wheel-sha256 : bc0dc39fb156e9d2da689386b34fd4731c68485435b562cd38ae72748eac883e
+发行包        : evidence-tampered 0.1.0
+dist-info    : evidence_tampered-0.1.0.dist-info/
+归档成员数    : 4
+总体可信度    : conflict (record_conflict) — at least one member conflicts with its RECORD attestation
+
+【RECORD 审计】
+  已核实 2；摘要冲突 1；无可用证据 1；RECORD 有/归档无 0；未登记成员 0
+  RECORD 自身  : evidence_tampered-0.1.0.dist-info/RECORD → unverified（record_self_hash_absent，RECORD 第 4 行）
+  [冲突] evidence_tampered/__init__.py
+         RECORD: sha256=6QBdnsb2WaRUd3_mrrW1UqXMvh9atINWjW68pyp10AU size=106
+         实际  : sha256=N6LmlUNO0El5Y3ajs2KyJHhtU6iQICOvGwwv9uhynlk size=106
+         来源  : RECORD:L1
+
+【入口点区段】
+  （无 entry_points.txt 或无区段）
+
+【归档脚本路径】
+  （未发现 .data/scripts 成员或带 shebang 的脚本）
+
+【发现项与来源】
+  (conflict) digest_mismatch: archived bytes disagree with the RECORD attestation
+      来源: evidence_tampered/__init__.py
+      来源: RECORD:L1
+========================================================================

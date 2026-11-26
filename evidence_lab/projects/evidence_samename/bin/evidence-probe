@@ -1,0 +1,12 @@
+#!/usr/bin/env python3
+"""Archived script twin of the evidence-probe declarations."""
+import sys
+
+
+def main():
+    print("archived evidence-probe script says hello")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,9 @@
+RECORD 校验 — evidence_tampered-0.1.0-py3-none-any.whl
+wheel-sha256: bc0dc39fb156e9d2da689386b34fd4731c68485435b562cd38ae72748eac883e
+member_count=4 verified=2 mismatch=1 unverified=1 missing=0
+trust=conflict (record_conflict)
+
+[DIGEST-MISMATCH] evidence_tampered/__init__.py RECORD:L1
+    expected sha256=6QBdnsb2WaRUd3_mrrW1UqXMvh9atINWjW68pyp10AU (106 bytes)
+    actual   sha256=N6LmlUNO0El5Y3ajs2KyJHhtU6iQICOvGwwv9uhynlk (106 bytes)
+[UNVERIFIED] evidence_tampered-0.1.0.dist-info/RECORD (record_self_hash_absent)

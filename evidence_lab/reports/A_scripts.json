@@ -1,0 +1,28 @@
+{
+  "wheel": "evidence_samename-1.0.0-py3-none-any.whl",
+  "scripts": [
+    {
+      "member": "evidence_samename-1.0.0.data/scripts/evidence-probe",
+      "basename": "evidence-probe",
+      "normalized_name": "evidence-probe",
+      "normalized_stem": "evidence-probe",
+      "script_kind": "data_script",
+      "under_data_scripts": true,
+      "executable_mode": "0755",
+      "executable_bit": true,
+      "shebang": "#!/usr/bin/env python3",
+      "zip_date_time": "2016-01-01T00:00:00",
+      "in_archive": true,
+      "recorded": true,
+      "record_line": 4,
+      "size_actual": 229,
+      "digest_actual": "sha256=q0Vu-MS2js39loHrWISY-NSoFqTDe28DplSXUKvqIlY",
+      "size_record": 229,
+      "digest_record": "sha256=q0Vu-MS2js39loHrWISY-NSoFqTDe28DplSXUKvqIlY",
+      "verdict": "verified",
+      "confidence": "high",
+      "reason_code": "record_digest_match",
+      "reason": "member exists and sha256/size match its RECORD row"
+    }
+  ]
+}

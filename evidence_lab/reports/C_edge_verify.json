@@ -1,0 +1,47 @@
+{
+  "wheel": {
+    "filename": "evidence_edge-0.1.0-py3-none-any.whl",
+    "sha256": "5a3bcad5146af58b462b6839f9e03f2495e20fb248625003a1bd67258e6213a7",
+    "member_count": 5
+  },
+  "trust": {
+    "level": "indeterminate",
+    "code": "unlisted_members",
+    "summary": "all RECORD-hashed members match, but extra members lack evidence"
+  },
+  "record": {
+    "member": "evidence_edge-0.1.0.dist-info/RECORD",
+    "in_archive": true,
+    "recorded": true,
+    "record_line": 4,
+    "size_actual": 302,
+    "digest_actual": "sha256=pz8K4kLG9fpjRJ_Q6WZPoFrdYUYQrhxqA61fi7BZdq0",
+    "size_record": null,
+    "digest_record": null,
+    "verdict": "unverified",
+    "confidence": "indeterminate",
+    "reason_code": "record_self_hash_absent",
+    "reason": "RECORD's self-row intentionally carries no hash (PEP 427)"
+  },
+  "record_audit": {
+    "verified": 3,
+    "digest_mismatch": [],
+    "unverified": [
+      {
+        "member": "evidence_edge-0.1.0.data/scripts/ghost-cmd",
+        "reason_code": "not_listed_in_record",
+        "record_line": null
+      },
+      {
+        "member": "evidence_edge-0.1.0.dist-info/RECORD",
+        "reason_code": "record_self_hash_absent",
+        "record_line": 4
+      }
+    ],
+    "missing_from_archive": [],
+    "unlisted_members": [
+      "evidence_edge-0.1.0.data/scripts/ghost-cmd"
+    ],
+    "member_count": 5
+  }
+}

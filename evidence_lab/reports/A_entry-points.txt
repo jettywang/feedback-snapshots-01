@@ -1,0 +1,7 @@
+入口点区段 — evidence_samename-1.0.0-py3-none-any.whl
+
+[console_scripts]  evidence_samename-1.0.0.dist-info/entry_points.txt:L1  声明摘要=verified  RECORD:L7
+  evidence-probe | 规范化=evidence-probe | evidence_samename.cli:main | 定义于 L2
+
+[evidence.probes]  evidence_samename-1.0.0.dist-info/entry_points.txt:L4  声明摘要=verified  RECORD:L7
+  evidence-probe | 规范化=evidence-probe | evidence_samename.probe:build_probe | 定义于 L5

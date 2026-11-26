@@ -1,0 +1,7 @@
+RECORD 校验 — evidence_samename-1.0.0-py3-none-any.whl
+wheel-sha256: 4916901c42b8db9d6572ef801b3cf55e413ff8d1890191536f4a856149bfd4f5
+member_count=8 verified=7 mismatch=0 unverified=1 missing=0
+trust=high (record_consistent)
+
+[UNVERIFIED] evidence_samename-1.0.0.dist-info/RECORD (record_self_hash_absent)
+没有摘要冲突。

@@ -1,0 +1,22 @@
+[project]
+name = "evidence-samename"
+version = "1.0.0"
+description = "Offline evidence fixture: same command name in three declaration/archive forms."
+authors = [{ name = "Evidence Lab", email = "evidence-lab@example.invalid" }]
+requires-python = ">=3.9"
+license = { text = "MIT" }
+
+[project.scripts]
+evidence-probe = "evidence_samename.cli:main"
+
+[project.entry-points."evidence.probes"]
+evidence-probe = "evidence_samename.probe:build_probe"
+
+[tool.poetry.scripts]
+# Poetry-only file script: archived verbatim into
+# evidence_samename-1.0.0.data/scripts/evidence-probe
+evidence-probe = { reference = "bin/evidence-probe", type = "file" }
+
+[build-system]
+requires = ["poetry-core>=2.0"]
+build-backend = "poetry.core.masonry.api"

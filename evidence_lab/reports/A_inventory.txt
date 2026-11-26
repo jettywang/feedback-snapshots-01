@@ -1,0 +1,30 @@
+========================================================================
+Wheel 证据清册  evidence_samename-1.0.0-py3-none-any.whl
+========================================================================
+wheel-sha256 : 4916901c42b8db9d6572ef801b3cf55e413ff8d1890191536f4a856149bfd4f5
+发行包        : evidence-samename 1.0.0
+dist-info    : evidence_samename-1.0.0.dist-info/
+归档成员数    : 8
+总体可信度    : high (record_consistent) — every RECORD-attested member matches; RECORD's own empty hash is expected
+
+【RECORD 审计】
+  已核实 7；摘要冲突 0；无可用证据 1；RECORD 有/归档无 0；未登记成员 0
+  RECORD 自身  : evidence_samename-1.0.0.dist-info/RECORD → unverified（record_self_hash_absent，RECORD 第 8 行）
+
+【入口点区段】
+  [console_scripts]  来源 evidence_samename-1.0.0.dist-info/entry_points.txt:L1  声明文件=verified  RECORD:L7
+    - evidence-probe  (规范化 evidence-probe)
+        目标: evidence_samename.cli:main
+        目标模块: evidence_samename/cli.py → verified  RECORD:L2
+        可调用对象: source_required (callable_resolution_needs_source)
+  [evidence.probes]  来源 evidence_samename-1.0.0.dist-info/entry_points.txt:L4  声明文件=verified  RECORD:L7
+    - evidence-probe  (规范化 evidence-probe)
+        目标: evidence_samename.probe:build_probe
+        目标模块: evidence_samename/probe.py → verified  RECORD:L3
+        可调用对象: source_required (callable_resolution_needs_source)
+
+【归档脚本路径】
+  - evidence_samename-1.0.0.data/scripts/evidence-probe  [data_script]  规范化=evidence-probe
+      摘要=verified  RECORD:L4  权限=0755 可执行位=True
+      shebang: #!/usr/bin/env python3
+========================================================================

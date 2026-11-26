@@ -1,0 +1,95 @@
+{
+  "wheel": "evidence_samename-1.0.0-py3-none-any.whl",
+  "entry_point_sections": [
+    {
+      "section": "console_scripts",
+      "header_line": 1,
+      "source_member": "evidence_samename-1.0.0.dist-info/entry_points.txt",
+      "declaration_verdict": "verified",
+      "declaration_confidence": "high",
+      "record_line": 7,
+      "entries": [
+        {
+          "name": "evidence-probe",
+          "normalized_name": "evidence-probe",
+          "target": "evidence_samename.cli:main",
+          "line": 2,
+          "raw_line": "evidence-probe=evidence_samename.cli:main",
+          "target_module": {
+            "member": "evidence_samename/cli.py",
+            "in_archive": true,
+            "recorded": true,
+            "record_line": 2,
+            "size_actual": 217,
+            "digest_actual": "sha256=TGa-99zr3u6t-uitmAMVDrw9-Xsu_PJQVfW69_65qHw",
+            "size_record": 217,
+            "digest_record": "sha256=TGa-99zr3u6t-uitmAMVDrw9-Xsu_PJQVfW69_65qHw",
+            "verdict": "verified",
+            "confidence": "high",
+            "reason_code": "record_digest_match",
+            "reason": "member exists and sha256/size match its RECORD row"
+          },
+          "callable": {
+            "verdict": "source_required",
+            "confidence": "source-required",
+            "reason_code": "callable_resolution_needs_source",
+            "reason": "RECORD attests bytes only; resolving the dotted object and proving it is the intended callable needs source or import"
+          },
+          "declaration": {
+            "member": "evidence_samename-1.0.0.dist-info/entry_points.txt",
+            "section": "console_scripts",
+            "line": 2,
+            "verdict": "verified",
+            "confidence": "high",
+            "record_line": 7
+          }
+        }
+      ]
+    },
+    {
+      "section": "evidence.probes",
+      "header_line": 4,
+      "source_member": "evidence_samename-1.0.0.dist-info/entry_points.txt",
+      "declaration_verdict": "verified",
+      "declaration_confidence": "high",
+      "record_line": 7,
+      "entries": [
+        {
+          "name": "evidence-probe",
+          "normalized_name": "evidence-probe",
+          "target": "evidence_samename.probe:build_probe",
+          "line": 5,
+          "raw_line": "evidence-probe=evidence_samename.probe:build_probe",
+          "target_module": {
+            "member": "evidence_samename/probe.py",
+            "in_archive": true,
+            "recorded": true,
+            "record_line": 3,
+            "size_actual": 182,
+            "digest_actual": "sha256=Sj0ELRQMq8KI_ozgjbnHTOUP-orpSi0oS2UTysmmC-o",
+            "size_record": 182,
+            "digest_record": "sha256=Sj0ELRQMq8KI_ozgjbnHTOUP-orpSi0oS2UTysmmC-o",
+            "verdict": "verified",
+            "confidence": "high",
+            "reason_code": "record_digest_match",
+            "reason": "member exists and sha256/size match its RECORD row"
+          },
+          "callable": {
+            "verdict": "source_required",
+            "confidence": "source-required",
+            "reason_code": "callable_resolution_needs_source",
+            "reason": "RECORD attests bytes only; resolving the dotted object and proving it is the intended callable needs source or import"
+          },
+          "declaration": {
+            "member": "evidence_samename-1.0.0.dist-info/entry_points.txt",
+            "section": "evidence.probes",
+            "line": 5,
+            "verdict": "verified",
+            "confidence": "high",
+            "record_line": 7
+          }
+        }
+      ]
+    }
+  ]
+}

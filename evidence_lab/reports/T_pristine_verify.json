@@ -1,0 +1,40 @@
+{
+  "wheel": {
+    "filename": "evidence_tampered-0.1.0-py3-none-any.whl",
+    "sha256": "aec9a2c7c086f5bc7ba65796a6f375af8be1922b7c4aba404a07929fd62fe991",
+    "member_count": 4
+  },
+  "trust": {
+    "level": "high",
+    "code": "record_consistent",
+    "summary": "every RECORD-attested member matches; RECORD's own empty hash is expected"
+  },
+  "record": {
+    "member": "evidence_tampered-0.1.0.dist-info/RECORD",
+    "in_archive": true,
+    "recorded": true,
+    "record_line": 4,
+    "size_actual": 320,
+    "digest_actual": "sha256=hI25tD3NCESZeZI6xeZbXLNGXfQpZa0TFdcqZbnmt9g",
+    "size_record": null,
+    "digest_record": null,
+    "verdict": "unverified",
+    "confidence": "indeterminate",
+    "reason_code": "record_self_hash_absent",
+    "reason": "RECORD's self-row intentionally carries no hash (PEP 427)"
+  },
+  "record_audit": {
+    "verified": 3,
+    "digest_mismatch": [],
+    "unverified": [
+      {
+        "member": "evidence_tampered-0.1.0.dist-info/RECORD",
+        "reason_code": "record_self_hash_absent",
+        "record_line": 4
+      }
+    ],
+    "missing_from_archive": [],
+    "unlisted_members": [],
+    "member_count": 4
+  }
+}

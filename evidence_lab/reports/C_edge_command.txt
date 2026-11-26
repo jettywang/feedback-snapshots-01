@@ -1,0 +1,14 @@
+命令核查 — 查询 'ghost-cmd' → 规范化 'ghost-cmd'
+wheel: evidence_edge-0.1.0-py3-none-any.whl (5a3bcad5146af58b…)
+命中: True；同名类别共存: ['archived_script']；总体可信程度: indeterminate
+
+1. 实际归档脚本  原名=ghost-cmd 规范化=ghost-cmd
+   成员: evidence_edge-0.1.0.data/scripts/ghost-cmd (data_script, 匹配=normalized-basename)
+   完整性: unverified / 可信度 indeterminate
+   RECORD 行: 无登记行（未列入 RECORD）
+   权限: 0755 可执行位=True
+   shebang: #!/usr/bin/env python3
+   证据链:
+     - evidence_edge-0.1.0.data/scripts/ghost-cmd
+     - RECORD:no-row-for-member
+

@@ -1,0 +1,55 @@
+{
+  "wheel": {
+    "filename": "evidence_tampered-0.1.0-py3-none-any.whl",
+    "sha256": "bc0dc39fb156e9d2da689386b34fd4731c68485435b562cd38ae72748eac883e",
+    "member_count": 4
+  },
+  "trust": {
+    "level": "conflict",
+    "code": "record_conflict",
+    "summary": "at least one member conflicts with its RECORD attestation"
+  },
+  "record": {
+    "member": "evidence_tampered-0.1.0.dist-info/RECORD",
+    "in_archive": true,
+    "recorded": true,
+    "record_line": 4,
+    "size_actual": 320,
+    "digest_actual": "sha256=hI25tD3NCESZeZI6xeZbXLNGXfQpZa0TFdcqZbnmt9g",
+    "size_record": null,
+    "digest_record": null,
+    "verdict": "unverified",
+    "confidence": "indeterminate",
+    "reason_code": "record_self_hash_absent",
+    "reason": "RECORD's self-row intentionally carries no hash (PEP 427)"
+  },
+  "record_audit": {
+    "verified": 2,
+    "digest_mismatch": [
+      {
+        "member": "evidence_tampered/__init__.py",
+        "in_archive": true,
+        "recorded": true,
+        "record_line": 1,
+        "size_actual": 106,
+        "digest_actual": "sha256=N6LmlUNO0El5Y3ajs2KyJHhtU6iQICOvGwwv9uhynlk",
+        "size_record": 106,
+        "digest_record": "sha256=6QBdnsb2WaRUd3_mrrW1UqXMvh9atINWjW68pyp10AU",
+        "verdict": "digest_mismatch",
+        "confidence": "conflict",
+        "reason_code": "digest_or_size_mismatch",
+        "reason": "archived bytes disagree with the RECORD attestation"
+      }
+    ],
+    "unverified": [
+      {
+        "member": "evidence_tampered-0.1.0.dist-info/RECORD",
+        "reason_code": "record_self_hash_absent",
+        "record_line": 4
+      }
+    ],
+    "missing_from_archive": [],
+    "unlisted_members": [],
+    "member_count": 4
+  }
+}

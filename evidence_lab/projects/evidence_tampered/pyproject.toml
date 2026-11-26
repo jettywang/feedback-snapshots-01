@@ -1,0 +1,13 @@
+[tool.poetry]
+name = "evidence-tampered"
+version = "0.1.0"
+description = "Control wheel with one ordinary member whose RECORD digest is wrong."
+authors = ["Evidence Lab <evidence-lab@example.invalid>"]
+license = "MIT"
+
+[tool.poetry.dependencies]
+python = "^3.9"
+
+[build-system]
+requires = ["poetry-core>=2.0"]
+build-backend = "poetry.core.masonry.api"

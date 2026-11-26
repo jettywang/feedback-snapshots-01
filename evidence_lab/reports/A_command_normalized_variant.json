@@ -1,0 +1,81 @@
+{
+  "wheel": {
+    "filename": "evidence_samename-1.0.0-py3-none-any.whl",
+    "sha256": "4916901c42b8db9d6572ef801b3cf55e413ff8d1890191536f4a856149bfd4f5",
+    "member_count": 8
+  },
+  "query": "EVIDENCE_PROBE",
+  "normalized_query": "evidence-probe",
+  "found": true,
+  "coexisting_kinds": [
+    "archived_script",
+    "console_entry",
+    "plugin_entry"
+  ],
+  "same_name_coexists": true,
+  "overall_confidence": "high",
+  "claims": [
+    {
+      "kind": "console_entry",
+      "name": "evidence-probe",
+      "normalized_name": "evidence-probe",
+      "section": "console_scripts",
+      "target": "evidence_samename.cli:main",
+      "source_member": "evidence_samename-1.0.0.dist-info/entry_points.txt",
+      "source_line": 2,
+      "raw_line": "evidence-probe=evidence_samename.cli:main",
+      "record_line": 7,
+      "declaration_verdict": "verified",
+      "target_module_member": "evidence_samename/cli.py",
+      "target_module_verdict": "verified",
+      "target_module_record_line": 2,
+      "callable_verdict": "source_required",
+      "evidence_refs": [
+        "evidence_samename-1.0.0.dist-info/entry_points.txt:L2 [console_scripts]",
+        "RECORD:L7",
+        "evidence_samename/cli.py",
+        "RECORD:L2"
+      ]
+    },
+    {
+      "kind": "plugin_entry",
+      "name": "evidence-probe",
+      "normalized_name": "evidence-probe",
+      "section": "evidence.probes",
+      "target": "evidence_samename.probe:build_probe",
+      "source_member": "evidence_samename-1.0.0.dist-info/entry_points.txt",
+      "source_line": 5,
+      "raw_line": "evidence-probe=evidence_samename.probe:build_probe",
+      "record_line": 7,
+      "declaration_verdict": "verified",
+      "target_module_member": "evidence_samename/probe.py",
+      "target_module_verdict": "verified",
+      "target_module_record_line": 3,
+      "callable_verdict": "source_required",
+      "evidence_refs": [
+        "evidence_samename-1.0.0.dist-info/entry_points.txt:L5 [evidence.probes]",
+        "RECORD:L7",
+        "evidence_samename/probe.py",
+        "RECORD:L3"
+      ]
+    },
+    {
+      "kind": "archived_script",
+      "name": "evidence-probe",
+      "normalized_name": "evidence-probe",
+      "script_kind": "data_script",
+      "member": "evidence_samename-1.0.0.data/scripts/evidence-probe",
+      "record_line": 4,
+      "verdict": "verified",
+      "confidence": "high",
+      "executable_bit": true,
+      "executable_mode": "0755",
+      "shebang": "#!/usr/bin/env python3",
+      "match_basis": "normalized-basename",
+      "evidence_refs": [
+        "evidence_samename-1.0.0.data/scripts/evidence-probe",
+        "RECORD:L4"
+      ]
+    }
+  ]
+}

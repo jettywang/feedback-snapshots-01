@@ -1,0 +1,35 @@
+{
+  "wheel": {
+    "filename": "evidence_edge-0.1.0-py3-none-any.whl",
+    "sha256": "5a3bcad5146af58b462b6839f9e03f2495e20fb248625003a1bd67258e6213a7",
+    "member_count": 5
+  },
+  "query": "ghost-cmd",
+  "normalized_query": "ghost-cmd",
+  "found": true,
+  "coexisting_kinds": [
+    "archived_script"
+  ],
+  "same_name_coexists": false,
+  "overall_confidence": "indeterminate",
+  "claims": [
+    {
+      "kind": "archived_script",
+      "name": "ghost-cmd",
+      "normalized_name": "ghost-cmd",
+      "script_kind": "data_script",
+      "member": "evidence_edge-0.1.0.data/scripts/ghost-cmd",
+      "record_line": null,
+      "verdict": "unverified",
+      "confidence": "indeterminate",
+      "executable_bit": true,
+      "executable_mode": "0755",
+      "shebang": "#!/usr/bin/env python3",
+      "match_basis": "normalized-basename",
+      "evidence_refs": [
+        "evidence_edge-0.1.0.data/scripts/ghost-cmd",
+        "RECORD:no-row-for-member"
+      ]
+    }
+  ]
+}
