@@ -1246,6 +1246,15 @@ class TestCollectorRegistry(unittest.TestCase):
         self.assertEqual(list(registry.restricted_registry(['metric']).collect()), [])
         mock_collector.collect.assert_called()
 
+    def test_restricted_registry_skips_no_names_collectors_when_disallowed(self):
+        from unittest.mock import MagicMock
+        registry = CollectorRegistry(support_collectors_without_names=True)
+        mock_collector = MagicMock()
+        mock_collector.describe.return_value = []
+        registry.register(mock_collector)
+        self.assertEqual(list(registry.restricted_registry(['metric'], allow_unnamed_collectors=False).collect()), [])
+        mock_collector.collect.assert_not_called()
+
     def test_restricted_registry_does_not_yield_while_locked(self):
         registry = CollectorRegistry(target_info={'foo': 'bar'})
         Summary('s', 'help', registry=registry).observe(7)

@@ -27,3 +27,23 @@ python_gc_objects_collected_total{generation="0"} 73129.0
 python_gc_objects_collected_total{generation="1"} 8594.0
 python_gc_objects_collected_total{generation="2"} 296.0
 ```
+
+The WSGI and ASGI apps can also be restricted up front, so that several
+accounts can share one registry while each only sees its permitted metric
+families. The permitted names are intersected with any `name[]` filter in
+the request. Collectors that did not declare their metric names at
+registration time are not triggered unless `allow_unnamed_collectors` is
+enabled, since running them is the only way to discover what they produce.
+
+```python
+from prometheus_client import make_wsgi_app
+
+app = make_wsgi_app(
+    REGISTRY,
+    permitted_names=['python_gc_objects_collected_total', 'python_info'],
+    allow_unnamed_collectors=False,
+)
+```
+
+`make_asgi_app` accepts the same parameters. Without `permitted_names` the
+apps keep serving the full registry.

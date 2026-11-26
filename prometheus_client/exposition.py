@@ -10,7 +10,8 @@ import ssl
 import sys
 import threading
 from typing import (
-    Any, Callable, Dict, List, Literal, Optional, Sequence, Tuple, Union,
+    Any, Callable, Dict, Iterable, List, Literal, Optional, Sequence, Tuple,
+    Union,
 )
 from urllib.error import HTTPError
 from urllib.parse import parse_qs, quote_plus, urlparse
@@ -113,11 +114,19 @@ class _PrometheusRedirectHandler(HTTPRedirectHandler):
         return new_request
 
 
-def _bake_output(registry, accept_header, accept_encoding_header, params, disable_compression):
+def _bake_output(registry, accept_header, accept_encoding_header, params, disable_compression,
+                 permitted_names=None, allow_unnamed_collectors=False):
     """Bake output for metrics output."""
     # Choose the correct plain text format of the output.
     encoder, content_type = choose_encoder(accept_header)
-    if 'name[]' in params:
+    if permitted_names is not None:
+        # A restricted scrape only serves the permitted metric families,
+        # further intersected with any name[] filter in the request.
+        names = set(permitted_names)
+        if 'name[]' in params:
+            names = names.intersection(params['name[]'])
+        registry = registry.restricted_registry(names, allow_unnamed_collectors=allow_unnamed_collectors)
+    elif 'name[]' in params:
         registry = registry.restricted_registry(params['name[]'])
     output = encoder(registry)
     headers = [('Content-Type', content_type)]
@@ -128,8 +137,17 @@ def _bake_output(registry, accept_header, accept_encoding_header, params, disabl
     return '200 OK', headers, output
 
 
-def make_wsgi_app(registry: Collector = REGISTRY, disable_compression: bool = False) -> Callable:
-    """Create a WSGI app which serves the metrics from a registry."""
+def make_wsgi_app(registry: Collector = REGISTRY, disable_compression: bool = False,
+                  permitted_names: Optional[Iterable[str]] = None,
+                  allow_unnamed_collectors: bool = False) -> Callable:
+    """Create a WSGI app which serves the metrics from a registry.
+
+    If permitted_names is given, every scrape is restricted to those metric
+    families (intersected with any name[] query parameter), and collectors
+    that did not declare their metric names are only triggered when
+    allow_unnamed_collectors is True. Without permitted_names the app serves
+    the full registry as before.
+    """
 
     def prometheus_app(environ, start_response):
         # Prepare parameters
@@ -155,7 +173,8 @@ def make_wsgi_app(registry: Collector = REGISTRY, disable_compression: bool = Fa
             # Note: For backwards compatibility, the URI path for GET is not
             # constrained to the documented /metrics, but any path is allowed.
             # Bake output
-            status, headers, output = _bake_output(registry, accept_header, accept_encoding_header, params, disable_compression)
+            status, headers, output = _bake_output(registry, accept_header, accept_encoding_header, params, disable_compression,
+                                                   permitted_names, allow_unnamed_collectors)
         # Return output
         start_response(status, headers)
         return [output]

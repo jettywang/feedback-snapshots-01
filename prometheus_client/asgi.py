@@ -1,4 +1,4 @@
-from typing import Callable
+from typing import Callable, Iterable, Optional
 from urllib.parse import parse_qs
 
 from .exposition import _bake_output
@@ -23,8 +23,17 @@ class _ASGIApp:
         await self._app(scope, receive, send)
 
 
-def make_asgi_app(registry: Collector = REGISTRY, disable_compression: bool = False) -> Callable:
-    """Create a ASGI app which serves the metrics from a registry."""
+def make_asgi_app(registry: Collector = REGISTRY, disable_compression: bool = False,
+                  permitted_names: Optional[Iterable[str]] = None,
+                  allow_unnamed_collectors: bool = False) -> Callable:
+    """Create a ASGI app which serves the metrics from a registry.
+
+    If permitted_names is given, every scrape is restricted to those metric
+    families (intersected with any name[] query parameter), and collectors
+    that did not declare their metric names are only triggered when
+    allow_unnamed_collectors is True. Without permitted_names the app serves
+    the full registry as before.
+    """
 
     async def prometheus_app(scope, receive, send):
         assert scope.get("type") == "http"
@@ -39,7 +48,8 @@ def make_asgi_app(registry: Collector = REGISTRY, disable_compression: bool = Fa
             if name.decode("utf8").lower() == 'accept-encoding'
         ])
         # Bake output
-        status, headers, output = _bake_output(registry, accept_header, accept_encoding_header, params, disable_compression)
+        status, headers, output = _bake_output(registry, accept_header, accept_encoding_header, params, disable_compression,
+                                               permitted_names, allow_unnamed_collectors)
         formatted_headers = []
         for header in headers:
             formatted_headers.append(tuple(x.encode('utf8') for x in header))

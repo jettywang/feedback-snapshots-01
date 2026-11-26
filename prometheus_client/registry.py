@@ -106,18 +106,22 @@ class CollectorRegistry:
         for collector in collectors:
             yield from collector.collect()
 
-    def restricted_registry(self, names: Iterable[str]) -> "RestrictedRegistry":
+    def restricted_registry(self, names: Iterable[str], allow_unnamed_collectors: bool = True) -> "RestrictedRegistry":
         """Returns object that only collects some metrics.
 
         Returns an object which upon collect() will return
         only samples with the given names.
+
+        If allow_unnamed_collectors is False, collectors that did not
+        declare their metric names at registration time are not triggered,
+        as running them is the only way to discover what they produce.
 
         Intended usage is:
             generate_latest(REGISTRY.restricted_registry(['a_timeseries']), escaping)
 
         Experimental."""
         names = set(names)
-        return RestrictedRegistry(names, self)
+        return RestrictedRegistry(names, self, allow_unnamed_collectors)
 
     def set_target_info(self, labels: Optional[Dict[str, str]]) -> None:
         with self._lock:
@@ -153,12 +157,13 @@ class CollectorRegistry:
 
 
 class RestrictedRegistry:
-    def __init__(self, names: Iterable[str], registry: CollectorRegistry):
+    def __init__(self, names: Iterable[str], registry: CollectorRegistry, allow_unnamed_collectors: bool = True):
         self._name_set = set(names)
         self._registry = registry
+        self._allow_unnamed_collectors = allow_unnamed_collectors
 
     def collect(self) -> Iterable[Metric]:
-        collectors = set(self._registry._collectors_without_names)
+        collectors = set(self._registry._collectors_without_names) if self._allow_unnamed_collectors else set()
         target_info_metric = None
         with self._registry._lock:
             if 'target_info' in self._name_set and self._registry._target_info:
