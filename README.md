@@ -380,6 +380,8 @@ policy_sentry initialize --access-level-overrides-file ~/.policy_sentry/access-l
   - Option 2: Query the ARNs Table (`arn-table`)
   - Option 3: Query the Conditions Table (`condition-table`)
 
+* `release-plan`: Split an approved policy that exceeds a single document's byte or structural limits into a safe, ordered batch plan. Explicit Denies are installed first and never split, every intermediate state stays within the approved envelope, and the fully installed union is verified to equal the source policy. See the [release planning documentation](https://github.com/salesforce/policy_sentry/blob/master/docs/writing-policies/release-planning.md).
+
 * `initialize`: (Optional). Create a SQLite database that contains all of the services available through the [Actions, Resources, and Condition Keys documentation][1]. See the [documentation][12].
 
 ### Python Library usage
