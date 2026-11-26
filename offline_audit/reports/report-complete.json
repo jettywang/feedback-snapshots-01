@@ -1,0 +1,311 @@
+{
+  "role": "ci-artifact-deployer",
+  "snapshot": "complete",
+  "boundary_present": true,
+  "boundary_completeness": "complete",
+  "missing_inputs": [],
+  "results": [
+    {
+      "target_id": "T1",
+      "action": "s3:PutObject",
+      "resource": "arn:aws:s3:::ci-artifacts-prod/public/report.zip",
+      "verdict": "DENY_EXPLICIT",
+      "determined": true,
+      "explicit_deny": [
+        {
+          "source": "inline-ci-artifact-deployer",
+          "kind": "inline",
+          "sid": "HardDenyPublicObjects",
+          "effect": "Deny",
+          "evidence": []
+        }
+      ],
+      "identity_allows": [],
+      "boundary_allows": [
+        {
+          "source": "CiArtifactDeployerBoundary",
+          "kind": "boundary",
+          "sid": "BoundaryS3Objects",
+          "effect": "Allow",
+          "evidence": [
+            {
+              "condition_key": "aws:ResourceTag/env",
+              "operator": "StringEquals",
+              "expected": "prod",
+              "actual": "prod",
+              "origin": "CiArtifactDeployerBoundary/BoundaryS3Objects:StringEquals",
+              "status": "SATISFIED",
+              "reason": "resource_facts.tags -> StringEquals compared against supplied value"
+            }
+          ]
+        }
+      ],
+      "indeterminate_conditions": [],
+      "relevant_gaps": [],
+      "gap": ""
+    },
+    {
+      "target_id": "T2",
+      "action": "s3:GetObject",
+      "resource": "arn:aws:s3:::ci-artifacts-prod/builds/app.tar",
+      "verdict": "ALLOW_EFFECTIVE",
+      "determined": true,
+      "explicit_deny": [],
+      "identity_allows": [
+        {
+          "source": "inline-ci-artifact-deployer",
+          "kind": "inline",
+          "sid": "ReadArtifacts",
+          "effect": "Allow",
+          "evidence": []
+        },
+        {
+          "source": "ArtifactsReadPolicy",
+          "kind": "attached",
+          "sid": "AttachedReadOverlap",
+          "effect": "Allow",
+          "evidence": []
+        }
+      ],
+      "boundary_allows": [
+        {
+          "source": "CiArtifactDeployerBoundary",
+          "kind": "boundary",
+          "sid": "BoundaryS3Objects",
+          "effect": "Allow",
+          "evidence": [
+            {
+              "condition_key": "aws:ResourceTag/env",
+              "operator": "StringEquals",
+              "expected": "prod",
+              "actual": "prod",
+              "origin": "CiArtifactDeployerBoundary/BoundaryS3Objects:StringEquals",
+              "status": "SATISFIED",
+              "reason": "resource_facts.tags -> StringEquals compared against supplied value"
+            }
+          ]
+        }
+      ],
+      "indeterminate_conditions": [],
+      "relevant_gaps": [],
+      "gap": ""
+    },
+    {
+      "target_id": "T3",
+      "action": "logs:CreateLogStream",
+      "resource": "arn:aws:logs:us-east-1:111122223333:log-group:/ci/deployer:log-stream:web",
+      "verdict": "ALLOW_EFFECTIVE",
+      "determined": true,
+      "explicit_deny": [],
+      "identity_allows": [
+        {
+          "source": "LogsAndSsmPolicy",
+          "kind": "attached",
+          "sid": "AttachedWriteLogs",
+          "effect": "Allow",
+          "evidence": []
+        }
+      ],
+      "boundary_allows": [
+        {
+          "source": "CiArtifactDeployerBoundary",
+          "kind": "boundary",
+          "sid": "BoundaryLogs",
+          "effect": "Allow",
+          "evidence": []
+        }
+      ],
+      "indeterminate_conditions": [],
+      "relevant_gaps": [],
+      "gap": ""
+    },
+    {
+      "target_id": "T4",
+      "action": "ssm:GetParameter",
+      "resource": "arn:aws:ssm:us-east-1:111122223333:parameter/ci/deploy-token",
+      "verdict": "ALLOW_EFFECTIVE",
+      "determined": true,
+      "explicit_deny": [],
+      "identity_allows": [
+        {
+          "source": "LogsAndSsmPolicy",
+          "kind": "attached",
+          "sid": "AttachedReadParameter",
+          "effect": "Allow",
+          "evidence": []
+        }
+      ],
+      "boundary_allows": [
+        {
+          "source": "CiArtifactDeployerBoundary",
+          "kind": "boundary",
+          "sid": "BoundarySsmParameter",
+          "effect": "Allow",
+          "evidence": []
+        }
+      ],
+      "indeterminate_conditions": [],
+      "relevant_gaps": [],
+      "gap": ""
+    },
+    {
+      "target_id": "T5",
+      "action": "kms:Decrypt",
+      "resource": "arn:aws:kms:us-east-1:111122223333:key/aaaa-bbbb",
+      "verdict": "ALLOW_EFFECTIVE",
+      "determined": true,
+      "explicit_deny": [],
+      "identity_allows": [
+        {
+          "source": "ArtifactsReadPolicy",
+          "kind": "attached",
+          "sid": "AttachedKmsDecrypt",
+          "effect": "Allow",
+          "evidence": [
+            {
+              "condition_key": "kms:CallerAccount",
+              "operator": "StringEquals",
+              "expected": "111122223333",
+              "actual": "111122223333",
+              "origin": "ArtifactsReadPolicy/AttachedKmsDecrypt:StringEquals",
+              "status": "SATISFIED",
+              "reason": "request_context -> StringEquals compared against supplied value"
+            }
+          ]
+        }
+      ],
+      "boundary_allows": [
+        {
+          "source": "CiArtifactDeployerBoundary",
+          "kind": "boundary",
+          "sid": "BoundaryKms",
+          "effect": "Allow",
+          "evidence": []
+        }
+      ],
+      "indeterminate_conditions": [],
+      "relevant_gaps": [],
+      "gap": ""
+    },
+    {
+      "target_id": "T6",
+      "action": "s3:PutObject",
+      "resource": "arn:aws:s3:::ci-artifacts-prod/uploads/artifact.zip",
+      "verdict": "PENDING_CONDITION",
+      "determined": false,
+      "explicit_deny": [],
+      "identity_allows": [
+        {
+          "source": "inline-ci-artifact-deployer",
+          "kind": "inline",
+          "sid": "WriteArtifactsRestricted",
+          "effect": "Allow",
+          "evidence": [
+            {
+              "condition_key": "s3:x-amz-server-side-encryption",
+              "operator": "StringEquals",
+              "expected": "AES256",
+              "actual": "AES256",
+              "origin": "inline-ci-artifact-deployer/WriteArtifactsRestricted:StringEquals",
+              "status": "SATISFIED",
+              "reason": "request_context -> StringEquals compared against supplied value"
+            }
+          ]
+        }
+      ],
+      "boundary_allows": [],
+      "indeterminate_conditions": [
+        {
+          "source": "CiArtifactDeployerBoundary",
+          "kind": "boundary",
+          "sid": "BoundaryS3Objects",
+          "effect": "Allow",
+          "evidence": [
+            {
+              "condition_key": "aws:ResourceTag/env",
+              "operator": "StringEquals",
+              "expected": "prod",
+              "actual": "<not provided>",
+              "origin": "CiArtifactDeployerBoundary/BoundaryS3Objects:StringEquals",
+              "status": "INDETERMINATE",
+              "reason": "no value for aws:ResourceTag/env in request_context or resource_facts"
+            }
+          ]
+        }
+      ],
+      "relevant_gaps": [
+        {
+          "input": "CiArtifactDeployerBoundary",
+          "scope": "s3:PutObject on arn:aws:s3:::ci-artifacts-prod/uploads/artifact.zip",
+          "reason": "boundary condition cannot be evaluated offline; effective allow is not provable yet"
+        }
+      ],
+      "gap": ""
+    },
+    {
+      "target_id": "T7",
+      "action": "s3:GetObject",
+      "resource": "arn:aws:s3:::ci-artifacts-prod/builds/app.tar",
+      "verdict": "PENDING_CONDITION",
+      "determined": false,
+      "explicit_deny": [],
+      "identity_allows": [
+        {
+          "source": "inline-ci-artifact-deployer",
+          "kind": "inline",
+          "sid": "ReadArtifacts",
+          "effect": "Allow",
+          "evidence": []
+        },
+        {
+          "source": "ArtifactsReadPolicy",
+          "kind": "attached",
+          "sid": "AttachedReadOverlap",
+          "effect": "Allow",
+          "evidence": []
+        }
+      ],
+      "boundary_allows": [],
+      "indeterminate_conditions": [
+        {
+          "source": "CiArtifactDeployerBoundary",
+          "kind": "boundary",
+          "sid": "BoundaryS3Objects",
+          "effect": "Allow",
+          "evidence": [
+            {
+              "condition_key": "aws:ResourceTag/env",
+              "operator": "StringEquals",
+              "expected": "prod",
+              "actual": "<not provided>",
+              "origin": "CiArtifactDeployerBoundary/BoundaryS3Objects:StringEquals",
+              "status": "INDETERMINATE",
+              "reason": "no value for aws:ResourceTag/env in request_context or resource_facts"
+            }
+          ]
+        }
+      ],
+      "relevant_gaps": [
+        {
+          "input": "CiArtifactDeployerBoundary",
+          "scope": "s3:GetObject on arn:aws:s3:::ci-artifacts-prod/builds/app.tar",
+          "reason": "boundary condition cannot be evaluated offline; effective allow is not provable yet"
+        }
+      ],
+      "gap": ""
+    },
+    {
+      "target_id": "T8",
+      "action": "s3:DeleteObject",
+      "resource": "arn:aws:s3:::ci-artifacts-prod/builds/app.tar",
+      "verdict": "IMPLICIT_DENY",
+      "determined": true,
+      "explicit_deny": [],
+      "identity_allows": [],
+      "boundary_allows": [],
+      "indeterminate_conditions": [],
+      "relevant_gaps": [],
+      "gap": "no identity-side or boundary allow in the snapshot"
+    }
+  ]
+}

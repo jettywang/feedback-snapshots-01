@@ -1,0 +1,39 @@
+{
+  "Version": "2012-10-17",
+  "Id": "inline-ci-artifact-deployer",
+  "Statement": [
+    {
+      "Sid": "ReadArtifacts",
+      "Effect": "Allow",
+      "Action": ["s3:GetObject", "s3:ListBucket"],
+      "Resource": [
+        "arn:aws:s3:::ci-artifacts-prod/*",
+        "arn:aws:s3:::ci-artifacts-prod"
+      ]
+    },
+    {
+      "Sid": "WriteArtifactsRestricted",
+      "Effect": "Allow",
+      "Action": "s3:PutObject",
+      "Resource": "arn:aws:s3:::ci-artifacts-prod/uploads/*",
+      "Condition": {
+        "StringEquals": {"s3:x-amz-server-side-encryption": "AES256"}
+      }
+    },
+    {
+      "Sid": "HardDenyPublicObjects",
+      "Effect": "Deny",
+      "Action": "s3:PutObject",
+      "Resource": "arn:aws:s3:::ci-artifacts-prod/public/*"
+    },
+    {
+      "Sid": "DenyKmsOutsideBoundaryKey",
+      "Effect": "Deny",
+      "Action": "kms:Decrypt",
+      "Resource": "*",
+      "Condition": {
+        "StringNotEquals": {"kms:CallerAccount": "111122223333"}
+      }
+    }
+  ]
+}

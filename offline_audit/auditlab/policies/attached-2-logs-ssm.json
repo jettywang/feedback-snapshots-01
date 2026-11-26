@@ -1,0 +1,18 @@
+{
+  "Version": "2012-10-17",
+  "Id": "attached-2-logs-ssm",
+  "Statement": [
+    {
+      "Sid": "AttachedWriteLogs",
+      "Effect": "Allow",
+      "Action": ["logs:CreateLogStream", "logs:PutLogEvents"],
+      "Resource": "arn:aws:logs:us-east-1:111122223333:log-group:/ci/deployer:*"
+    },
+    {
+      "Sid": "AttachedReadParameter",
+      "Effect": "Allow",
+      "Action": "ssm:GetParameter",
+      "Resource": "arn:aws:ssm:us-east-1:111122223333:parameter/ci/deploy-token"
+    }
+  ]
+}

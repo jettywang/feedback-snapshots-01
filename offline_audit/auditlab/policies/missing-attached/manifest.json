@@ -1,0 +1,19 @@
+{
+  "role": "ci-artifact-deployer",
+  "account_id": "111122223333",
+  "snapshot": "incomplete",
+  "inline_policies": [
+    {"name": "inline-ci-artifact-deployer", "path": "../inline-policy.json", "present": true}
+  ],
+  "attached_managed_policies": [
+    {"name": "ArtifactsReadPolicy", "path": "../attached-1-artifacts-read.json", "present": true},
+    {"name": "LogsAndSsmPolicy", "path": "../attached-2-logs-ssm.json", "present": false,
+      "note": "GetAttachedRolePolicies 分页未取全；该托管策略文档尚未提供"}
+  ],
+  "permission_boundary": {
+    "name": "CiArtifactDeployerBoundary",
+    "path": "../permission-boundary.json",
+    "present": true,
+    "completeness": "complete"
+  }
+}

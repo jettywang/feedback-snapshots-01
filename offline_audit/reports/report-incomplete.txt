@@ -1,0 +1,70 @@
+角色: ci-artifact-deployer   快照: incomplete
+权限边界: 已提供（完整性=complete）
+缺失输入:
+  - [attached] LogsAndSsmPolicy: GetAttachedRolePolicies 分页未取全；该托管策略文档尚未提供
+
+汇总: 显式拒绝 (确定)=1  有效允许 (确定)=2  待确认-条件不可离线评价=2  待确认-缺少输入=2  隐式拒绝 (确定)=1
+==============================================================================
+
+[T1] s3:PutObject  资源=arn:aws:s3:::ci-artifacts-prod/public/report.zip
+  结论: 显式拒绝 (确定) (确定)
+  显式拒绝命中: inline-ci-artifact-deployer::HardDenyPublicObjects (Deny)
+  身份侧允许: 无
+  边界侧允许: CiArtifactDeployerBoundary::BoundaryS3Objects (Allow)
+
+[T2] s3:GetObject  资源=arn:aws:s3:::ci-artifacts-prod/builds/app.tar
+  结论: 有效允许 (确定) (确定)
+  显式拒绝命中: 无
+  身份侧允许: inline-ci-artifact-deployer::ReadArtifacts (Allow); ArtifactsReadPolicy::AttachedReadOverlap (Allow)
+  边界侧允许: CiArtifactDeployerBoundary::BoundaryS3Objects (Allow)
+
+[T3] logs:CreateLogStream  资源=arn:aws:logs:us-east-1:111122223333:log-group:/ci/deployer:log-stream:web
+  结论: 待确认-缺少输入 (待补件)
+  显式拒绝命中: 无
+  身份侧允许: 无
+  边界侧允许: CiArtifactDeployerBoundary::BoundaryLogs (Allow)
+  待补输入/范围:
+    - 输入[LogsAndSsmPolicy] 范围[logs:CreateLogStream on arn:aws:logs:us-east-1:111122223333:log-group:/ci/deployer:log-stream:web]: no visible identity allow; an unretrieved attached policy may grant it
+
+[T4] ssm:GetParameter  资源=arn:aws:ssm:us-east-1:111122223333:parameter/ci/deploy-token
+  结论: 待确认-缺少输入 (待补件)
+  显式拒绝命中: 无
+  身份侧允许: 无
+  边界侧允许: CiArtifactDeployerBoundary::BoundarySsmParameter (Allow)
+  待补输入/范围:
+    - 输入[LogsAndSsmPolicy] 范围[ssm:GetParameter on arn:aws:ssm:us-east-1:111122223333:parameter/ci/deploy-token]: no visible identity allow; an unretrieved attached policy may grant it
+
+[T5] kms:Decrypt  资源=arn:aws:kms:us-east-1:111122223333:key/aaaa-bbbb
+  结论: 有效允许 (确定) (确定)
+  显式拒绝命中: 无
+  身份侧允许: ArtifactsReadPolicy::AttachedKmsDecrypt (Allow)
+  边界侧允许: CiArtifactDeployerBoundary::BoundaryKms (Allow)
+
+[T6] s3:PutObject  资源=arn:aws:s3:::ci-artifacts-prod/uploads/artifact.zip
+  结论: 待确认-条件不可离线评价 (待补件)
+  显式拒绝命中: 无
+  身份侧允许: inline-ci-artifact-deployer::WriteArtifactsRestricted (Allow)
+  边界侧允许: 无
+  无法评价的条件:
+    - 条件 aws:ResourceTag/env StringEquals 期望[prod] 实际[<not provided>] => INDETERMINATE（no value for aws:ResourceTag/env in request_context or resource_facts；来源 CiArtifactDeployerBoundary/BoundaryS3Objects:StringEquals）
+  受影响输入/范围: CiArtifactDeployerBoundary
+  待补输入/范围:
+    - 输入[CiArtifactDeployerBoundary] 范围[s3:PutObject on arn:aws:s3:::ci-artifacts-prod/uploads/artifact.zip]: boundary condition cannot be evaluated offline; effective allow is not provable yet
+
+[T7] s3:GetObject  资源=arn:aws:s3:::ci-artifacts-prod/builds/app.tar
+  结论: 待确认-条件不可离线评价 (待补件)
+  显式拒绝命中: 无
+  身份侧允许: inline-ci-artifact-deployer::ReadArtifacts (Allow); ArtifactsReadPolicy::AttachedReadOverlap (Allow)
+  边界侧允许: 无
+  无法评价的条件:
+    - 条件 aws:ResourceTag/env StringEquals 期望[prod] 实际[<not provided>] => INDETERMINATE（no value for aws:ResourceTag/env in request_context or resource_facts；来源 CiArtifactDeployerBoundary/BoundaryS3Objects:StringEquals）
+  受影响输入/范围: CiArtifactDeployerBoundary
+  待补输入/范围:
+    - 输入[CiArtifactDeployerBoundary] 范围[s3:GetObject on arn:aws:s3:::ci-artifacts-prod/builds/app.tar]: boundary condition cannot be evaluated offline; effective allow is not provable yet
+
+[T8] s3:DeleteObject  资源=arn:aws:s3:::ci-artifacts-prod/builds/app.tar
+  结论: 隐式拒绝 (确定) (确定)
+  显式拒绝命中: 无
+  身份侧允许: 无
+  边界侧允许: 无
+  判定说明: no identity-side or boundary allow in the snapshot

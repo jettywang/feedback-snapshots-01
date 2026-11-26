@@ -1,0 +1,21 @@
+{
+  "Version": "2012-10-17",
+  "Id": "attached-1-artifacts-read",
+  "Statement": [
+    {
+      "Sid": "AttachedReadOverlap",
+      "Effect": "Allow",
+      "Action": ["s3:GetObject", "s3:GetObjectVersion"],
+      "Resource": "arn:aws:s3:::ci-artifacts-prod/*"
+    },
+    {
+      "Sid": "AttachedKmsDecrypt",
+      "Effect": "Allow",
+      "Action": "kms:Decrypt",
+      "Resource": "arn:aws:kms:us-east-1:111122223333:key/aaaa-bbbb",
+      "Condition": {
+        "StringEquals": {"kms:CallerAccount": "111122223333"}
+      }
+    }
+  ]
+}

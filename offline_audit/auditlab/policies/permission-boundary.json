@@ -1,0 +1,33 @@
+{
+  "Version": "2012-10-17",
+  "Id": "boundary-ci-artifact-deployer",
+  "Statement": [
+    {
+      "Sid": "BoundaryS3Objects",
+      "Effect": "Allow",
+      "Action": ["s3:GetObject", "s3:PutObject", "s3:ListBucket"],
+      "Resource": ["arn:aws:s3:::ci-artifacts-prod/*", "arn:aws:s3:::ci-artifacts-prod"],
+      "Condition": {
+        "StringEquals": {"aws:ResourceTag/env": "prod"}
+      }
+    },
+    {
+      "Sid": "BoundaryKms",
+      "Effect": "Allow",
+      "Action": "kms:Decrypt",
+      "Resource": "arn:aws:kms:us-east-1:111122223333:key/aaaa-bbbb"
+    },
+    {
+      "Sid": "BoundaryLogs",
+      "Effect": "Allow",
+      "Action": ["logs:CreateLogStream", "logs:PutLogEvents"],
+      "Resource": "arn:aws:logs:us-east-1:111122223333:log-group:/ci/deployer:*"
+    },
+    {
+      "Sid": "BoundarySsmParameter",
+      "Effect": "Allow",
+      "Action": "ssm:GetParameter",
+      "Resource": "arn:aws:ssm:us-east-1:111122223333:parameter/ci/deploy-token"
+    }
+  ]
+}

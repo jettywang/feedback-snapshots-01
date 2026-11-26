@@ -1,0 +1,25 @@
+{
+  "targets": [
+    {"id": "T1", "action": "s3:PutObject", "resource": "arn:aws:s3:::ci-artifacts-prod/public/report.zip",
+     "request_context": {"s3:x-amz-server-side-encryption": "AES256"},
+     "resource_facts": {"tags": {"env": "prod"}}},
+    {"id": "T2", "action": "s3:GetObject", "resource": "arn:aws:s3:::ci-artifacts-prod/builds/app.tar",
+     "request_context": {}, "resource_facts": {"tags": {"env": "prod"}}},
+    {"id": "T3", "action": "logs:CreateLogStream",
+     "resource": "arn:aws:logs:us-east-1:111122223333:log-group:/ci/deployer:log-stream:web",
+     "request_context": {}, "resource_facts": {"tags": {}}},
+    {"id": "T4", "action": "ssm:GetParameter",
+     "resource": "arn:aws:ssm:us-east-1:111122223333:parameter/ci/deploy-token",
+     "request_context": {}, "resource_facts": {"tags": {}}},
+    {"id": "T5", "action": "kms:Decrypt",
+     "resource": "arn:aws:kms:us-east-1:111122223333:key/aaaa-bbbb",
+     "request_context": {"kms:CallerAccount": "111122223333"}, "resource_facts": {"tags": {}}},
+    {"id": "T6", "action": "s3:PutObject", "resource": "arn:aws:s3:::ci-artifacts-prod/uploads/artifact.zip",
+     "request_context": {"s3:x-amz-server-side-encryption": "AES256"},
+     "resource_facts": {"tags": {}}},
+    {"id": "T7", "action": "s3:GetObject", "resource": "arn:aws:s3:::ci-artifacts-prod/builds/app.tar",
+     "request_context": {}, "resource_facts": {"tags": {}}},
+    {"id": "T8", "action": "s3:DeleteObject", "resource": "arn:aws:s3:::ci-artifacts-prod/builds/app.tar",
+     "request_context": {}, "resource_facts": {"tags": {"env": "prod"}}}
+  ]
+}
