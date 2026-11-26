@@ -9,6 +9,20 @@ import warnings
 from .authority import canonicalize
 from .oauth2cli.oidc import decode_part, _decode_id_token_claims
 from .oauth2cli.oauth2 import Client
+from .cache_merge import (
+    MERGE_METADATA_KEY,
+    TOMBSTONES_KEY,
+    CacheConflict,
+    CacheMergeReport,
+    coerce_cache_state,
+    make_tombstone,
+    merge_states,
+    merge_cache_states,
+    safe_merge_states,
+    _tombstone_key,
+    _tombstone_matches,
+    _union_tombstones,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -618,14 +632,150 @@ class SerializableTokenCache(TokenCache):
     """
     has_state_changed = False
 
+    def __init__(self, record_signouts=True):
+        super(SerializableTokenCache, self).__init__()
+        # When True (default), remove_account()/account deletions persist a
+        # tombstone so a concurrent stale snapshot cannot resurrect a confirmed
+        # sign-out during safe_merge().
+        self.record_signouts = record_signouts
+        self.has_state_changed = False
+
     def add(self, event, **kwargs):
         super(SerializableTokenCache, self).add(event, **kwargs)
         self.has_state_changed = True
 
     def modify(self, credential_type, old_entry, new_key_value_pairs=None):
-        super(SerializableTokenCache, self).modify(
-            credential_type, old_entry, new_key_value_pairs)
-        self.has_state_changed = True
+        with self._lock:
+            if (self.record_signouts
+                    and credential_type == self.CredentialType.ACCOUNT
+                    and isinstance(old_entry, dict)):
+                # Single choke point for account writes/removals. An account
+                # deletion means a confirmed sign-out -> tombstone it; an
+                # account (re)write means a fresh sign-in -> lift tombstone.
+                if new_key_value_pairs is None:
+                    self.record_signout(account=old_entry)
+                else:
+                    self.clear_signout(account=old_entry)
+            super(SerializableTokenCache, self).modify(
+                credential_type, old_entry, new_key_value_pairs)
+            self.has_state_changed = True
+
+    def record_signout(
+            self, account=None, *, home_account_id=None, environment=None,
+            realm=None, reason="signed_out"):
+        """Record a durable sign-out tombstone for an account.
+
+        This is called automatically by :meth:`remove_account`; applications
+        only need it when they learn about a confirmed sign-out out-of-band.
+        The tombstone is serialized with the cache and makes
+        :meth:`safe_merge` withhold any stale record of that account.
+        """
+        tombstone = make_tombstone(
+            account,
+            home_account_id=home_account_id,
+            environment=environment,
+            realm=realm,
+            reason=reason)
+        with self._lock:
+            metadata = self._cache.setdefault(MERGE_METADATA_KEY, {})
+            tombstones = metadata.setdefault(TOMBSTONES_KEY, [])
+            key = _tombstone_key(tombstone)
+            for index, existing in enumerate(tombstones):
+                if isinstance(existing, dict) and _tombstone_key(existing) == key:
+                    merged = _union_tombstones([existing, tombstone])[key]
+                    tombstones[index] = merged
+                    self.has_state_changed = True
+                    return merged
+            tombstones.append(tombstone)
+            self.has_state_changed = True
+            return tombstone
+
+    #: Friendly alias for :meth:`record_signout`.
+    mark_signed_out = record_signout
+
+    def clear_signout(
+            self, account=None, *, home_account_id=None, environment=None):
+        """Remove matching sign-out tombstones (e.g. after a fresh sign-in).
+
+        Returns the number of tombstones removed.
+        """
+        if account is None:
+            account = {
+                "home_account_id": home_account_id,
+                "environment": environment,
+            }
+        with self._lock:
+            metadata = self._cache.get(MERGE_METADATA_KEY)
+            tombstones = metadata.get(TOMBSTONES_KEY) if isinstance(
+                metadata, dict) else None
+            if not isinstance(tombstones, list):
+                return 0
+            remaining = [
+                item for item in tombstones
+                if not (isinstance(item, dict)
+                        and _tombstone_matches(account, item))
+            ]
+            removed = len(tombstones) - len(remaining)
+            if removed:
+                tombstones[:] = remaining
+                self.has_state_changed = True
+            return removed
+
+    def get_signout_tombstones(self):
+        """Return a copy of the persisted sign-out tombstones."""
+        with self._lock:
+            metadata = self._cache.get(MERGE_METADATA_KEY, {})
+            tombstones = metadata.get(TOMBSTONES_KEY, []) if isinstance(
+                metadata, dict) else []
+            return json.loads(json.dumps(tombstones))
+
+    def safe_merge(self, other, *, sticky_tombstones=True, **options):
+        """Safely merge another cache snapshot into this cache, in place.
+
+        :param other: Another :class:`SerializableTokenCache`, a serialized
+            JSON string, or a raw cache-state dict.
+        :param sticky_tombstones: Fail-closed default. When true, any record
+            of an account carrying a confirmed sign-out tombstone (from either
+            side) is withheld from the merged cache, so a stale concurrent
+            snapshot cannot resurrect it.
+        :return: A :class:`~msal.cache_merge.CacheMergeReport` describing the
+            merged state, independent new entries, auto-resolved updates,
+            suppressed stale records and -- importantly -- the ``conflicts``
+            that could not be adjudicated, each with a ``reason``.
+
+        The merge is order-independent: merging A with B and B with A yields
+        the same state, accounts, new entries and conflict identities.
+
+        A minimal multi-process persistence recipe::
+
+            cache = msal.SerializableTokenCache()
+            if os.path.exists(filename):
+                cache.deserialize(open(filename).read())
+            # ... this process mutates cache, possibly signs accounts out ...
+            disk = msal.SerializableTokenCache()
+            if os.path.exists(filename):
+                disk.deserialize(open(filename).read())
+            report = disk.safe_merge(cache)   # fold our work into latest disk
+            tmp = filename + ".tmp"
+            open(tmp, "w").write(disk.serialize())
+            os.replace(tmp, filename)         # atomic hand-off
+            for conflict in report.conflicts:
+                logger.warning("cache conflict: %s", conflict)
+        """
+        other_state = coerce_cache_state(other)
+        with self._lock:
+            report = merge_states(
+                self._cache, other_state,
+                sticky_tombstones=sticky_tombstones, **options)
+            self._cache = report["merged"]
+            self.has_state_changed = True
+        report._live_cache = self
+        return report
+
+    #: Discoverable aliases for the optional safe merge entry point.
+    merge = safe_merge
+    merge_cache = safe_merge
+    merge_with = safe_merge
 
     def deserialize(self, state):
         # type: (Optional[str]) -> None

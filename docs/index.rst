@@ -131,6 +131,47 @@ See `SerializableTokenCache` for example.
 .. autoclass:: msal.SerializableTokenCache
    :members:
 
+Safe merging across processes
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+When several processes each load, mutate and rewrite the same serialized
+cache file, a last-writer-wins write can lose independent updates and even
+resurrect an account that another process confirmed signed out.
+``SerializableTokenCache`` therefore provides an *optional*
+:meth:`~msal.SerializableTokenCache.safe_merge` entry point.
+
+It still reads the existing JSON cache format unchanged. Independent records
+(different accounts or cache keys) coexist; merging two snapshots in either
+order yields the same accounts, new entries and conflict identities. A
+confirmed :meth:`~msal.SerializableTokenCache.remove_account` writes a
+sign-out *tombstone*; during a merge, any stale record of that account is
+withheld so it cannot reappear in :meth:`~msal.ClientApplication.get_accounts`
+or silently issue tokens. Same-key collisions that cannot be adjudicated (for
+example divergent legacy records without a trustworthy timestamp) are kept
+deterministically and returned as conflicts, each with a human-readable
+``reason`` and both candidate values.
+
+A minimal read-merge-atomically-write recipe (guard the whole
+read/merge/write with an inter-process lock in real deployments)::
+
+    disk = msal.SerializableTokenCache()
+    if os.path.exists(filename):
+        disk.deserialize(open(filename).read())
+    report = disk.safe_merge(process_cache)  # folds process_cache into disk
+    tmp = filename + ".tmp"
+    open(tmp, "w").write(disk.serialize())
+    os.replace(tmp, filename)
+    for conflict in report.conflicts:
+        logger.warning("unresolved cache conflict: %s", conflict.reason)
+
+.. autofunction:: msal.merge_cache_states
+
+.. autoclass:: msal.CacheMergeReport
+   :members:
+
+.. autoclass:: msal.CacheConflict
+   :members:
+
 Prompt
 ------
 .. autoclass:: msal.Prompt

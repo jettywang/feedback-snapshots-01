@@ -34,6 +34,16 @@ from .oauth2cli.assertion import AutoRefresher
 from .oauth2cli.oidc import Prompt, IdTokenError
 from .sku import __version__
 from .token_cache import TokenCache, SerializableTokenCache
+from .cache_merge import (
+    CacheConflict,
+    CacheMergeReport,
+    merge_states,
+    merge_cache_states,
+    safe_merge,
+    safe_merge_states,
+    safe_merge_caches,
+    MERGE_METADATA_KEY,
+    )
 from .auth_scheme import PopAuthScheme
 from .managed_identity import (
     SystemAssignedManagedIdentity, UserAssignedManagedIdentity,
