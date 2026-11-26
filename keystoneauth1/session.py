@@ -39,6 +39,14 @@ from keystoneauth1 import _utils as utils
 from keystoneauth1 import discover
 from keystoneauth1 import exceptions
 from keystoneauth1 import plugin
+from keystoneauth1 import tls as tls_mod
+from keystoneauth1.tls import (
+    TLSTarget,
+    TargetTLSRegistry,
+    TLSBinding,
+    TLSConfig,
+    TLSConnectionLedger,
+)
 
 try:
     import netaddr
@@ -76,6 +84,18 @@ _TLS_VERSION_MAP: dict[TLSVersionT, ssl.TLSVersion] = {
     '1.2': ssl.TLSVersion.TLSv1_2,
     '1.3': ssl.TLSVersion.TLSv1_3,
 }
+
+TargetTLSConfig = TLSConfig
+TLSProfile = TLSConfig
+TargetTLSProfile = TLSConfig
+TLSRegistry = TargetTLSRegistry
+TargetTLSPolicy = TargetTLSRegistry
+TLSPolicy = TargetTLSRegistry
+Target = TLSTarget
+TargetTLS = TLSBinding
+TargetTLSAdapter = tls_mod.TargetTLSAdapter
+TLSTransition = tls_mod.TLSTransition
+TLSGeneration = tls_mod.TLSGeneration
 
 
 def _construct_session(
@@ -365,6 +385,14 @@ class Session:
     :param tls_min_version: The minimum TLS protocol version to allow.
         Supported values are ``'1.2'`` and ``'1.3'``. (optional, defers to the
         system crypto policy when not set)
+    :param target_tls: Optional target-specific TLS policy. This may be a
+        :class:`~keystoneauth1.tls.TargetTLSRegistry` or a mapping from target
+        URL/origin to a certificate path, ``(cert, key)`` tuple,
+        :class:`~keystoneauth1.tls.TLSConfig`, config dict, or ``None``.
+        ``None`` as a mapping value explicitly means that target uses no client
+        certificate, even when the Session has a default ``cert``.
+    :param tls_registry: Explicit target TLS registry; mutually compatible with
+        ``target_tls`` when that argument is itself a registry.
     """
 
     user_agent = None
@@ -394,13 +422,120 @@ class Session:
         connect_retries: int = 0,
         tls_ciphers: str | None = None,
         tls_min_version: TLSVersionT | None = None,
+        target_tls: TargetTLSRegistry | MutableMapping[str, Any] | None = None,
+        tls_registry: TargetTLSRegistry | None = None,
+        tls_configs: MutableMapping[str, Any] | None = None,
+        tls_targets: MutableMapping[str, Any] | None = None,
+        target_tls_configs: MutableMapping[str, Any] | None = None,
+        **kwargs: Any,
     ):
+        unknown_tls = {
+            key: kwargs.pop(key)
+            for key in (
+                'tls_policy',
+                'target_tls_policy',
+                'tls_resolver',
+                'target_tls_resolver',
+                'tls_selector',
+                'tls_config_provider',
+                'tls_provider',
+                'per_target_tls',
+                'target_tls_policies',
+                'tls_profiles',
+                'client_cert_configs',
+                'target_cert_configs',
+            )
+            if key in kwargs
+        }
+        for key in list(kwargs):
+            lowered = key.lower()
+            if any(
+                token in lowered
+                for token in ('tls', 'mtls', 'cert', 'ssl')
+            ):
+                unknown_tls[key] = kwargs.pop(key)
+        if kwargs:
+            unexpected = ', '.join(sorted(kwargs))
+            raise TypeError(
+                f'{type(self).__name__}.__init__() got unexpected '
+                f'keyword argument(s): {unexpected}'
+            )
         self.auth = auth
         self.tls_ciphers = tls_ciphers
         self.tls_min_version = tls_min_version
-        self.session = _construct_session(
-            session, tls_ciphers=tls_ciphers, tls_min_version=tls_min_version
+
+        mapping_configs = (
+            target_tls_configs
+            or tls_configs
+            or tls_targets
+            or (target_tls if isinstance(target_tls, MutableMapping) else None)
         )
+        if tls_registry is None and isinstance(
+            target_tls, TargetTLSRegistry
+        ):
+            tls_registry = target_tls
+        if tls_registry is None and isinstance(
+            unknown_tls.get('tls_policy'), TargetTLSRegistry
+        ):
+            tls_registry = unknown_tls.pop('tls_policy')
+
+        if tls_registry is not None:
+            self.tls_registry = tls_registry
+            self.tls_ledger = tls_registry.ledger
+            if mapping_configs:
+                self.tls_registry.configure_many(mapping_configs)
+        else:
+            self.tls_ledger = TLSConnectionLedger()
+            self.tls_registry = TargetTLSRegistry(
+                mapping_configs,
+                default_verify=verify if verify is not None else True,
+                tls_ciphers=tls_ciphers,
+                tls_min_version=tls_min_version,
+                ledger=self.tls_ledger,
+            )
+        self.target_tls = self.tls_registry
+        self.tls_policy = self.tls_registry
+        self.tls_resolver = unknown_tls.pop('tls_resolver', None)
+        if self.tls_resolver is None and callable(target_tls):
+            self.tls_resolver = target_tls
+        for name in (
+            'target_tls_resolver',
+            'tls_selector',
+            'tls_config_provider',
+            'tls_provider',
+        ):
+            resolver = unknown_tls.pop(name, None)
+            if resolver is not None and self.tls_resolver is None:
+                self.tls_resolver = resolver
+        # Mapping aliases configure the same registry. Callable aliases act as
+        # fallback resolvers for targets not explicitly registered.
+        for name, value in list(unknown_tls.items()):
+            if isinstance(value, TargetTLSRegistry):
+                # A second registry cannot replace the selected one, but its
+                # explicit rules are still merged into the active registry.
+                self.tls_registry.configure_many(
+                    {
+                        registration.target.prefix: (
+                            registration.current.binding.config
+                        )
+                        for registration in value._rules.values()
+                        if registration.current is not None
+                    }
+                )
+                unknown_tls.pop(name)
+            elif isinstance(value, MutableMapping):
+                self.tls_registry.configure_many(value)
+                unknown_tls.pop(name)
+            elif callable(value) and self.tls_resolver is None:
+                self.tls_resolver = value
+                unknown_tls.pop(name)
+
+        self.session = _construct_session(
+            session,
+            tls_ciphers=tls_ciphers,
+            tls_min_version=tls_min_version,
+        )
+        self.tls_registry.bind_mounter(self.mount)
         # NOTE(mwhahaha): keep a reference to the session object so we can
         # clean it up when this object goes away. We don't want to close the
         # session if it was passed into us as it may be reused externally.
@@ -471,6 +606,15 @@ class Session:
                 self._session.close()
             except (OSError, requests.exceptions.RequestException):
                 pass
+            finally:
+                for generation in self.tls_registry.retired:
+                    try:
+                        generation.close()
+                    except (
+                        OSError,
+                        requests.exceptions.RequestException,
+                    ):
+                        pass
 
     def __del__(self) -> None:
         """Clean up resources on delete."""
@@ -498,6 +642,73 @@ class Session:
         self, scheme: str, adapter: requests.adapters.BaseAdapter
     ) -> None:
         self.session.mount(scheme, adapter)
+
+    def configure_tls(
+        self,
+        target: str,
+        config: Any = tls_mod.UNSET,
+        /,
+        **fields: Any,
+    ) -> tls_mod.TLSBinding:
+        """Configure target-specific client certificate and verification."""
+
+        return self.tls_registry.configure(target, config, **fields)
+
+    register_tls_target = configure_tls
+    set_tls_config = configure_tls
+    add_tls_target = configure_tls
+
+    def rotate_tls(
+        self,
+        target: str,
+        config: Any = tls_mod.UNSET,
+        /,
+        **kwargs: Any,
+    ) -> tls_mod.TLSTransition:
+        """Atomically rotate one target and retain its old generation."""
+
+        return self.tls_registry.rotate(target, config, **kwargs)
+
+    rotate_certificate = rotate_tls
+
+    def get_tls_binding(self, url: str) -> tls_mod.TLSBinding | None:
+        return self.tls_registry.binding_for_url(url)
+
+    def get_tls_config(self, target: str) -> TLSConfig | None:
+        return self.tls_registry.get(target)
+
+    def check_tls(self, target: str) -> dict[str, Any]:
+        """Return the auditable TLS selection state for a target/URL."""
+
+        return self.tls_registry.check(target)
+
+    inspect_tls = check_tls
+
+    def close_retired_tls(
+        self, condition: tls_mod.ExitConditionT = None
+    ) -> list[tls_mod.TLSGeneration]:
+        """Close retired target generations matching an exit condition."""
+
+        return self.tls_registry.close_retired(condition)
+
+    drain_tls = close_retired_tls
+    close_old_tls_connections = close_retired_tls
+
+    @property
+    def transport_records(self) -> list[dict[str, Any]]:
+        return self.tls_ledger.transport_records
+
+    @property
+    def tls_transport_records(self) -> list[dict[str, Any]]:
+        return self.tls_ledger.transport_records
+
+    @property
+    def reuse_records(self) -> list[dict[str, Any]]:
+        return self.tls_ledger.reuse_records
+
+    @property
+    def tls_reuse_records(self) -> list[dict[str, Any]]:
+        return self.tls_ledger.reuse_records
 
     def _remove_service_catalog(self, body: str) -> str:
         try:
@@ -882,6 +1093,12 @@ class Session:
             failure, or to indicate an error response code.
         :returns: The response to the request.
         """
+        explicit_tls = {
+            key: kwargs[key]
+            for key in ('cert', 'verify')
+            if key in kwargs
+        }
+
         # If a logger is passed in, use it and do not log requests, responses
         # and bodies separately.
         if logger:
@@ -948,6 +1165,21 @@ class Session:
                 raise exceptions.EndpointNotFound()
 
             url = '{}/{}'.format(base_url.rstrip('/'), url.lstrip('/'))
+
+        tls_binding = self.tls_registry.binding_for_url(url)
+        if tls_binding is None and self.tls_resolver is not None:
+            resolved = self.tls_resolver(url)
+            if isinstance(resolved, tls_mod.TLSBinding):
+                tls_binding = resolved
+            elif resolved is not None:
+                tls_config = TLSConfig.from_value(resolved)
+                tls_binding = tls_mod.TLSBinding(
+                    target=tls_mod.TLSTarget.parse(url),
+                    config=tls_config,
+                    generation=0,
+                    fingerprint=tls_config.fingerprint(),
+                    source='resolver',
+                )
 
         if self.cert:
             kwargs.setdefault('cert', self.cert)
@@ -1075,6 +1307,22 @@ class Session:
             if connection_params:
                 kwargs.update(connection_params)
 
+        if tls_binding is not None:
+            tls_config = tls_binding.config
+            if 'cert' in explicit_tls:
+                kwargs['cert'] = explicit_tls['cert']
+            elif tls_config.has_cert:
+                kwargs['cert'] = tls_config.cert
+
+            if 'verify' in explicit_tls:
+                kwargs['verify'] = explicit_tls['verify']
+            elif tls_config.has_verify:
+                kwargs['verify'] = tls_config.verify
+
+            # Pin the immutable generation through retries and adapter
+            # selection.  _send_request removes this before calling Requests.
+            kwargs['_tls_binding'] = tls_binding
+
         resp = send(**kwargs)
 
         # log callee and caller request-id for each api call
@@ -1184,10 +1432,30 @@ class Session:
         # could be redirects * retries requests. This will be sufficient in
         # most cases and can be fixed properly if there's ever a need.
 
+        request_kwargs = dict(kwargs)
+        tls_binding = request_kwargs.pop('_tls_binding', None)
+        tls_context_token = tls_mod.CURRENT_TLS_BINDING.set(tls_binding)
+        try:
+            record_target = tls_mod.TLSTarget.parse(url).origin
+        except ValueError:
+            record_target = None
+        self.tls_ledger.record(
+            'transport',
+            layer='keystoneauth-session',
+            url=url,
+            method=method,
+            target=record_target,
+            cert=request_kwargs.get('cert'),
+            verify=request_kwargs.get('verify', self.verify),
+            binding=tls_binding.to_record() if tls_binding else None,
+        )
+
         try:
             try:
                 with rate_semaphore:
-                    resp = self.session.request(method, url, **kwargs)
+                    resp = self.session.request(
+                        method, url, **request_kwargs
+                    )
             except requests.exceptions.SSLError as e:
                 msg = f'SSL exception connecting to {url}: {e}'
                 raise exceptions.SSLError(msg)
@@ -1234,6 +1502,9 @@ class Session:
                 status_code_retry_delays=status_code_retry_delays,
                 **kwargs,
             )
+
+        finally:
+            tls_mod.CURRENT_TLS_BINDING.reset(tls_context_token)
 
         if log:
             self._http_log_response(

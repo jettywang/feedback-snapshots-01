@@ -1,0 +1,10 @@
+---
+features:
+  - |
+    Added target-specific TLS configuration to
+    ``keystoneauth1.session.Session``. Call ``configure_tls`` for each service
+    origin to give directory discovery and API requests their own client
+    certificate and verification settings. Configurations are immutable
+    generations; ``rotate_tls`` installs a new connection adapter while
+    retaining the previous generation for approved idle/return/immediate
+    connection-exit handling.
