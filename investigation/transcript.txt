@@ -1,0 +1,146 @@
+MSAL 1.39.0 at /Users/apple/Documents/用户反馈项目/batches/feedback-20261120-backend-security-280-jettywang/prepared/FB-20261120-SEC-JW-156/workspace
+All destinations are fictional *.example names; transport is in-process.
+
+==============================================================================
+R0 -- Entra regional baseline (expected path)
+------------------------------------------------------------------------------
+   1. GET https://login.tailwind-demo.example/tenant-7777/v2.0/.well-known/openid-configuration
+   2. GET https://region-a.login.tailwind-demo.example/tenant-7777/v2.0/.well-known/openid-configuration
+   3. POST https://region-a.login.tailwind-demo.example/tenant-7777/oauth2/v2.0/token
+      body={"client_secret": "<redacted-present>", "keys": ["client_id", "client_info", "client_secret", "grant_type", "scope"]}
+  >> token returned: True
+    [PASS] central discovery queried first -- https://login.tailwind-demo.example/tenant-7777/v2.0/.well-known/openid-configuration
+    [PASS] regional discovery host is locally derived '<region>.<configured-host>'
+    [PASS] token POST goes to the regional token_endpoint
+    [PASS] no IMDS link-local query (REGION_NAME pinned)
+    [PASS] fictional token acquired
+
+==============================================================================
+T1 -- Timeline 1: pinned regional discovery incomplete (200, token_endpoint missing)
+------------------------------------------------------------------------------
+   1. GET https://login.tailwind-demo.example/tenant-7777/v2.0/.well-known/openid-configuration
+   2. GET https://region-a.login.tailwind-demo.example/tenant-7777/v2.0/.well-known/openid-configuration
+  >> RAISED builtins.KeyError: 'token_endpoint'
+    [PASS] fails closed with KeyError('token_endpoint') -- KeyError('token_endpoint')
+    [PASS] regional discovery was actually queried
+    [PASS] no token POST attempted
+
+==============================================================================
+T1b -- Branch: regional document names an off-host token_endpoint
+------------------------------------------------------------------------------
+   1. GET https://login.tailwind-demo.example/tenant-7777/v2.0/.well-known/openid-configuration
+   2. GET https://region-a.login.tailwind-demo.example/tenant-7777/v2.0/.well-known/openid-configuration
+   3. POST https://token.delegate-demo.example/v9/token
+      body={"client_secret": "<redacted-present>", "keys": ["client_id", "client_info", "client_secret", "grant_type", "scope"]}
+  >> token returned: True
+    [PASS] MSAL POSTs to the document-named off-host endpoint -- https://token.delegate-demo.example/v9/token
+    [PASS] credential material is carried to that endpoint
+
+==============================================================================
+O0 -- Standalone oidc_authority baseline
+------------------------------------------------------------------------------
+   1. GET https://id.tailwind-demo.example/tenant-9/.well-known/openid-configuration
+   2. POST https://id.tailwind-demo.example/tenant-9/oauth2/token
+      body={"client_secret": "<redacted-present>", "keys": ["client_id", "client_info", "client_secret", "grant_type", "scope"]}
+  >> token returned: True
+    [PASS] exactly the OIDC discovery document is queried -- ['https://id.tailwind-demo.example/tenant-9/.well-known/openid-configuration']
+    [PASS] POST stays on the configured OIDC host
+
+==============================================================================
+T2 -- Timeline 2: suffix-lookalike issuer cannot be bound
+------------------------------------------------------------------------------
+   1. GET https://id.tailwind-demo.example/tenant-9/.well-known/openid-configuration
+  >> RAISED builtins.ValueError: The issuer 'https://id.tailwind-demo.example.lookalike.example/tenant-9/v2.0' does not match the authority 'https://id.tailwind-demo.example/tenant-9' or a known pattern. When using the 'oidc_authority' parameter in ClientApplication, the a
+    [PASS] ValueError from has_valid_issuer gate -- ValueError
+    [PASS] only the OIDC discovery GET happened
+    [PASS] no token POST attempted
+
+==============================================================================
+T2b -- Timeline 2 variant: issuer claim missing
+------------------------------------------------------------------------------
+   1. GET https://id.tailwind-demo.example/tenant-9/.well-known/openid-configuration
+  >> RAISED builtins.ValueError: The issuer 'None' does not match the authority 'https://id.tailwind-demo.example/tenant-9' or a known pattern. When using the 'oidc_authority' parameter in ClientApplication, the authority will be validated against the issuer from https://i
+    [PASS] ValueError from has_valid_issuer gate -- ValueError
+    [PASS] only the OIDC discovery GET happened
+    [PASS] no token POST attempted
+
+==============================================================================
+TRUTH -- has_valid_issuer() boundary vectors (no network)
+------------------------------------------------------------------------------
+  expected=True  actual=True  | exact authority match                                issuer=https://id.tailwind-demo.example/tenant-9
+    [PASS] exact authority match
+  expected=True  actual=True  | same scheme+host, different path (case 4)            issuer=https://id.tailwind-demo.example/tenant-9/v2.0
+    [PASS] same scheme+host, different path (case 4)
+  expected=True  actual=True  | one-label region prefix of configured host (case 3b) issuer=https://region-a.id.tailwind-demo.example/tenant-9/v2.0
+    [PASS] one-label region prefix of configured host (case 3b)
+  expected=False actual=False | suffix lookalike: trusted name is only a prefix label issuer=https://id.tailwind-demo.example.lookalike.example/tenant-9/v2.0
+    [PASS] suffix lookalike: trusted name is only a prefix label
+  expected=False actual=False | typosquat: hyphen instead of dot hierarchy           issuer=https://id-tailwind-demo.example/tenant-9/v2.0
+    [PASS] typosquat: hyphen instead of dot hierarchy
+  expected=False actual=False | missing issuer cannot support a conclusion           issuer=None
+    [PASS] missing issuer cannot support a conclusion
+  expected=True  actual=True  | OFFLINE RULE VECTOR ONLY: any well-known Entra host passes (case 2); this is an allowlist string rule, not a contacted destination here issuer=https://login.microsoftonline.com/tenant-9/v2.0
+    [PASS] OFFLINE RULE VECTOR ONLY: any well-known Entra host passes (case 2); this is an allowlist string rule, not a contacted destination here
+
+==============================================================================
+ID1 -- Entra instance discovery steers the next GET and the token host
+------------------------------------------------------------------------------
+   1. GET https://discovery.tailwind-demo.example/common/discovery/instance
+      query={"api-version": "1.0", "authorization_endpoint": "https://login.tailwind-demo.example/tenant-7777/oauth2/v2.0/authorize"}
+   2. GET https://discovered.tailwind-demo.example/tenant-7777/v2.0/.well-known/openid-configuration
+  >> final token_endpoint=https://discovered.tailwind-demo.example/tenant-7777/oauth2/v2.0/token
+    [PASS] instance-discovery query carries authorization_endpoint + api-version=1.0
+    [PASS] tenant_discovery_endpoint from payload is followed verbatim
+    [PASS] final token endpoint lives on the payload-named host
+
+==============================================================================
+ID2 -- Instance discovery answers invalid_instance
+------------------------------------------------------------------------------
+   1. GET https://discovery.tailwind-demo.example/common/discovery/instance
+      query={"api-version": "1.0", "authorization_endpoint": "https://login.tailwind-demo.example/tenant-7777/oauth2/v2.0/authorize"}
+  >> RAISED builtins.ValueError: invalid_instance: The authority you provided, https://login.tailwind-demo.example/tenant-7777, is not known. If it is a valid domain name known to you, you can turn off this check by passing in instance_discovery=False
+    [PASS] invalid_instance raises the explicit rollback hint
+
+==============================================================================
+ID3 -- Instance discovery payload lacks tenant_discovery_endpoint
+------------------------------------------------------------------------------
+   1. GET https://discovery.tailwind-demo.example/common/discovery/instance
+      query={"api-version": "1.0", "authorization_endpoint": "https://login.tailwind-demo.example/tenant-7777/oauth2/v2.0/authorize"}
+  >> RAISED builtins.KeyError: 'tenant_discovery_endpoint'
+    [PASS] missing key surfaces as KeyError ('tenant_discovery_endpoint') -- KeyError('tenant_discovery_endpoint')
+
+==============================================================================
+X1 -- Cross-path: oidc_authority + region prefers an Entra-style regional client with NO issuer gate
+------------------------------------------------------------------------------
+   1. GET https://id.tailwind-demo.example/tenant-9/.well-known/openid-configuration
+   2. GET https://region-a.id.tailwind-demo.example/tenant-9/v2.0/.well-known/openid-configuration
+   3. POST https://token.delegate-demo.example/v9/token
+      body={"client_secret": "<redacted-present>", "keys": ["client_id", "client_info", "client_secret", "grant_type", "scope"]}
+  >> token returned: True
+    [PASS] primary OIDC document passed the issuer gate
+    [PASS] Entra-style regional derivative was additionally fetched
+    [PASS] token POST follows the regional document off-host without issuer rejection
+
+==============================================================================
+F1 -- Failure feedback: regional discovery HTTP 400
+------------------------------------------------------------------------------
+   1. GET https://login.tailwind-demo.example/tenant-7777/v2.0/.well-known/openid-configuration
+   2. GET https://region-a.login.tailwind-demo.example/tenant-7777/v2.0/.well-known/openid-configuration
+  >> RAISED builtins.ValueError: Unable to get authority configuration for https://region-a.login.tailwind-demo.example/tenant-7777. Authority would typically be in a format of https://login.microsoftonline.com/your_tenant or https://tenant_name.ciamlogin.com or https://te
+  >> caused by ValueError: OIDC Discovery failed on https://region-a.login.tailwind-demo.example/tenant-7777/v2.0/.well-known/openid-configuration. HTTP status: 400, Error: {"error": "invalid_tenant"}
+    [PASS] outer ValueError names the regional authority
+    [PASS] chained cause names the exact discovery URL + HTTP 400
+
+==============================================================================
+F2 -- Failure feedback: token endpoint returns invalid_client
+------------------------------------------------------------------------------
+   1. GET https://login.tailwind-demo.example/tenant-7777/v2.0/.well-known/openid-configuration
+   2. GET https://region-a.login.tailwind-demo.example/tenant-7777/v2.0/.well-known/openid-configuration
+   3. POST https://region-a.login.tailwind-demo.example/tenant-7777/oauth2/v2.0/token
+      body={"client_secret": "<redacted-present>", "keys": ["client_id", "client_info", "client_secret", "grant_type", "scope"]}
+  >> returned dict keys=['error', 'error_description']
+    [PASS] OAuth error is returned as a dict (no exception)
+    [PASS] the failed POST destination is the regional token_endpoint
+
+##############################################################################
+RESULT: all checks passed. Evidence written to /Users/apple/Documents/用户反馈项目/batches/feedback-20261120-backend-security-280-jettywang/prepared/FB-20261120-SEC-JW-156/workspace/investigation/evidence.json

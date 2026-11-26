@@ -1,0 +1,334 @@
+{
+  "msal_version": "1.39.0",
+  "repo_root": "/Users/apple/Documents/用户反馈项目/batches/feedback-20261120-backend-security-280-jettywang/prepared/FB-20261120-SEC-JW-156/workspace",
+  "cases": [
+    {
+      "id": "R0",
+      "title": "Entra regional baseline (expected path)",
+      "calls": [
+        {
+          "method": "GET",
+          "url": "https://login.tailwind-demo.example/tenant-7777/v2.0/.well-known/openid-configuration",
+          "query": null
+        },
+        {
+          "method": "GET",
+          "url": "https://region-a.login.tailwind-demo.example/tenant-7777/v2.0/.well-known/openid-configuration",
+          "query": null
+        },
+        {
+          "method": "POST",
+          "url": "https://region-a.login.tailwind-demo.example/tenant-7777/oauth2/v2.0/token",
+          "query": null,
+          "body": {
+            "keys": [
+              "client_id",
+              "client_info",
+              "client_secret",
+              "grant_type",
+              "scope"
+            ],
+            "client_secret": "<redacted-present>"
+          }
+        }
+      ],
+      "exception": null,
+      "extra": "token returned: True"
+    },
+    {
+      "id": "T1",
+      "title": "Timeline 1: pinned regional discovery incomplete (200, token_endpoint missing)",
+      "calls": [
+        {
+          "method": "GET",
+          "url": "https://login.tailwind-demo.example/tenant-7777/v2.0/.well-known/openid-configuration",
+          "query": null
+        },
+        {
+          "method": "GET",
+          "url": "https://region-a.login.tailwind-demo.example/tenant-7777/v2.0/.well-known/openid-configuration",
+          "query": null
+        }
+      ],
+      "exception": {
+        "type": "builtins.KeyError",
+        "message": "'token_endpoint'",
+        "cause": null
+      },
+      "extra": null
+    },
+    {
+      "id": "T1b",
+      "title": "Branch: regional document names an off-host token_endpoint",
+      "calls": [
+        {
+          "method": "GET",
+          "url": "https://login.tailwind-demo.example/tenant-7777/v2.0/.well-known/openid-configuration",
+          "query": null
+        },
+        {
+          "method": "GET",
+          "url": "https://region-a.login.tailwind-demo.example/tenant-7777/v2.0/.well-known/openid-configuration",
+          "query": null
+        },
+        {
+          "method": "POST",
+          "url": "https://token.delegate-demo.example/v9/token",
+          "query": null,
+          "body": {
+            "keys": [
+              "client_id",
+              "client_info",
+              "client_secret",
+              "grant_type",
+              "scope"
+            ],
+            "client_secret": "<redacted-present>"
+          }
+        }
+      ],
+      "exception": null,
+      "extra": "token returned: True"
+    },
+    {
+      "id": "O0",
+      "title": "Standalone oidc_authority baseline",
+      "calls": [
+        {
+          "method": "GET",
+          "url": "https://id.tailwind-demo.example/tenant-9/.well-known/openid-configuration",
+          "query": null
+        },
+        {
+          "method": "POST",
+          "url": "https://id.tailwind-demo.example/tenant-9/oauth2/token",
+          "query": null,
+          "body": {
+            "keys": [
+              "client_id",
+              "client_info",
+              "client_secret",
+              "grant_type",
+              "scope"
+            ],
+            "client_secret": "<redacted-present>"
+          }
+        }
+      ],
+      "exception": null,
+      "extra": "token returned: True"
+    },
+    {
+      "id": "T2",
+      "title": "Timeline 2: suffix-lookalike issuer cannot be bound",
+      "calls": [
+        {
+          "method": "GET",
+          "url": "https://id.tailwind-demo.example/tenant-9/.well-known/openid-configuration",
+          "query": null
+        }
+      ],
+      "exception": {
+        "type": "builtins.ValueError",
+        "message": "The issuer 'https://id.tailwind-demo.example.lookalike.example/tenant-9/v2.0' does not match the authority 'https://id.tailwind-demo.example/tenant-9' or a known pattern. When using the 'oidc_authority' parameter in ClientApplication, the authority will be validated against the issuer from https://id.tailwind-demo.example/tenant-9/.well-known/openid-configuration .If using a known Entra authority (e.g. login.microsoftonline.com) the 'authority' parameter should be used instead of 'oidc_authority'. ",
+        "cause": null
+      },
+      "extra": null
+    },
+    {
+      "id": "T2b",
+      "title": "Timeline 2 variant: issuer claim missing",
+      "calls": [
+        {
+          "method": "GET",
+          "url": "https://id.tailwind-demo.example/tenant-9/.well-known/openid-configuration",
+          "query": null
+        }
+      ],
+      "exception": {
+        "type": "builtins.ValueError",
+        "message": "The issuer 'None' does not match the authority 'https://id.tailwind-demo.example/tenant-9' or a known pattern. When using the 'oidc_authority' parameter in ClientApplication, the authority will be validated against the issuer from https://id.tailwind-demo.example/tenant-9/.well-known/openid-configuration .If using a known Entra authority (e.g. login.microsoftonline.com) the 'authority' parameter should be used instead of 'oidc_authority'. ",
+        "cause": null
+      },
+      "extra": null
+    },
+    {
+      "id": "TRUTH",
+      "vectors": [
+        {
+          "oidc_authority": "https://id.tailwind-demo.example/tenant-9",
+          "issuer": "https://id.tailwind-demo.example/tenant-9",
+          "expected": true,
+          "actual": true,
+          "label": "exact authority match",
+          "network": false
+        },
+        {
+          "oidc_authority": "https://id.tailwind-demo.example/tenant-9",
+          "issuer": "https://id.tailwind-demo.example/tenant-9/v2.0",
+          "expected": true,
+          "actual": true,
+          "label": "same scheme+host, different path (case 4)",
+          "network": false
+        },
+        {
+          "oidc_authority": "https://id.tailwind-demo.example/tenant-9",
+          "issuer": "https://region-a.id.tailwind-demo.example/tenant-9/v2.0",
+          "expected": true,
+          "actual": true,
+          "label": "one-label region prefix of configured host (case 3b)",
+          "network": false
+        },
+        {
+          "oidc_authority": "https://id.tailwind-demo.example/tenant-9",
+          "issuer": "https://id.tailwind-demo.example.lookalike.example/tenant-9/v2.0",
+          "expected": false,
+          "actual": false,
+          "label": "suffix lookalike: trusted name is only a prefix label",
+          "network": false
+        },
+        {
+          "oidc_authority": "https://id.tailwind-demo.example/tenant-9",
+          "issuer": "https://id-tailwind-demo.example/tenant-9/v2.0",
+          "expected": false,
+          "actual": false,
+          "label": "typosquat: hyphen instead of dot hierarchy",
+          "network": false
+        },
+        {
+          "oidc_authority": "https://id.tailwind-demo.example/tenant-9",
+          "issuer": null,
+          "expected": false,
+          "actual": false,
+          "label": "missing issuer cannot support a conclusion",
+          "network": false
+        },
+        {
+          "oidc_authority": "https://id.tailwind-demo.example/tenant-9",
+          "issuer": "https://login.microsoftonline.com/tenant-9/v2.0",
+          "expected": true,
+          "actual": true,
+          "label": "OFFLINE RULE VECTOR ONLY: any well-known Entra host passes (case 2); this is an allowlist string rule, not a contacted destination here",
+          "network": false
+        }
+      ]
+    },
+    {
+      "id": "ID",
+      "cases": [
+        {
+          "id": "ID1",
+          "title": "Entra instance discovery steers the next GET and the token host",
+          "calls": [
+            {
+              "method": "GET",
+              "url": "https://discovery.tailwind-demo.example/common/discovery/instance",
+              "query": {
+                "authorization_endpoint": "https://login.tailwind-demo.example/tenant-7777/oauth2/v2.0/authorize",
+                "api-version": "1.0"
+              }
+            },
+            {
+              "method": "GET",
+              "url": "https://discovered.tailwind-demo.example/tenant-7777/v2.0/.well-known/openid-configuration",
+              "query": null
+            }
+          ],
+          "exception": null,
+          "extra": "final token_endpoint=https://discovered.tailwind-demo.example/tenant-7777/oauth2/v2.0/token"
+        }
+      ]
+    },
+    {
+      "id": "X1",
+      "title": "Cross-path: oidc_authority + region prefers an Entra-style regional client with NO issuer gate",
+      "calls": [
+        {
+          "method": "GET",
+          "url": "https://id.tailwind-demo.example/tenant-9/.well-known/openid-configuration",
+          "query": null
+        },
+        {
+          "method": "GET",
+          "url": "https://region-a.id.tailwind-demo.example/tenant-9/v2.0/.well-known/openid-configuration",
+          "query": null
+        },
+        {
+          "method": "POST",
+          "url": "https://token.delegate-demo.example/v9/token",
+          "query": null,
+          "body": {
+            "keys": [
+              "client_id",
+              "client_info",
+              "client_secret",
+              "grant_type",
+              "scope"
+            ],
+            "client_secret": "<redacted-present>"
+          }
+        }
+      ],
+      "exception": null,
+      "extra": "token returned: True"
+    },
+    {
+      "id": "F1",
+      "title": "Failure feedback: regional discovery HTTP 400",
+      "calls": [
+        {
+          "method": "GET",
+          "url": "https://login.tailwind-demo.example/tenant-7777/v2.0/.well-known/openid-configuration",
+          "query": null
+        },
+        {
+          "method": "GET",
+          "url": "https://region-a.login.tailwind-demo.example/tenant-7777/v2.0/.well-known/openid-configuration",
+          "query": null
+        }
+      ],
+      "exception": {
+        "type": "builtins.ValueError",
+        "message": "Unable to get authority configuration for https://region-a.login.tailwind-demo.example/tenant-7777. Authority would typically be in a format of https://login.microsoftonline.com/your_tenant or https://tenant_name.ciamlogin.com or https://tenant_name.b2clogin.com/tenant.onmicrosoft.com/policy.  Also please double check your tenant name or GUID is correct.",
+        "cause": {
+          "type": "ValueError",
+          "message": "OIDC Discovery failed on https://region-a.login.tailwind-demo.example/tenant-7777/v2.0/.well-known/openid-configuration. HTTP status: 400, Error: {\"error\": \"invalid_tenant\"}"
+        }
+      },
+      "extra": null
+    },
+    {
+      "id": "F2",
+      "title": "Failure feedback: token endpoint returns invalid_client",
+      "calls": [
+        {
+          "method": "GET",
+          "url": "https://login.tailwind-demo.example/tenant-7777/v2.0/.well-known/openid-configuration",
+          "query": null
+        },
+        {
+          "method": "GET",
+          "url": "https://region-a.login.tailwind-demo.example/tenant-7777/v2.0/.well-known/openid-configuration",
+          "query": null
+        },
+        {
+          "method": "POST",
+          "url": "https://region-a.login.tailwind-demo.example/tenant-7777/oauth2/v2.0/token",
+          "query": null,
+          "body": {
+            "keys": [
+              "client_id",
+              "client_info",
+              "client_secret",
+              "grant_type",
+              "scope"
+            ],
+            "client_secret": "<redacted-present>"
+          }
+        }
+      ],
+      "exception": null,
+      "extra": "returned dict keys=['error', 'error_description']"
+    }
+  ]
+}
