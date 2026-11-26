@@ -55,6 +55,7 @@ Example::
 
 from logging import getLogger
 from os import environ
+from typing import Any
 
 from opentelemetry.context.context import Context
 from opentelemetry.environment_variables import OTEL_PROPAGATORS
@@ -88,6 +89,7 @@ def inject(
     carrier: textmap.CarrierT,
     context: Context | None = None,
     setter: textmap.Setter[textmap.CarrierT] = textmap.default_setter,
+    **kwargs: Any,
 ) -> None:
     """Uses the configured propagator to inject a Context into the carrier.
 
@@ -100,8 +102,17 @@ def inject(
             context if not set.
         setter: An optional `Setter` object that can set values
             on the carrier.
+
+    Keyword Args:
+        destination: An optional logical destination used by
+            destination-aware propagation policies.
     """
-    get_global_textmap().inject(carrier, context=context, setter=setter)
+    propagator = get_global_textmap()
+    inject_method: Any = propagator.inject
+    if kwargs:
+        inject_method(carrier, context=context, setter=setter, **kwargs)
+    else:
+        inject_method(carrier, context=context, setter=setter)
 
 
 def _load_propagators() -> textmap.TextMapPropagator:

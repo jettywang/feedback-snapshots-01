@@ -8,3 +8,5 @@ Subpackages
 
    propagators.textmap
    propagators.composite
+   propagators.policy
+   propagators.destination

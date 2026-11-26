@@ -1,8 +1,9 @@
 # Copyright The OpenTelemetry Authors
 # SPDX-License-Identifier: Apache-2.0
 #
-from collections.abc import Iterable, Iterator, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from logging import getLogger
+from typing import Any
 from urllib.parse import quote, unquote
 
 from opentelemetry.baggage import (
@@ -73,6 +74,36 @@ class W3CBaggagePropagator(textmap.TextMapPropagator):
     _MAX_PAIRS = 180
     _BAGGAGE_HEADER_NAME = "baggage"
 
+    def __init__(
+        self,
+        allowed_keys: Iterable[str] | str | Callable[..., bool] | None = None,
+        *,
+        denied_keys: Iterable[str] | str | None = None,
+        predicate: Callable[..., bool] | None = None,
+        policy: object | None = None,
+        merge_existing_values: bool = False,
+        **kwargs: Any,
+    ) -> None:
+        if policy is not None:
+            from opentelemetry.propagators.policy import (  # noqa: PLC0415
+                coerce_baggage_policy,
+            )
+
+            self._policy = coerce_baggage_policy(policy)
+        elif allowed_keys is not None or denied_keys is not None or predicate is not None or kwargs:
+            from opentelemetry.propagators.policy import BaggagePolicy  # noqa: PLC0415
+
+            self._policy = BaggagePolicy(
+                allowed_keys=allowed_keys,
+                denied_keys=denied_keys,
+                predicate=predicate,
+                merge_existing_values=merge_existing_values,
+                **kwargs,
+            )
+        else:
+            self._policy = None
+        self._merge_existing_values = merge_existing_values
+
     def extract(
         self,
         carrier: textmap.CarrierT,
@@ -129,14 +160,32 @@ class W3CBaggagePropagator(textmap.TextMapPropagator):
         carrier: textmap.CarrierT,
         context: Context | None = None,
         setter: textmap.Setter[textmap.CarrierT] = textmap.default_setter,
+        *,
+        getter: textmap.Getter[textmap.CarrierT] = textmap.default_getter,
+        merge_existing_values: bool | None = None,
     ) -> None:
         """Injects Baggage into the carrier.
 
         See
         `opentelemetry.propagators.textmap.TextMapPropagator.inject`
         """
-        baggage_entries = get_all(context=context)
+        injection_context: Context | None
+        if self._policy is not None:
+            injection_context = self._policy.context_for_injection(
+                context,
+                carrier=carrier,
+                getter=getter,
+                merge_existing_values=(
+                    self._merge_existing_values if merge_existing_values is None else merge_existing_values
+                ),
+            )
+        else:
+            injection_context = context
+
+        baggage_entries = get_all(context=injection_context)
         if not baggage_entries:
+            if self._policy is not None:
+                self._policy.clear_carrier_baggage(carrier, setter)
             return
 
         baggage_string = ",".join(
@@ -150,11 +199,19 @@ class W3CBaggagePropagator(textmap.TextMapPropagator):
 
         if baggage_string:
             setter.set(carrier, self._BAGGAGE_HEADER_NAME, baggage_string)
+        elif self._policy is not None:
+            self._policy.clear_carrier_baggage(carrier, setter)
 
     @property
     def fields(self) -> set[str]:
         """Returns a set with the fields set in `inject`."""
         return {self._BAGGAGE_HEADER_NAME}
+
+
+BaggageAllowListPropagator = W3CBaggagePropagator
+AllowListBaggagePropagator = W3CBaggagePropagator
+AllowedBaggagePropagator = W3CBaggagePropagator
+FilteredBaggagePropagator = W3CBaggagePropagator
 
 
 def _split_baggage_entries(headers: Iterable[str]) -> Iterator[str]:
