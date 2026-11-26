@@ -1,0 +1,123 @@
+
+================================================================================================
+A. REAL PATH - request POST (valid CSRF) then provider callback
+================================================================================================
+   1  client                       POST /auth/provider        valid authenticity_token
+   2  strategy#setup_phase         runs                       
+   3  hook:request_validation_phase CSRF check starts          /auth/provider
+   4  hook:request_validation_phase CSRF check accepted        token matched session
+   5  hook:before_request_phase    runs                       /auth/provider
+   6  strategy#request_phase       builds authorize redirect  
+   7  hook:after_request_phase     runs                       /auth/provider
+  -> RESPONSE status=302 location=https://provider.test/oauth/authorize?state=state-abc-123&redirect_uri=http%3A%2F%2Fexample.org%2Fauth%2Fprovider%2Fcallback body=
+  session after request phase: [:csrf, "omniauth.params", "omniauth.sign_ins"]
+   1  client                       GET callback               provider redirects back with code+state
+   2  strategy#setup_phase         runs                       
+   3  hook:before_callback_phase   runs                       /auth/provider/callback
+   4  strategy#callback_phase      provider params present    state=state-abc-123 code=exchange-code
+   5  app                          receives omniauth.auth     provider=provider uid=42
+  -> RESPONSE status=200 location=- body=APP_OK 42
+  auth hash built by: strategy#auth_hash from provider callback params (real verification)
+  real omniauth.auth class=OmniAuth::AuthHash uid=42 provider=provider
+
+================================================================================================
+B. TEST_MODE PATH - mock request then mock callback, same auth hash
+================================================================================================
+   1  client                       POST /auth/provider        test mode
+   2  strategy#setup_phase         runs                       
+   3  hook:request_validation_phase CSRF check starts          /auth/provider
+   4  hook:request_validation_phase CSRF check accepted        token matched session
+   5  hook:before_request_phase    runs                       /auth/provider
+   6  hook:after_request_phase     runs                       /auth/provider
+  -> RESPONSE status=302 location=http://example.org/auth/provider/callback body=
+   1  client                       GET callback               test mode, no provider code/state
+   2  strategy#setup_phase         runs                       
+   3  hook:before_callback_phase   runs                       /auth/provider/callback
+   4  app                          receives omniauth.auth     provider=provider uid=42
+  -> RESPONSE status=200 location=- body=APP_OK 42
+  auth hash built by: OmniAuth.mock_auth_for(:provider) - injected, no provider verification
+  mock omniauth.auth class=OmniAuth::AuthHash uid=42 provider=provider
+
+  SAME AUTH HASH? true (deep Hash equality across the two paths)
+  real keys=["credentials", "extra", "info", "provider", "uid"]
+  mock keys=["credentials", "extra", "info", "provider", "uid"]
+
+================================================================================================
+B2. TEST_MODE WITH A FORGED TOKEN - is request_validation_phase still enforced?
+================================================================================================
+   1  client                       POST /auth/provider        FORGED token, test mode
+   2  strategy#setup_phase         runs                       
+   3  hook:request_validation_phase CSRF check starts          /auth/provider
+   4  hook:request_validation_phase CSRF check REJECTED        Forbidden
+  -> RESPONSE status=302 location=/auth/failure?message=Forbidden&strategy=provider body=
+  => test mode still runs request_validation_phase? true
+
+================================================================================================
+C. CUSTOM FORM - Rack endpoint renders 200, provider request_phase never runs
+================================================================================================
+   1  client                       POST /auth/provider        form: Rack endpoint option
+   2  strategy#setup_phase         runs                       
+   3  hook:request_validation_phase CSRF check starts          /auth/provider
+   4  hook:request_validation_phase CSRF check accepted        token matched session
+   5  hook:before_request_phase    runs                       /auth/provider
+   6  form_endpoint                renders custom form        /auth/provider
+   7  hook:after_request_phase     runs                       /auth/provider
+  -> RESPONSE status=200 location=- body=<form>CUSTOM FORM</form>
+
+================================================================================================
+C2. CUSTOM FORM = true - request phase calls through to the app itself
+================================================================================================
+   1  client                       POST /auth/provider        form: true (underlying app renders)
+   2  strategy#setup_phase         runs                       
+   3  hook:request_validation_phase CSRF check starts          /auth/provider
+   4  hook:request_validation_phase CSRF check accepted        token matched session
+   5  hook:before_request_phase    runs                       /auth/provider
+   6  app                          plain passthrough          /auth/provider
+   7  hook:after_request_phase     runs                       /auth/provider
+  -> RESPONSE status=200 location=- body=APP_PLAIN
+
+================================================================================================
+D1. STOP BEFORE STRATEGY - unrelated path passes straight through
+================================================================================================
+   1  client                       GET /users/42/posts        not an auth path
+   2  app                          plain passthrough          /users/42/posts
+  -> RESPONSE status=200 location=- body=APP_PLAIN
+
+================================================================================================
+D2. STOP BEFORE STRATEGY - GET on request path with POST-only default
+================================================================================================
+   1  client                       GET /auth/provider         method not in allowed_request_methods [:post]
+   2  app                          plain passthrough          /auth/provider
+  -> RESPONSE status=200 location=- body=APP_PLAIN
+
+================================================================================================
+E. FAILURE - forged CSRF token rejected before the provider is touched
+================================================================================================
+   1  client                       POST /auth/provider        FORGED token, real mode
+   2  strategy#setup_phase         runs                       
+   3  hook:request_validation_phase CSRF check starts          /auth/provider
+   4  hook:request_validation_phase CSRF check REJECTED        Forbidden
+  -> RESPONSE status=302 location=/auth/failure?message=authenticity_error&strategy=provider body=
+  omniauth.error.type=:authenticity_error
+  omniauth.params stored despite rejection? false (should be false)
+  provider request_phase reached? false
+
+================================================================================================
+F. TEST_MODE MOCKED FAILURE - Symbol mock routes to on_failure, no auth hash
+================================================================================================
+   1  client                       GET callback               mock_auth[:provider] = :invalid_credentials
+   2  strategy#setup_phase         runs                       
+   3  hook:before_callback_phase   runs                       /auth/provider/callback
+  -> RESPONSE status=302 location=/auth/failure?message=invalid_credentials&strategy=provider body=302 Moved
+  omniauth.auth present? false (should be false)
+  omniauth.error.type=:invalid_credentials
+
+================================================================================================
+G. OPTIONS PREFLIGHT - answered before any auth phase
+================================================================================================
+   1  client                       OPTIONS /auth/provider     CORS preflight
+   2  hook:before_options_phase    runs                       /auth/provider
+  -> RESPONSE status=200 location=- body=
+  Allow header="POST"
+
+Done. Reset OmniAuth global config to defaults.

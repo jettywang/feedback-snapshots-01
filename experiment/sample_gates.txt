@@ -1,0 +1,14 @@
+[PASS] real request: valid token yields 302 to the provider
+[PASS] real request: validation runs before before_request_phase
+[PASS] forged token: 302 to /auth/failure with authenticity_error
+[PASS] forged token: request_phase never runs and no params are stored
+[PASS] GET request path: falls through to the app, no phase hooks
+[PASS] real and test-mode callbacks produce an identical auth hash
+[PASS] test-mode request never runs the strategy request_phase (no provider)
+[PASS] real callback runs strategy#callback_phase; test-mode callback does not
+[PASS] test mode: forged token still rejected (protection active under test_mode)
+[PASS] mocked failure symbol: no omniauth.auth, error type recorded
+[PASS] custom form: 200 HTML, request_phase skipped, after_request_phase still runs
+[PASS] unrelated path: straight to app, zero hooks/phases
+
+ALL 12 MIGRATION CHECKS PASSED
