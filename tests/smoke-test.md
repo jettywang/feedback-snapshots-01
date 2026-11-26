@@ -66,3 +66,9 @@ Typical test cases are listed below.
    The remove_account() shall also sign out from broker (if broker was enabled),
    it does not sign out account from browser (even when browser was used).
 
+   Pass ``return_receipt=True`` to see the optional sign-out progress:
+   ``local_signout`` completes as soon as the account leaves the local cache,
+   while ``broker_signout`` may still be ``"pending"`` until the broker
+   confirms. ``get_signout_progress(account=...)`` reports the same state
+   later, and a normal re-sign-in gets a new ``session`` value.
+

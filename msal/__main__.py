@@ -201,8 +201,13 @@ def _remove_account(app):
     """remove_account() - Invalidate account and/or token(s) from cache, so that acquire_token_silent() would be reset"""
     account = _select_account(app)
     if account:
-        app.remove_account(account)
+        receipt = app.remove_account(account, return_receipt=True) or {}
         print('Account "{}" and/or its token(s) are signed out from MSAL Python'.format(account["username"]))
+        print("Sign-out progress: local={}, broker={}, state={}".format(
+            receipt.get("local_signout"),
+            receipt.get("broker_signout"),
+            receipt.get("state"),
+            ))
 
 def _acquire_token_for_client(app):
     """CCA.acquire_token_for_client() - Rerun this will get same token from cache."""

@@ -1295,6 +1295,7 @@ The reserved list: {}""".format(list(scope_set), list(reserved_scope)))
             **kwargs))
         if "access_token" in response:
             response[self._TOKEN_SOURCE] = self._TOKEN_SOURCE_IDP
+        self._stamp_new_signin_session(response)
         telemetry_context.update_telemetry(response)
         return response
 
@@ -1386,6 +1387,7 @@ The reserved list: {}""".format(list(scope_set), list(reserved_scope)))
                 **kwargs))
             if "access_token" in response:
                 response[self._TOKEN_SOURCE] = self._TOKEN_SOURCE_IDP
+            self._stamp_new_signin_session(response)
             telemetry_context.update_telemetry(response)
             return response
 
@@ -1481,15 +1483,125 @@ The reserved list: {}""".format(list(scope_set), list(reserved_scope)))
                 return [alias for alias in group if alias != instance]
         return []
 
-    def remove_account(self, account):
-        """Sign me out and forget me from token cache"""
+    def remove_account(self, account, *, return_receipt=False):
+        """Sign me out and forget me from token cache
+
+        The account is removed from the local cache first, so that the account
+        panel (``get_accounts()``) reflects the sign-out immediately, even
+        when a broker confirms later. The returned value depends on
+        ``return_receipt``:
+
+        - ``False`` (default): keep the historical ``None`` return.
+        - ``True``: return a receipt dict describing this sign-out, suitable
+          for :func:`~get_signout_progress` and for matching a delayed broker
+          confirmation. Its fields are:
+
+          - ``home_account_id``: which account was signed out
+          - ``session``: the session identifier that is being retired
+          - ``local_signout``: ``"completed"`` once the cache removal is done
+          - ``broker_signout``: ``"not_attempted"``, ``"started"``,
+            ``"confirmed"``, ``"pending"`` or ``"unknown_account"``
+          - ``state``: ``"pending"`` while a broker may still confirm, or
+            ``"confirmed"`` when the sign-out is complete
+          - ``broker_error``: the broker error, if any
+
+          Pass the receipt to :meth:`observe_signout_result` when the broker's
+          confirmation arrives. A receipt from an older sign-in of the same
+          account is ignored, so a late reply cannot affect a newer session.
+
+        A re-sign-in later gives the account a new session identifier; see
+        :func:`~get_signout_progress`.
+        """
+        home_account = dict(account)  # Do not mutate the caller's dict
+        receipt = self.token_cache.begin_signout(
+            home_account.get("home_account_id"),
+            broker_attempted=self._enable_broker)
+        # Remove local credentials first: the account panel must reflect the
+        # sign-out even if the broker call below blocks or fails.
+        self._forget_me(home_account)
+        receipt["local_signout"] = "completed"
         if self._enable_broker:
             from .broker import _signout_silently
-            error = _signout_silently(self.client_id, account["local_account_id"])
-            if error:
+            try:
+                outcome = _signout_silently(
+                    self.client_id, account.get("local_account_id"),
+                    return_outcome=True) or {"status": "pending"}
+            except Exception as ex:  # Broker is an external component
+                logger.debug("Broker sign-out raised: %s", ex)
+                outcome = {"status": "pending",
+                           "error": {"error": "broker_error",
+                                     "error_description": str(ex)}}
+            if outcome["status"] == "confirmed":
+                receipt = self._record_signout_outcome(
+                    receipt, broker_outcome="confirmed")
+            elif outcome["status"] == "not_attempted":
+                # The broker does not know this account (anymore). That is not
+                # proof that it cleaned up, so keep waiting for a confirmation.
+                receipt = self._record_signout_outcome(
+                    receipt, broker_outcome="unknown_account")
+            else:
+                error = outcome.get("error")
                 logger.debug("_signout_silently() returns error: %s", error)
-        # Broker sign-out has been attempted, even if the _forget_me() below throws.
-        self._forget_me(account)
+                receipt = self._record_signout_outcome(
+                    receipt, broker_outcome="pending", broker_error=error)
+        else:
+            receipt = self._record_signout_outcome(
+                receipt, broker_outcome="not_attempted")
+        return receipt if return_receipt else None
+
+    def _record_signout_outcome(self, receipt, broker_outcome, broker_error=None):
+        updated = self.token_cache.observe_signout_result(
+            receipt, broker_outcome=broker_outcome, broker_error=broker_error)
+        return updated if updated is not None else receipt
+
+    def observe_signout_result(self, receipt, broker_outcome="confirmed",
+                               broker_error=None):
+        """Record a broker's later sign-out outcome against a receipt.
+
+        Use this when the broker confirms a sign-out after :meth:`remove_account`
+        already returned (possibly from another thread). ``broker_outcome`` is
+        one of ``"confirmed"``, ``"pending"``, ``"unknown_account"`` or
+        ``"error"``. Returns the updated receipt, or ``None`` when the receipt
+        belongs to an older sign-in and was therefore ignored.
+        """
+        return self.token_cache.observe_signout_result(
+            receipt, broker_outcome=broker_outcome, broker_error=broker_error)
+
+    def get_signout_progress(self, account=None, **kwargs):
+        """Return optional, read-only sign-out progress for one account.
+
+        Either pass an ``account`` object (as returned by :func:`~get_accounts`),
+        or the keyword ``home_account_id=...``. The result is a dict:
+
+        - ``home_account_id``
+        - ``state``: ``"active"`` (never signed out here), ``"pending"`` (the
+          local sign-out happened and a broker may still confirm), or
+          ``"confirmed"`` (the sign-out is complete)
+        - ``generation``: how many sign-outs this process has recorded; a
+          normal re-sign-in starts a new generation
+        - ``session``: the current session identifier for the account
+        - ``receipt``: the latest sign-out receipt, or ``None``
+
+        This is process-local: a new process starts every account at
+        ``"active"`` because it cannot vouch for an earlier process's broker
+        conversation.
+        """
+        home_account_id = (
+            account.get("home_account_id") if account else kwargs.get("home_account_id"))
+        progress = self.token_cache.get_signout_progress(home_account_id)
+        return dict(
+            progress,
+            home_account_id=home_account_id,
+            session=self.token_cache._session_for(home_account_id),
+            )
+
+    def get_account_session(self, account):
+        """Return the current session identifier for *account*.
+
+        A normal re-sign-in produces a different value, which lets an app tell
+        a result from the old session apart from one from the new session.
+        """
+        return self.token_cache.account_session(account)
 
     def _sign_out(self, home_account):
         # Remove all relevant RTs and ATs from token cache
@@ -1682,9 +1794,12 @@ The reserved list: {}""".format(list(scope_set), list(reserved_scope)))
             claims_challenge=claims_challenge,
             correlation_id=correlation_id,
             auth_scheme=auth_scheme,
+            signout_generation=self._capture_signout_generation(account),
             **kwargs)
         if result and "error" not in result:
             return result
+        if result and result.get("error") == "signout_discarded":
+            return result  # The account is gone; no alias has anything to offer
         final_result = result
         for alias in self._get_authority_aliases(self.authority.instance):
             if not list(self.token_cache.search(  # Need a list to test emptiness
@@ -1705,6 +1820,7 @@ The reserved list: {}""".format(list(scope_set), list(reserved_scope)))
                 claims_challenge=claims_challenge,
                 correlation_id=correlation_id,
                 auth_scheme=auth_scheme,
+                signout_generation=self._capture_signout_generation(account),
                 **kwargs)
             if result:
                 if "error" not in result:
@@ -1730,10 +1846,16 @@ The reserved list: {}""".format(list(scope_set), list(reserved_scope)))
             correlation_id=None,
             http_exceptions=None,
             auth_scheme=None,
+            signout_generation=None,
             **kwargs):
         # This internal method has two calling patterns:
         # it accepts a non-empty account to find token for a user,
         # and accepts account=None to find a token for the current app.
+        #
+        # ``signout_generation`` is the account's sign-out generation at the
+        # moment the request started. If the user signs the account out while
+        # the request is in flight, the response belongs to the old session
+        # and must not be written back (see TokenCache.add()).
         access_token_from_cache = None
         if not (force_refresh or claims_challenge or auth_scheme):  # Then attempt AT cache
             query={
@@ -1769,11 +1891,22 @@ The reserved list: {}""".format(list(scope_set), list(reserved_scope)))
                     "expires_in": int(expires_in),  # OAuth2 specs defines it as int
                     self._TOKEN_SOURCE: self._TOKEN_SOURCE_CACHE,
                     }
+                if account:
+                    # The cached token is being handed to a request that
+                    # started in this session; attribute it accordingly.
+                    access_token_from_cache["home_account_id"] = (
+                        account.get("home_account_id"))
+                    access_token_from_cache["session"] = (
+                        self.token_cache._session_for(account.get("home_account_id")))
                 if "refresh_on" in entry:
                     access_token_from_cache["refresh_on"] = int(entry["refresh_on"])
                     if int(entry["refresh_on"]) < now:  # aging
                         refresh_reason = msal.telemetry.AT_AGING
                         break  # With a fallback in hand, we break here to go refresh
+                if account and self._is_late_signout_result(account, signout_generation):
+                    # The user signed this account out while we were reading
+                    # its cache entry; do not hand out that old-session token.
+                    return self._signout_discarded_result(account, "cache")
                 self._build_telemetry_context(-1).hit_an_access_token()
                 return access_token_from_cache  # It is still good as new
         else:
@@ -1812,7 +1945,14 @@ The reserved list: {}""".format(list(scope_set), list(reserved_scope)))
                         "account_source") == _GRANT_TYPE_BROKER
                     broker_attempt_succeeded_just_now = "error" not in response
                     if account_was_established_by_broker or broker_attempt_succeeded_just_now:
-                        return self._process_broker_response(response, scopes, data)
+                        if self._is_late_signout_result(
+                                account, signout_generation):
+                            return self._signout_discarded_result(
+                                account, "broker")
+                        return self._process_broker_response(
+                            response, scopes, data,
+                            signout_generation=signout_generation,
+                            establishes_account=False)
 
             if auth_scheme:
                 raise ValueError(self._AUTH_SCHEME_UNSUPPORTED)
@@ -1821,6 +1961,7 @@ The reserved list: {}""".format(list(scope_set), list(reserved_scope)))
                     authority, self._decorate_scope(scopes), account,
                     refresh_reason=refresh_reason, claims_challenge=claims_challenge,
                     correlation_id=correlation_id,
+                    signout_generation=signout_generation,
                     **kwargs)
             else:  # The caller is acquire_token_for_client()
                 result = self._acquire_token_for_client(
@@ -1828,17 +1969,87 @@ The reserved list: {}""".format(list(scope_set), list(reserved_scope)))
                     **kwargs)
             if result and "access_token" in result:
                 result[self._TOKEN_SOURCE] = self._TOKEN_SOURCE_IDP
+            if account and self._is_late_signout_result(account, signout_generation):
+                return self._signout_discarded_result(account, "identity_provider")
+            self._attribute_result_to_session(result, account)
             if (result and "error" not in result) or (not access_token_from_cache):
                 return result
         except http_exceptions:
             # Typically network error. Potential AAD outage?
             if not access_token_from_cache:  # It means there is no fall back option
                 raise  # We choose to bubble up the exception
+        if account and self._is_late_signout_result(account, signout_generation):
+            # Do not fall back to an old-session cache entry after all.
+            return self._signout_discarded_result(account, "cache")
         return access_token_from_cache
 
-    def _process_broker_response(self, response, scopes, data):
+    def _capture_signout_generation(self, account):
+        """Snapshot an account's sign-out generation for one in-flight request."""
+        home_account_id = (account or {}).get("home_account_id")
+        if not home_account_id:
+            return None
+        return self.token_cache.get_signout_progress(home_account_id)["generation"]
+
+    def _is_late_signout_result(self, account, signout_generation):
+        home_account_id = (account or {}).get("home_account_id")
+        if not home_account_id:
+            return False
+        return self.token_cache._is_stale_signout_write(
+            home_account_id, signout_generation=signout_generation)
+
+    def _signout_discarded_result(self, account, channel):
+        """A distinguishable outcome for a reply from a signed-out session.
+
+        It deliberately carries no access token or refresh token, so nothing
+        from the old session can be reused, while the app can still tell why
+        the request produced nothing.
+        """
+        home_account_id = (account or {}).get("home_account_id")
+        progress = self.token_cache.get_signout_progress(home_account_id)
+        return {
+            "error": "signout_discarded",
+            "error_description": (
+                "The account signed out while this request was in flight; "
+                "its result belongs to the previous session and was discarded."),
+            "signout_state": progress["state"],
+            "session": self.token_cache._session_for(home_account_id),
+            "home_account_id": home_account_id,
+            self._TOKEN_SOURCE: channel,
+            }
+
+    def _attribute_result_to_session(self, result, account):
+        """Stamp a successful result with the session it belongs to."""
+        if not isinstance(result, dict) or not account:
+            return
+        if "error" in result:
+            return  # Errors are already attributable via the discarded-result path
+        home_account_id = account.get("home_account_id")
+        if not home_account_id or result.get("home_account_id") not in (None, home_account_id):
+            return
+        result.setdefault("home_account_id", home_account_id)
+        result.setdefault(
+            "session", self.token_cache._session_for(home_account_id))
+
+    def _stamp_new_signin_session(self, response):
+        """Tag a fresh authorization result with its account's new session.
+
+        Only applies to successful results that carry account identity. It
+        never changes an existing session value, so a late reply that already
+        knows its session is left alone.
+        """
+        if not isinstance(response, dict) or "access_token" not in response:
+            return response
+        home_account_id = self.token_cache._home_account_id_from_response(response)
+        if home_account_id:
+            self._attribute_result_to_session(
+                response, {"home_account_id": home_account_id})
+        return response
+
+    def _process_broker_response(self, response, scopes, data,
+                                 signout_generation=None,
+                                 establishes_account=None):
         if "error" not in response:
-            self.token_cache.add(dict(
+            outcome = self.token_cache.add(dict(
                 client_id=self.client_id,
                 scope=response["scope"].split() if "scope" in response else scopes,
                 token_endpoint=self.authority.token_endpoint,
@@ -1847,8 +2058,16 @@ The reserved list: {}""".format(list(scope_set), list(reserved_scope)))
                 _account_id=response["_account_id"],
                 environment=self.authority.instance,  # Be consistent with non-broker flows
                 grant_type=_GRANT_TYPE_BROKER,  # A pseudo grant type for TokenCache to mark account_source as broker
-                ))
+                ), signout_generation=signout_generation,
+                establishes_account=establishes_account)
+            if outcome and not outcome.get("stored"):
+                return self._signout_discarded_result(
+                    {"home_account_id": (
+                        outcome.get("signout") or {}).get("home_account_id")},
+                    "broker")
             response[self._TOKEN_SOURCE] = self._TOKEN_SOURCE_BROKER
+            self._attribute_result_to_session(
+                response, {"home_account_id": self.token_cache._home_account_id_from_response(response)})
         return _clean_up(response)
 
     def _acquire_token_silent_by_finding_rt_belongs_to_me_or_my_family(
@@ -1897,6 +2116,7 @@ The reserved list: {}""".format(list(scope_set), list(reserved_scope)))
             self, authority, scopes, query,
             rt_remover=None, break_condition=lambda response: False,
             refresh_reason=None, correlation_id=None, claims_challenge=None,
+            signout_generation=None,
             **kwargs):
         matches = list(self.token_cache.search(  # We want a list to test emptiness
             self.token_cache.CredentialType.REFRESH_TOKEN,
@@ -1910,6 +2130,13 @@ The reserved list: {}""".format(list(scope_set), list(reserved_scope)))
         response = None  # A distinguishable value to mean cache is empty
         if not matches:  # Then exit early to avoid expensive operations
             return response
+        if self.token_cache._is_stale_signout_write(
+                query.get("home_account_id"), signout_generation=signout_generation):
+            # The account signed out after this request started. Do not even
+            # spend a refresh round-trip on its old RT.
+            return self._signout_discarded_result(
+                {"home_account_id": query.get("home_account_id")},
+                "identity_provider")
         client, _ = self._build_client(
             # Potentially expensive if building regional client
             self.client_credential, authority, skip_regional_client=True)
@@ -1938,7 +2165,12 @@ The reserved list: {}""".format(list(scope_set), list(reserved_scope)))
                     event,
                     environment=authority.instance,
                     skip_account_creation=True,  # To honor a concurrent remove_account()
-                    )),
+                    ), signout_generation=signout_generation),
+                on_updating_rt=lambda rt_item, new_rt: (
+                    None if self.token_cache._is_stale_signout_write(
+                        query.get("home_account_id"),
+                        signout_generation=signout_generation)
+                    else self.token_cache.update_rt_if_present(rt_item, new_rt)),
                 scope=scopes,
                 headers=headers,
                 data=dict(
@@ -2071,7 +2303,10 @@ The reserved list: {}""".format(list(scope_set), list(reserved_scope)))
                 claims=claims,
                 auth_scheme=auth_scheme,
                 )
-            return self._process_broker_response(response, scopes, kwargs.get("data", {}))
+            return self._stamp_new_signin_session(
+                self._process_broker_response(
+                    response, scopes, kwargs.get("data", {}),
+                    establishes_account=True))
 
         if auth_scheme:
             raise ValueError(self._AUTH_SCHEME_UNSUPPORTED)
@@ -2097,6 +2332,7 @@ The reserved list: {}""".format(list(scope_set), list(reserved_scope)))
                 **kwargs))
         if "access_token" in response:
             response[self._TOKEN_SOURCE] = self._TOKEN_SOURCE_IDP
+        self._stamp_new_signin_session(response)
         telemetry_context.update_telemetry(response)
         return response
 
@@ -2134,14 +2370,15 @@ The reserved list: {}""".format(list(scope_set), list(reserved_scope)))
                 "RSTR returned unknown token type: %s", wstrust_result.get("type"))
         self.client.grant_assertion_encoders.setdefault(  # Register a non-standard type
             grant_type, self.client.encode_saml_assertion)
-        return self.client.obtain_token_by_assertion(
-            wstrust_result["token"], grant_type, scope=scopes,
-            on_obtaining_tokens=lambda event: self.token_cache.add(dict(
-                event,
-                environment=self.authority.instance,
-                username=username,  # Useful in case IDT contains no such info
-                )),
-            **kwargs)
+        return self._stamp_new_signin_session(
+            self.client.obtain_token_by_assertion(
+                wstrust_result["token"], grant_type, scope=scopes,
+                on_obtaining_tokens=lambda event: self.token_cache.add(dict(
+                    event,
+                    environment=self.authority.instance,
+                    username=username,  # Useful in case IDT contains no such info
+                    )),
+                **kwargs))
 
 
 class PublicClientApplication(ClientApplication):  # browser app or mobile app
@@ -2421,7 +2658,9 @@ class PublicClientApplication(ClientApplication):  # browser app or mobile app
                 login_hint=login_hint,
                 max_age=max_age,
                 )
-            return self._process_broker_response(response, scopes, data)
+            return self._stamp_new_signin_session(
+                self._process_broker_response(
+                    response, scopes, data, establishes_account=True))
 
         if isinstance(auth_scheme, msal.auth_scheme.PopAuthScheme) and sys.platform == "linux":
             raise ValueError("POP is not supported on Linux")
@@ -2450,6 +2689,7 @@ class PublicClientApplication(ClientApplication):  # browser app or mobile app
             **kwargs))
         if "access_token" in response:
             response[self._TOKEN_SOURCE] = self._TOKEN_SOURCE_IDP
+        self._stamp_new_signin_session(response)
         telemetry_context.update_telemetry(response)
         return response
 
@@ -2600,6 +2840,7 @@ class PublicClientApplication(ClientApplication):  # browser app or mobile app
             **kwargs))
         if "access_token" in response:
             response[self._TOKEN_SOURCE] = self._TOKEN_SOURCE_IDP
+        self._stamp_new_signin_session(response)
         telemetry_context.update_telemetry(response)
         return response
 

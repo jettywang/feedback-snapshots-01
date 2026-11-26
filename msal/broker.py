@@ -267,11 +267,23 @@ def _acquire_token_silently(
         callback_data.result, client_id, expected_token_type=kwargs.get("token_type"))
 
 
-def _signout_silently(client_id, account_id, correlation_id=None):
+def _signout_silently(client_id, account_id, correlation_id=None,
+                      return_outcome=False):
+    """Ask broker to sign out an account silently.
+
+    Historically this returns ``None`` on success, or an error dict. When
+    ``return_outcome=True``, it instead returns a small status dict:
+
+    - ``{"status": "confirmed"}``: broker acknowledged the sign-out.
+    - ``{"status": "not_attempted"}``: broker does not know this account, so
+      nothing was cleaned up (this is NOT a confirmation).
+    - ``{"status": "pending", "error": ...}``: sign-out was attempted but not
+      confirmed; the caller should keep the receipt pending.
+    """
     correlation_id = correlation_id or _get_new_correlation_id()
     account = _read_account_by_id(account_id, correlation_id)
     if account is None:
-        return
+        return {"status": "not_attempted"} if return_outcome else None
     callback_data = pymsalruntime.CallbackData()
     pymsalruntime.signout_silently(  # New in PyMsalRuntime 0.7
         client_id,
@@ -281,7 +293,10 @@ def _signout_silently(client_id, account_id, correlation_id=None):
     callback_data.signal.wait()
     error = callback_data.result.get_error()
     if error:
-        return _convert_error(error, client_id)
+        converted = _convert_error(error, client_id)
+        return ({"status": "pending", "error": converted}
+                if return_outcome else converted)
+    return {"status": "confirmed"} if return_outcome else None
 
 def _enable_pii_log():
     pymsalruntime.set_is_pii_enabled(1)  # New in PyMsalRuntime 0.13.0

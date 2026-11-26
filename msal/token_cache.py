@@ -8,11 +8,17 @@ import warnings
 
 from .authority import canonicalize
 from .oauth2cli.oidc import decode_part, _decode_id_token_claims
-from .oauth2cli.oauth2 import Client
 
 
 logger = logging.getLogger(__name__)
 _GRANT_TYPE_BROKER = "broker"
+
+# These flows prove that a user (or the app, on the user's behalf) just went
+# through a fresh authorization, as opposed to replaying an old session.
+_ACCOUNT_ESTABLISHING_GRANT_TYPES = frozenset({
+    _GRANT_TYPE_BROKER, "authorization_code", "password",
+    "urn:ietf:params:oauth:grant-type:device_code", "user_fic",
+    })
 
 # Fields in the request data dict that should NOT be included in the extended
 # cache key hash. Everything else in data IS included, because those are extra
@@ -208,9 +214,26 @@ class TokenCache(object):
         ADFS = "ADFS"
         MSSTS = "MSSTS"  # MSSTS means AAD v2 for both AAD & MSA
 
+    # Internal bookkeeping, deliberately kept out of the serialized schema so
+    # that cache files stay interoperable with the other MSAL SDKs.
+    class _SignoutState:
+        """The lifecycle of one account's sign-out, as seen by this process."""
+
+        # The account is still usable; a request started now would be
+        # attributed to the current session.
+        ACTIVE = "active"
+        # remove_account() has run locally. The account is no longer offered,
+        # but the broker may still confirm later.
+        PENDING = "pending"
+        # The broker acknowledged the sign-out (or there is no broker to wait
+        # for). The sign-out is complete.
+        CONFIRMED = "confirmed"
+
     def __init__(self):
         self._lock = threading.RLock()
         self._cache = {}
+        # home_account_id -> {"state": ..., "generation": ..., "receipt": ...}
+        self._signout_states = {}
         self.key_makers = {
             # Note: We have changed token key format before when ordering scopes;
             #       changing token key won't result in cache miss.
@@ -299,6 +322,194 @@ class TokenCache(object):
         with self._lock:
             return self._cache.get(credential_type, {}).get(key, default)
 
+    def get_signout_progress(self, home_account_id):
+        """Return this process's sign-out bookkeeping for one account.
+
+        The returned dict has ``state`` (one of the ``_SignoutState`` values),
+        ``generation`` (incremented every time the account signs out, so a
+        caller can tell one sign-in incarnation from the next), and
+        ``receipt`` (the last result reported by :meth:`observe_signout_result`,
+        or ``None``).
+
+        An account that was never signed out is reported as ``ACTIVE`` with
+        generation 0. This is intentionally not persisted: a fresh process
+        cannot vouch for a previous process's broker conversation, so it starts
+        every account at ``ACTIVE``.
+        """
+        with self._lock:
+            return dict(self._signout_states.get(
+                home_account_id,
+                {"state": self._SignoutState.ACTIVE, "generation": 0,
+                 "receipt": None}))
+
+    def _account_generation(self, home_account_id):
+        return self.get_signout_progress(home_account_id)["generation"]
+
+    def _home_account_id_from_response(self, response):
+        """Best-effort account identity of a token response (no validation)."""
+        id_token_claims = response.get("id_token_claims") or {}
+        if not id_token_claims and response.get("id_token"):
+            try:
+                id_token_claims = _decode_id_token_claims(response["id_token"])
+            except (ValueError, KeyError, IndexError):
+                id_token_claims = {}
+        try:
+            _, home_account_id = self.__parse_account(response, id_token_claims)
+        except (ValueError, KeyError):
+            return None
+        return home_account_id
+
+    def _session_for(self, home_account_id):
+        """Return a readable, per-sign-in session identifier.
+
+        The identifier is derived from the account's sign-out generation, so a
+        normal re-sign-in of the same account gets a new value rather than
+        inheriting the previous incarnation's identity. It is intended for
+        diagnostics and for matching a result to the session that produced it;
+        it is not a secret and must not be used as an authentication factor.
+        """
+        return "{}:{}".format(
+            home_account_id or "", self._account_generation(home_account_id))
+
+    def account_session(self, account):
+        """Public accessor: return the current session id for *account*."""
+        return self._session_for((account or {}).get("home_account_id"))
+
+    def is_signout_pending(self, home_account_id):
+        return self.get_signout_progress(
+            home_account_id)["state"] == self._SignoutState.PENDING
+
+    def begin_signout(self, home_account_id, broker_attempted=False):
+        """Mark the local sign-out as started, and return its receipt.
+
+        The account's credentials are removed by the caller. The returned
+        receipt is what :meth:`observe_signout_result` must eventually be given,
+        so that a broker's delayed confirmation is matched to this very
+        sign-out rather than to a later sign-in of the same account.
+        """
+        with self._lock:
+            current = self._signout_states.get(home_account_id, {})
+            generation = current.get("generation", 0) + 1
+            receipt = {
+                "home_account_id": home_account_id,
+                "generation": generation,
+                "local_signout": "completed",
+                "broker_signout": "started" if broker_attempted else "not_attempted",
+                "state": self._SignoutState.PENDING,
+                "session": "{}:{}".format(home_account_id or "", generation),
+                }
+            self._signout_states[home_account_id] = {
+                "state": self._SignoutState.PENDING,
+                "generation": generation,
+                "receipt": receipt,
+                }
+            return dict(receipt)
+
+    def observe_signout_result(self, receipt, broker_outcome="not_attempted",
+                               broker_error=None):
+        """Fold a broker's sign-out outcome into the receipt and return it.
+
+        ``receipt`` must be the object previously returned by
+        :meth:`begin_signout`. A stale receipt (one whose generation is no
+        longer current, e.g. because the user signed in again in between) is
+        refused: it changes nothing and returns ``None``, so a late broker
+        reply can never re-open or re-close a newer session.
+
+        ``broker_outcome`` is one of:
+
+        - ``"not_attempted"``: no broker was involved; the local sign-out is
+          complete.
+        - ``"confirmed"``: the broker acknowledged the sign-out.
+        - ``"pending"``: the broker was asked but has not confirmed yet.
+        - ``"unknown_account"``: the broker did not recognize the account.
+          An unrecognized cleanup is *not* proof that sign-out completed, so
+          the receipt stays pending until a later confirmation arrives.
+        - ``"error"``: the broker reported an error.
+        """
+        with self._lock:
+            current = self._signout_states.get(receipt["home_account_id"])
+            if not current or current.get("generation") != receipt.get("generation"):
+                logger.debug(
+                    "Ignoring a stale sign-out result for generation %s",
+                    receipt.get("generation"))
+                return None
+            updated = dict(receipt)
+            updated["broker_signout"] = broker_outcome
+            updated["broker_error"] = broker_error
+            updated["state"] = (
+                self._SignoutState.CONFIRMED
+                if broker_outcome in ("confirmed", "not_attempted")
+                else self._SignoutState.PENDING)
+            updated["session"] = self._session_for(receipt["home_account_id"])
+            self._signout_states[receipt["home_account_id"]].update({
+                "state": updated["state"],
+                "receipt": updated,
+                })
+            return dict(updated)
+
+    def _is_stale_signout_write(self, home_account_id, signout_generation=None):
+        """Whether *this* request belongs to a session the account signed out of.
+
+        ``signout_generation`` is the generation a caller captured before
+        starting a long-running request. The request is stale when:
+
+        - the account has since signed out (its generation advanced), or
+        - the account is not currently active, i.e. it is signed out locally
+          and has not re-signed in. A silent request can never revive it.
+
+        An unknown account, or one that is active again after a normal
+        re-login, is not stale.
+        """
+        if not home_account_id:
+            return False
+        with self._lock:
+            current = self._signout_states.get(home_account_id)
+            if not current:
+                return False
+            if (signout_generation is not None
+                    and signout_generation != current.get("generation")):
+                return True
+            return current.get("state") != self._SignoutState.ACTIVE
+
+    def _claim_account_write(self, home_account_id, signout_generation=None,
+                             establishes_account=False):
+        """Decide whether a token response may be stored for *home_account_id*.
+
+        Returns ``(allowed, progress)``. The rules are:
+
+        - A request that started before the account signed out carries an older
+          generation and is refused.
+        - A silent request that started after the sign-out is refused too: a
+          silent refresh can never resurrect an account the user signed out.
+        - Only an account-establishing flow (interactive sign-in, auth code,
+          device code, ROPC, federation) opens a new generation, which is how a
+          normal re-login gets its own session identifier.
+        - An account that was never signed out, or has already re-signed in,
+          accepts ordinary writes.
+        """
+        if not home_account_id:
+            return True, None
+        with self._lock:
+            current = self._signout_states.get(home_account_id)
+            progress = self.get_signout_progress(home_account_id)
+            if not current:
+                return True, progress
+            if (signout_generation is not None
+                    and signout_generation != current.get("generation")):
+                return False, progress
+            if current.get("state") == self._SignoutState.ACTIVE:
+                return True, progress
+            if not establishes_account:
+                return False, progress
+            # A fresh authorization. Give it a new generation and clear the
+            # receipt left behind by the previous sign-out.
+            self._signout_states[home_account_id] = {
+                "state": self._SignoutState.ACTIVE,
+                "generation": current.get("generation", 0) + 1,
+                "receipt": None,
+                }
+            return True, self.get_signout_progress(home_account_id)
+
     @staticmethod
     def _is_matching(entry: dict, query: dict, target_set: set = None) -> bool:
         query_with_lowercase_environment = {
@@ -373,8 +584,23 @@ class TokenCache(object):
             DeprecationWarning)
         return list(self.search(credential_type, target=target, query=query, now=now))
 
-    def add(self, event, now=None):
-        """Handle a token obtaining event, and add tokens into cache."""
+    def add(self, event, now=None, signout_generation=None,
+            establishes_account=None):
+        """Handle a token obtaining event, and add tokens into cache.
+
+        ``signout_generation`` is optional. Callers that started a long
+        request should pass the account's sign-out generation as it was when
+        the request started; a response whose generation is no longer current
+        is then discarded instead of being written back. This is what keeps a
+        late reply from an old session from re-populating an account the user
+        already signed out.
+
+        ``establishes_account`` overrides the grant-type heuristic. Pass
+        ``False`` for a silent request (which may otherwise look like a fresh
+        broker sign-in) and ``True`` for an interactive sign-in.
+
+        Returns a small outcome dict; existing callers may ignore it.
+        """
         def make_clean_copy(dictionary, sensitive_fields):  # Masks sensitive info
             return {
                 k: "********" if k in sensitive_fields else v
@@ -405,7 +631,9 @@ class TokenCache(object):
             indent=4, sort_keys=True,
             default=str,  # assertion is in bytes in Python 3
         ))
-        return self.__add(event, now=now)
+        return self.__add(
+            event, now=now, signout_generation=signout_generation,
+            establishes_account=establishes_account)
 
     def __parse_account(self, response, id_token_claims):
         """Return client_info and home_account_id"""
@@ -420,7 +648,8 @@ class TokenCache(object):
         # client_credentials flow will reach this code path
         return {}, None
 
-    def __add(self, event, now=None):
+    def __add(self, event, now=None, signout_generation=None,
+              establishes_account=None):
         # event typically contains: client_id, scope, token_endpoint,
         # response, params, data, grant_type
         environment = realm = None
@@ -443,6 +672,19 @@ class TokenCache(object):
 
         with self._lock:
             now = int(time.time() if now is None else now)
+
+            if establishes_account is None:
+                establishes_account = (
+                    event.get("grant_type") in _ACCOUNT_ESTABLISHING_GRANT_TYPES)
+            allowed, progress = self._claim_account_write(
+                home_account_id, signout_generation=signout_generation,
+                establishes_account=establishes_account)
+            if not allowed:
+                logger.debug(
+                    "Discarding a %s response for a signed-out account (generation %s)",
+                    event.get("grant_type"), signout_generation)
+                return {"stored": False, "reason": "signout",
+                        "signout": progress}
 
             if access_token:
                 default_expires_in = (  # https://www.rfc-editor.org/rfc/rfc6749#section-5.1
@@ -501,8 +743,7 @@ class TokenCache(object):
                     # "client_info": response.get("client_info"),  # Optional
                     }
                 grant_types_that_establish_an_account = (
-                    _GRANT_TYPE_BROKER, "authorization_code", "password",
-                    Client.DEVICE_FLOW["GRANT_TYPE"], "user_fic")
+                    _ACCOUNT_ESTABLISHING_GRANT_TYPES)
                 if event.get("grant_type") in grant_types_that_establish_an_account:
                     account["account_source"] = event["grant_type"]
                 self.modify(self.CredentialType.ACCOUNT, account, account)
@@ -541,6 +782,10 @@ class TokenCache(object):
                 app_metadata["family_id"] = response.get("foci")
             self.modify(self.CredentialType.APP_METADATA, app_metadata, app_metadata)
 
+            return {"stored": True, "home_account_id": home_account_id,
+                    "session": self._session_for(home_account_id),
+                    "signout": progress}
+
     def modify(self, credential_type, old_entry, new_key_value_pairs=None):
         # Modify the specified old_entry with new_key_value_pairs,
         # or remove the old_entry if the new_key_value_pairs is None.
@@ -569,6 +814,20 @@ class TokenCache(object):
             "secret": new_rt,
             "last_modification_time": str(int(time.time())),  # Optional. Schema defines it as a string.
             })
+
+    def update_rt_if_present(self, rt_item, new_rt):
+        """Rotate an RT only if it is still cached.
+
+        A refresh that was in flight while the user signed out must not
+        resurrect the removed RT. Rotating only an entry that still exists
+        keeps a sign-out authoritative.
+        """
+        key = self.key_makers[self.CredentialType.REFRESH_TOKEN](**rt_item)
+        with self._lock:
+            if key not in self._cache.get(self.CredentialType.REFRESH_TOKEN, {}):
+                logger.debug("Skipping RT rotation for an RT no longer in cache")
+                return None
+        return self.update_rt(rt_item, new_rt)
 
     def remove_at(self, at_item):
         assert at_item.get("credential_type") == self.CredentialType.ACCESS_TOKEN
@@ -619,8 +878,9 @@ class SerializableTokenCache(TokenCache):
     has_state_changed = False
 
     def add(self, event, **kwargs):
-        super(SerializableTokenCache, self).add(event, **kwargs)
+        outcome = super(SerializableTokenCache, self).add(event, **kwargs)
         self.has_state_changed = True
+        return outcome
 
     def modify(self, credential_type, old_entry, new_key_value_pairs=None):
         super(SerializableTokenCache, self).modify(
