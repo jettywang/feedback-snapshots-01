@@ -260,6 +260,8 @@ class BaseClient(object):
         # local copy) keeps the wire body clean while the caller's data dict — used
         # for the cache-add event — still carries it.
         _data.pop("client_claims", None)
+        # Also a cache-key-only marker; it must not leak into the OAuth body.
+        _data.pop("msal_claims_challenge_sha256", None)
 
         if _data.get('scope'):
             _data['scope'] = self._stringify(_data['scope'])

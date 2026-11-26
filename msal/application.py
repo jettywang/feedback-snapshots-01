@@ -23,6 +23,10 @@ from .mex import send_request as mex_send_request
 from .wstrust_request import send_request as wst_send_request
 from .wstrust_response import *
 from .token_cache import TokenCache, _get_username, _GRANT_TYPE_BROKER, _compute_ext_cache_key, _parse_claims_or_raise, _merge_claims
+from .claims_challenge import (
+    InteractionStatus, ClaimsChallengeUpgrade, ClaimsChallengeUpgradeError,
+    challenge_cache_data, is_cancellation_exception, is_cancellation_response,
+)
 import msal.telemetry
 from .region import _detect_region, _validate_region
 from .throttled_http_client import ThrottledHttpClient
@@ -151,6 +155,24 @@ def _pii_less_home_account_id(home_account_id):
     parts = home_account_id.split(".")  # It could contain one or two parts
     parts[0] = "********"
     return ".".join(parts)
+
+
+def _claims_challenge_status(result, claims_challenge):
+    if not claims_challenge:
+        return InteractionStatus.NORMAL
+    if not isinstance(result, dict):
+        return InteractionStatus.CONFIRMATION_REQUIRED
+    if is_cancellation_response(result):
+        return InteractionStatus.CANCELLED
+    if "access_token" in result and "error" not in result:
+        return InteractionStatus.CONFIRMED
+    return InteractionStatus.CONFIRMATION_REQUIRED
+
+
+def _annotate_interaction_status(result, status):
+    if isinstance(result, dict) and "access_token" in result and "error" not in result:
+        result.setdefault("interaction_status", status)
+    return result
 
 
 def _clean_up(result):
@@ -784,6 +806,8 @@ class ClientApplication(object):
         self.authority_groups = {}
         self._telemetry_buffer = {}
         self._telemetry_lock = Lock()
+        self._claims_challenge_lock = Lock()
+        self._claims_challenge_upgrades = {}
         _msal_extension_check()
 
 
@@ -1585,10 +1609,17 @@ The reserved list: {}""".format(list(scope_set), list(reserved_scope)))
         if forwarded_client_claims is not None:
             kwargs["data"] = kwargs.get("data", {})
             _stash_client_claims(forwarded_client_claims, kwargs["data"])
+        if claims_challenge:
+            kwargs["data"] = dict(
+                kwargs.get("data") or {},
+                **challenge_cache_data(claims_challenge))
         result = _clean_up(self._acquire_token_silent_with_error(
             scopes, account, authority=authority, force_refresh=force_refresh,
             claims_challenge=claims_challenge, auth_scheme=auth_scheme, **kwargs))
-        return result if result and "error" not in result else None
+        if result and "error" not in result:
+            return _annotate_interaction_status(
+                result, _claims_challenge_status(result, claims_challenge))
+        return None
 
     def acquire_token_silent_with_error(
             self,
@@ -1654,9 +1685,15 @@ The reserved list: {}""".format(list(scope_set), list(reserved_scope)))
         if forwarded_client_claims is not None:
             kwargs["data"] = kwargs.get("data", {})
             _stash_client_claims(forwarded_client_claims, kwargs["data"])
-        return _clean_up(self._acquire_token_silent_with_error(
+        if claims_challenge:
+            kwargs["data"] = dict(
+                kwargs.get("data") or {},
+                **challenge_cache_data(claims_challenge))
+        result = _clean_up(self._acquire_token_silent_with_error(
             scopes, account, authority=authority, force_refresh=force_refresh,
             claims_challenge=claims_challenge, auth_scheme=auth_scheme, **kwargs))
+        return _annotate_interaction_status(
+            result, _claims_challenge_status(result, claims_challenge))
 
     def _acquire_token_silent_with_error(
             self,
@@ -2156,6 +2193,7 @@ class PublicClientApplication(ClientApplication):  # browser app or mobile app
         enable_broker_on_mac=None,
         enable_broker_on_linux=None,
         enable_broker_on_wsl=None,
+        claims_challenge_browser_fallback=True,
         **kwargs):
         """Same as :func:`ClientApplication.__init__`,
         except that ``client_credential`` parameter shall remain ``None``.
@@ -2249,6 +2287,12 @@ class PublicClientApplication(ClientApplication):  # browser app or mobile app
             This parameter defaults to None, which means MSAL will not utilize a broker.
 
             New in MSAL Python 1.33.0.
+
+        :param boolean claims_challenge_browser_fallback:
+            Whether :meth:`start_claims_challenge_upgrade` may fall back to the
+            system browser when a broker attempt fails or is cancelled.  The
+            default is ``True``.  Set it to ``False`` to keep the upgrade
+            broker-only.  Ordinary interactive sign-in is unaffected.
         """
         if client_credential is not None:
             raise ValueError("Public Client should not possess credentials")
@@ -2259,6 +2303,9 @@ class PublicClientApplication(ClientApplication):  # browser app or mobile app
             or enable_broker_on_linux and sys.platform == "linux"
             or enable_broker_on_wsl and is_wsl()
             )
+
+        self._claims_challenge_browser_fallback = bool(
+            claims_challenge_browser_fallback)
 
         super(PublicClientApplication, self).__init__(
             client_id, client_credential=None, **kwargs)
@@ -2374,6 +2421,12 @@ class PublicClientApplication(ClientApplication):  # browser app or mobile app
             - A dict containing no "error" key,
               and typically contains an "access_token" key.
             - A dict containing an "error" key, when token refresh failed.
+
+            Successful results also contain ``interaction_status``:
+            ``"normal"`` for an ordinary sign-in, and ``"confirmed"`` when
+            ``claims_challenge`` was supplied and the challenge was completed.
+            A challenge-bound result is cached separately from ordinary
+            silent-cache entries.
         """
         data = kwargs.pop("data", {})
         enable_msa_passthrough = kwargs.pop(  # MUST remove it from kwargs
@@ -2398,6 +2451,8 @@ class PublicClientApplication(ClientApplication):  # browser app or mobile app
             return self._acquire_token_by_cloud_shell(scopes, data=data)
         claims = _merge_claims_challenge_and_capabilities(
             self._client_capabilities, claims_challenge)
+        if claims_challenge:
+            data = dict(data, **challenge_cache_data(claims_challenge))
         if self._enable_broker and (sys.platform in ("win32", "darwin") or not is_ssh_cert_or_pop_request):
             if parent_window_handle is None:
                 raise ValueError(
@@ -2421,7 +2476,10 @@ class PublicClientApplication(ClientApplication):  # browser app or mobile app
                 login_hint=login_hint,
                 max_age=max_age,
                 )
-            return self._process_broker_response(response, scopes, data)
+            response = self._process_broker_response(response, scopes, data)
+            _annotate_interaction_status(
+                response, _claims_challenge_status(response, claims_challenge))
+            return response
 
         if isinstance(auth_scheme, msal.auth_scheme.PopAuthScheme) and sys.platform == "linux":
             raise ValueError("POP is not supported on Linux")
@@ -2450,8 +2508,232 @@ class PublicClientApplication(ClientApplication):  # browser app or mobile app
             **kwargs))
         if "access_token" in response:
             response[self._TOKEN_SOURCE] = self._TOKEN_SOURCE_IDP
+        _annotate_interaction_status(
+            response, _claims_challenge_status(response, claims_challenge))
         telemetry_context.update_telemetry(response)
         return response
+
+    # ------------------------------------------------------------------
+    # Claims-challenge interactive upgrades
+    # ------------------------------------------------------------------
+    def start_claims_challenge_upgrade(
+            self, scopes, account, claims_challenge, **options):
+        """Start a trackable interactive upgrade for one business request.
+
+        The upgrade is bound to the original account, the requested resource
+        scopes, and the canonical claims challenge.  Ordinary silent cache
+        behavior is unchanged; an upgrade credential is stored with a
+        challenge-derived extended cache key so it cannot satisfy a plain
+        ``acquire_token_silent`` call.
+
+        :return: A :class:`msal.ClaimsChallengeUpgrade` object.  Call its
+            ``start()`` (or ``reopen()``) to execute the attempt.
+        """
+        if not account:
+            raise ClaimsChallengeUpgradeError(
+                "A claims-challenge upgrade requires the original account")
+        if not scopes:
+            raise ClaimsChallengeUpgradeError(
+                "A claims-challenge upgrade requires the resource scopes")
+        if not claims_challenge:
+            raise ClaimsChallengeUpgradeError(
+                "A claims-challenge upgrade requires claims_challenge")
+        upgrade = ClaimsChallengeUpgrade(
+            self, scopes, account, claims_challenge, **options)
+        with self._claims_challenge_lock:
+            self._claims_challenge_upgrades[upgrade.upgrade_id] = upgrade
+        return upgrade
+
+    def get_claims_challenge_upgrade(self, upgrade_id):
+        """Return a previously started upgrade, or ``None``."""
+        with self._claims_challenge_lock:
+            return self._claims_challenge_upgrades.get(upgrade_id)
+
+    def apply_claims_challenge_receipt(self, receipt):
+        """Offer an out-of-band receipt to the active upgrade it belongs to.
+
+        A stale receipt (older generation, foreign account, resource, or
+        challenge) is retained for audit but cannot change the current
+        attempt's outcome.
+        """
+        if not isinstance(receipt, dict):
+            raise ClaimsChallengeUpgradeError("receipt must be a dict")
+        upgrade_id = receipt.get("upgrade_id")
+        with self._claims_challenge_lock:
+            upgrade = self._claims_challenge_upgrades.get(upgrade_id)
+        if upgrade is None:
+            return False
+        return upgrade.submit_receipt(receipt)
+
+    def _claims_challenge_interactive_options(self, upgrade):
+        options = upgrade.options
+        return {
+            "prompt": options.get("prompt"),
+            "login_hint": options.get("login_hint"),
+            "domain_hint": options.get("domain_hint"),
+            "timeout": options.get("timeout"),
+            "port": options.get("port"),
+            "max_age": options.get("max_age"),
+            "parent_window_handle": options.get("parent_window_handle"),
+            "on_before_launching_ui": options.get("on_before_launching_ui"),
+            "extra_scopes_to_consent": options.get("extra_scopes_to_consent"),
+            "auth_scheme": options.get("auth_scheme"),
+            "enable_msa_passthrough": options.get("enable_msa_passthrough"),
+            "browser_fallback": options.get(
+                "browser_fallback", self._claims_challenge_browser_fallback),
+            "skip_broker": options.get("skip_broker", False),
+            "browser_kwargs": options.get("browser_kwargs") or {},
+            "data": options.get("data") or {},
+        }, dict(options.get("data") or {})
+
+    def _execute_claims_challenge_upgrade(self, upgrade):
+        # Snapshot the generation before any UI/network wait.  A completion
+        # from this generation is ignored if the user has reopened meanwhile.
+        attempt_id = upgrade.attempt_id
+        options, data = self._claims_challenge_interactive_options(upgrade)
+        # The cache-key-only marker isolates this upgrade's credential.  It is
+        # deterministic for the canonical challenge, so a successful receipt
+        # remains usable across a reopen of the same conditions.
+        data.update(challenge_cache_data(upgrade.claims_challenge))
+        parent_window_handle = (options.get("parent_window_handle")
+            or self.CONSOLE_WINDOW_HANDLE)
+        broker_enabled = (
+            self._enable_broker and not options.get("skip_broker"))
+        if broker_enabled:
+            if parent_window_handle is None:
+                raise ValueError(
+                    "parent_window_handle is required when you opted into using broker. "
+                    "You need to provide the window handle of your GUI application, "
+                    "or use msal.PublicClientApplication.CONSOLE_WINDOW_HANDLE "
+                    "when and only when your application is a console app.")
+            upgrade.note_attempt_started("broker", attempt_id=attempt_id)
+            broker_data = {
+                k: v for k, v in data.items()
+                if k != "msal_claims_challenge_sha256"}
+            try:
+                response = self._acquire_token_interactive_via_broker(
+                    upgrade.scopes,
+                    parent_window_handle,
+                    options.get("enable_msa_passthrough", False),
+                    upgrade.claims_challenge,
+                    broker_data,
+                    options.get("on_before_launching_ui") or (lambda **kwargs: None),
+                    options.get("auth_scheme"),
+                    prompt=options.get("prompt"),
+                    login_hint=options.get("login_hint"),
+                    max_age=options.get("max_age"),
+                    )
+            except Exception as ex:
+                if not is_cancellation_exception(ex):
+                    raise
+                return upgrade.cancel(reason=str(ex) or "user_cancelled",
+                    source="broker", attempt_id=attempt_id)
+            if isinstance(response, dict) and "error" not in response:
+                processed = self._process_broker_response(
+                    dict(response), upgrade.scopes, data)
+                return self._finish_claims_challenge_attempt(
+                    upgrade, processed, "broker", attempt_id=attempt_id)
+            if isinstance(response, dict) and is_cancellation_response(response):
+                return upgrade.accept_result(
+                    response, "broker", attempt_id=attempt_id)
+            if not options.get("browser_fallback"):
+                upgrade.note_attempt_failure(
+                    "broker", response or {}, attempt_id=attempt_id)
+                return upgrade.result_with_metadata(
+                    base=response or {},
+                    interaction_status=InteractionStatus.CONFIRMATION_REQUIRED)
+            upgrade.note_attempt_failure(
+                "broker", response or {}, fallback=True,
+                attempt_id=attempt_id)
+
+        return self._claims_challenge_browser_attempt(
+            upgrade, options, data,
+            fallback=bool(broker_enabled), attempt_id=attempt_id)
+
+    def _claims_challenge_browser_attempt(self, upgrade, options, data,
+            fallback=False, attempt_id=None):
+        attempt = upgrade.snapshot()
+        if attempt_id and attempt["attempt_id"] != attempt_id:
+            upgrade.note_attempt_started("browser", attempt_id=attempt_id)
+            return upgrade.result_with_metadata()
+        upgrade.note_attempt_started("browser", attempt_id=attempt_id)
+        if fallback:
+            upgrade._record("browser_fallback_started")
+        on_before_launching_ui = options.get("on_before_launching_ui") or (
+            lambda **kwargs: None)
+        on_before_launching_ui(ui="browser")
+        try:
+            response = self.client.obtain_token_by_browser(
+                scope=self._decorate_scope(upgrade.scopes),
+                extra_scope_to_consent=options.get("extra_scopes_to_consent"),
+                redirect_uri="http://localhost:{port}".format(
+                    port=options.get("port") or 0),
+                prompt=options.get("prompt"),
+                login_hint=options.get("login_hint"),
+                max_age=options.get("max_age"),
+                timeout=options.get("timeout"),
+                auth_params={
+                    "claims": upgrade.claims_challenge,
+                    "domain_hint": options.get("domain_hint"),
+                },
+                data=dict(data, claims=upgrade.claims_challenge),
+                browser_name=_preferred_browser(),
+                **{k: v for k, v in (options.get("browser_kwargs") or {}).items()})
+        except Exception as ex:
+            if not is_cancellation_exception(ex):
+                raise
+            return upgrade.cancel(reason=str(ex) or "user_cancelled",
+                source="browser", attempt_id=attempt_id)
+        response = _clean_up(response)
+        if is_cancellation_response(response):
+            return upgrade.accept_result(
+                response, "browser", attempt_id=attempt_id)
+        if "access_token" not in response:
+            upgrade.note_attempt_failure(
+                "browser", response, attempt_id=attempt_id)
+            return upgrade.result_with_metadata(
+                base=response,
+                interaction_status=InteractionStatus.CONFIRMATION_REQUIRED)
+        # Make the challenge-bound credential durable even when the browser
+        # helper is substituted by an in-memory fake; with the real helper this
+        # re-add is idempotent because it produces the same extended cache key.
+        scope = upgrade.scopes
+        if isinstance(response.get("scope"), str) and response["scope"]:
+            scope = response["scope"].split()
+        self.token_cache.add(dict(
+            client_id=self.client_id,
+            scope=scope,
+            token_endpoint=self.authority.token_endpoint,
+            response=response,
+            data=dict(data, claims=upgrade.claims_challenge),
+            environment=self.authority.instance,
+            ))
+        response[self._TOKEN_SOURCE] = self._TOKEN_SOURCE_IDP
+        return self._finish_claims_challenge_attempt(
+            upgrade, response, "browser", attempt_id=attempt_id)
+
+    def _finish_claims_challenge_attempt(self, upgrade, response, source,
+            attempt_id=None):
+        if not isinstance(response, dict) or "access_token" not in response:
+            upgrade.note_attempt_failure(
+                source, response or {}, attempt_id=attempt_id)
+            return upgrade.result_with_metadata(
+                base=response or {},
+                interaction_status=InteractionStatus.CONFIRMATION_REQUIRED)
+        # Response was processed by _process_broker_response for broker; it has
+        # already been added to the cache with the challenge-bound ext key.
+        receipt = upgrade.accept_result(
+            response, source, attempt_id=attempt_id)
+        if receipt is None:
+            return upgrade.result_with_metadata(
+                base=dict(response,
+                    error="claims_challenge_account_mismatch",
+                    error_description=(
+                        "The completed upgrade belongs to a different account")),
+                interaction_status=InteractionStatus.CONFIRMATION_REQUIRED)
+        return upgrade.result_with_metadata(
+            base=response,
+            interaction_status=InteractionStatus.CONFIRMED)
 
     def _acquire_token_interactive_via_broker(
             self,

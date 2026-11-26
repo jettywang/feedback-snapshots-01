@@ -131,6 +131,34 @@ See `SerializableTokenCache` for example.
 .. autoclass:: msal.SerializableTokenCache
    :members:
 
+Claims-challenge interactive upgrades
+-------------------------------------
+
+A resource may answer a business request with a ``claims_challenge`` that asks
+for one additional identity confirmation.  Use
+:meth:`msal.PublicClientApplication.start_claims_challenge_upgrade` to track that
+upgrade separately from ordinary sign-in and silent reads.  A result carries an
+``interaction_status`` of ``normal``, ``confirmation_required``,
+``confirmed``, or ``cancelled``; broker attempts, browser fallback, and final
+credentials are recorded in the upgrade timeline.
+
+The upgrade credential is cached with a challenge-derived extended cache key,
+so an ordinary ``acquire_token_silent`` call keeps its existing cache behavior
+and cannot consume the upgrade result.  Receipts are bound to the original
+account, resource scopes, and canonical challenge, and a receipt from an older
+attempt can never change a newer attempt.
+
+.. autoclass:: msal.InteractionStatus
+   :members:
+
+.. autoclass:: msal.ClaimsChallengeUpgrade
+   :members:
+
+.. autoclass:: msal.ClaimsChallengeReceipt
+   :members:
+
+.. autoclass:: msal.ClaimsChallengeUpgradeError
+
 Prompt
 ------
 .. autoclass:: msal.Prompt
