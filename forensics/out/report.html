@@ -1,0 +1,1888 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>跨服务 trace 传播取证 · e2e-jw175-0001</title>
+<style>
+:root {
+  --ink: #17212b;
+  --muted: #5d6b7a;
+  --line: #d7dee7;
+  --panel: #ffffff;
+  --bg: #f3f6fa;
+  --blue: #1d5fbf;
+  --blue-soft: #e8f0fc;
+  --purple: #6b3fa0;
+  --purple-soft: #f1eafb;
+  --orange: #a85a00;
+  --orange-soft: #fff0dd;
+  --red: #b3261e;
+  --red-soft: #fdecea;
+  --green: #1f6b45;
+  --green-soft: #e7f5ed;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0; background: var(--bg); color: var(--ink);
+  font: 14px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+        "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+}
+main { max-width: 1240px; margin: 0 auto; padding: 28px 22px 64px; }
+header.hero {
+  background: linear-gradient(135deg, #10233c 0%, #1d5fbf 62%, #3b82c4 100%);
+  color: #fff; border-radius: 14px; padding: 26px 28px 22px;
+  box-shadow: 0 8px 24px rgba(16, 35, 60, .18);
+}
+header.hero h1 { margin: 0 0 6px; font-size: 25px; line-height: 1.25; }
+header.hero p { margin: 0; color: #dbe8f7; }
+.hero-meta { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 16px; }
+.hero-meta span {
+  border: 1px solid rgba(255,255,255,.35); background: rgba(255,255,255,.12);
+  border-radius: 999px; padding: 4px 11px; font-size: 12px;
+}
+.mono { font-family: var(--mono); }
+h2 { font-size: 19px; margin: 32px 0 10px; padding-bottom: 6px; border-bottom: 2px solid var(--line); }
+h3 { font-size: 15px; margin: 20px 0 8px; }
+p.note { color: var(--muted); margin: 6px 0 14px; }
+.cards { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin-top: 18px; }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px 15px; }
+.card .k { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
+.card .v { font-size: 17px; font-weight: 650; margin-top: 4px; overflow-wrap: anywhere; }
+.card .s { color: var(--muted); font-size: 12px; margin-top: 4px; }
+.panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px; overflow-x: auto; }
+.card.hot { border-color: #e0b06a; box-shadow: inset 0 0 0 1px #f2d3a7; }
+.legend { display: flex; flex-wrap: wrap; gap: 10px; margin: 8px 0 0; }
+.badge, .tag {
+  display: inline-block; border-radius: 999px; padding: 2px 9px; font-size: 12px;
+  font-weight: 600; white-space: nowrap; border: 1px solid transparent;
+}
+.badge.parent, .tag.parent { color: var(--blue); background: var(--blue-soft); border-color: #c8daf7; }
+.badge.state, .tag.state { color: var(--purple); background: var(--purple-soft); border-color: #ddcdf5; }
+.badge.baggage, .tag.baggage { color: var(--orange); background: var(--orange-soft); border-color: #f2d3a7; }
+.badge.sampling, .tag.sampling { color: var(--red); background: var(--red-soft); border-color: #f3c3c0; }
+.badge.ok { color: var(--green); background: var(--green-soft); border-color: #bfe3cf; }
+.badge.neutral { color: var(--muted); background: #eef2f6; border-color: #dbe3ec; }
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+th, td { border: 1px solid var(--line); padding: 8px 9px; text-align: left; vertical-align: top; }
+th { background: #eef3f8; font-weight: 650; white-space: nowrap; }
+tr.divergent td { background: #fffaf0; }
+tr.divergent td:first-child { border-left: 4px solid var(--orange); }
+td code, p code, li code { font-family: var(--mono); font-size: 12px; background: #eef2f6; border-radius: 4px; padding: 1px 5px; }
+pre {
+  background: #0f1c2b; color: #e7eef7; border-radius: 8px; padding: 14px 16px;
+  overflow-x: auto; font: 12px/1.5 var(--mono);
+}
+.flow { width: 100%; height: auto; display: block; }
+.flow text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", sans-serif; }
+.flow .box { fill: #fff; stroke: #cbd5e1; stroke-width: 1.4; }
+.flow .box.hot { stroke: #a85a00; stroke-width: 2.2; }
+.flow .stage { fill: #f4f7fb; stroke: #cbd5e1; stroke-width: 1.2; }
+.flow .arrow { stroke: #7b8b9d; stroke-width: 1.6; fill: none; marker-end: url(#arrow); }
+.flow .title { font-size: 13px; font-weight: 650; fill: #17212b; }
+.flow .small { font-size: 11px; fill: #5d6b7a; }
+.flow .val { font-size: 11px; fill: #17212b; font-family: var(--mono); }
+.two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+.stack { display: grid; gap: 8px; }
+.finding { border-left: 4px solid var(--line); padding: 10px 14px; margin: 10px 0; background: #fbfcfe; border-radius: 0 8px 8px 0; }
+.finding strong { display: block; margin-bottom: 3px; }
+.finding.parent { border-left-color: var(--blue); }
+.finding.state { border-left-color: var(--purple); }
+.finding.baggage { border-left-color: var(--orange); }
+.finding.sampling { border-left-color: var(--red); }
+.finding.neutral { border-left-color: var(--muted); }
+ul.clean { margin: 6px 0 0 18px; padding: 0; }
+ul.clean li { margin: 4px 0; }
+details { margin-top: 10px; }
+summary { cursor: pointer; color: var(--blue); }
+footer { color: var(--muted); font-size: 12px; margin-top: 36px; }
+@media (max-width: 900px) {
+  .cards { grid-template-columns: 1fr 1fr; }
+  .two-col { grid-template-columns: 1fr; }
+}
+@media print {
+  body { background: #fff; }
+  main { max-width: none; padding: 0; }
+  header.hero { box-shadow: none; }
+  .panel, .card { break-inside: avoid; }
+}
+</style>
+</head>
+<body>
+<main>
+<header class="hero">
+  <h1>跨服务 trace 传播取证：同 trace ID，不同采样来源与业务关联</h1>
+  <p>离线复跑 OpenTelemetry Python 复合传播器；用真实 extract / inject 与真实 SDK 子 span 定位首个差异阶段。</p>
+  <div class="hero-meta">
+    <span>端到端关联号 <b class="mono">e2e-jw175-0001</b></span>
+    <span>schema <b class="mono">otel-propagator-forensics/v1</b></span>
+    <span>首个差异：阶段 <b>3</b></span>
+    <span>两种 profile 共享 tracecontext,baggage 前缀</span>
+  </div>
+</header>
+
+<div class="cards">
+  <div class="card"><div class="k">相同 trace ID</div><div class="v mono">4bf92f3577b34da6a3ce929d0e0e4736</div><div class="s">full 与 partial 两侧均相同</div></div>
+  <div class="card"><div class="k">首个差异传播器</div><div class="v">阶段 3 · B3 vs Jaeger</div><div class="s">阶段 1/2 逐字段一致</div></div>
+  <div class="card"><div class="k">完整请求 · parent</div><div class="v mono">b3b3b3b3b3 / 0a0a0a0a0a</div><div class="s">A/B3 与 B/Jaeger 不同</div></div>
+  <div class="card"><div class="k">缺字段请求 · 采样</div><div class="v">false / true</div><div class="s">A 丢子 span；B 正常导出</div></div>
+</div>
+
+<h2>结论先行</h2>
+<div class="panel">
+  <p class="note">以下为<strong>完整请求</strong>；两个 profile 的入站载体完全相同，差异只可能从第三个传播器开始。实测首次差异确实落在阶段 3。缺字段请求的差异见下一节。</p>
+  <div class="two-col">
+    <div>
+      <h3>A：tracecontext,baggage,b3</h3>
+      <div class="stack">
+        <div class="finding parent"><strong>parent 改变</strong><div>最终 parent=<code>b3b3b3b3b3b3b3b3</code>；下游以 B3 span 作为远端父。</div></div>
+        <div class="finding state"><strong>tracestate 不再适用</strong><div>阶段 2 仍有 vendor=alpha,region=cn-north；阶段 3 B3 重建 SpanContext 后清空。</div></div>
+        <div class="finding neutral"><strong>baggage 保持 W3C 值</strong><div>tenant=blue；request.id=e2e-jw175-0001。</div></div>
+      </div>
+    </div>
+    <div>
+      <h3>B：tracecontext,baggage,jaeger</h3>
+      <div class="stack">
+        <div class="finding parent"><strong>parent 改变</strong><div>最终 parent=<code>0a0a0a0a0a0a0a0a</code>；下游以 Jaeger span 作为远端父。</div></div>
+        <div class="finding state"><strong>tracestate 不再适用</strong><div>同样在阶段 3 重建 SpanContext 后清空。</div></div>
+        <div class="finding baggage"><strong>baggage 被另一个传播器改写</strong><div>Jaeger 的 uberctx-tenant=green 覆盖 W3C baggage 的 tenant=blue。</div></div>
+      </div>
+    </div>
+  </div>
+  <p><strong>为何 trace ID 相同仍可能需要两种排查结论：</strong>A 侧看到的是 B3 parent + blue baggage；B 侧看到的是 Jaeger parent + green baggage。按 trace ID 搜索会返回同一条 trace，但按 parent 还原服务跳转、按 baggage 找业务租户时会得到两条不同结论。缺字段请求下，A 还额外出现 B3 采样丢失，子 span 不导出；B 仍导出。两者不能共用同一条“全链路已齐”的判断。</p>
+</div>
+
+<h2>图 1 · 首次分歧发生在阶段 3</h2>
+<div class="panel">
+  
+<svg class="flow" viewBox="0 0 1180 430" role="img" aria-label="传播器阶段与首次分歧流程图">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#7b8b9d"></path>
+    </marker>
+  </defs>
+  <text x="20" y="26" class="title">入站载体</text>
+  <rect class="box" x="20" y="38" width="205" height="112" rx="9"></rect>
+  <text x="34" y="60" class="small">traceparent</text>
+  <text x="34" y="78" class="val">…929d0e0e4736-00f067…-01</text>
+  <text x="34" y="100" class="small">tracestate / baggage</text>
+  <text x="34" y="118" class="val">vendor=alpha…</text>
+  <text x="34" y="136" class="small">B3 / Jaeger 字段</text>
+
+  <path class="arrow" d="M225 94 L270 94"></path>
+  <rect class="stage" x="270" y="38" width="165" height="112" rx="9"></rect>
+  <text x="284" y="60" class="title">阶段 1</text>
+  <text x="284" y="80" class="small">TraceContext</text>
+  <text x="284" y="100" class="val">parent 00f067…</text>
+  <text x="284" y="120" class="val">state present</text>
+
+  <path class="arrow" d="M435 94 L480 94"></path>
+  <rect class="stage" x="480" y="38" width="165" height="112" rx="9"></rect>
+  <text x="494" y="60" class="title">阶段 2</text>
+  <text x="494" y="80" class="small">W3C Baggage</text>
+  <text x="494" y="100" class="val">baggage tenant=blue</text>
+  <text x="494" y="120" class="val">span 不变</text>
+
+  <path class="arrow" d="M645 94 L700 70"></path>
+  <path class="arrow" d="M645 112 L700 286"></path>
+
+  <rect class="stage hot" x="700" y="34" width="196" height="96" rx="9"></rect>
+  <text x="714" y="56" class="title">阶段 3A：B3MultiFormat</text>
+  <text x="714" y="76" class="small">x-b3-*</text>
+  <text x="714" y="96" class="val">parent b3b3…</text>
+  <text x="714" y="116" class="val">tracestate → 空</text>
+
+  <rect class="stage hot" x="700" y="274" width="196" height="96" rx="9"></rect>
+  <text x="714" y="296" class="title">阶段 3B：Jaeger</text>
+  <text x="714" y="316" class="small">uber-trace-id / uberctx-*</text>
+  <text x="714" y="336" class="val">parent 0a0a…</text>
+  <text x="714" y="356" class="val">tracestate → 空</text>
+
+  <path class="arrow" d="M896 82 L950 82"></path>
+  <path class="arrow" d="M896 322 L950 322"></path>
+
+  <rect class="box" x="950" y="26" width="210" height="142" rx="9"></rect>
+  <text x="964" y="48" class="title">A 下游</text>
+  <text x="964" y="68" class="small">trace ID 相同</text>
+  <text x="964" y="88" class="val">4bf92f3577b34da6…</text>
+  <text x="964" y="108" class="val">parent b3b3b3b3…</text>
+  <text x="964" y="128" class="val">sampled</text>
+  <text x="964" y="148" class="val">tenant=blue</text>
+
+  <rect class="box" x="950" y="266" width="210" height="142" rx="9"></rect>
+  <text x="964" y="288" class="title">B 下游</text>
+  <text x="964" y="308" class="small">trace ID 相同</text>
+  <text x="964" y="328" class="val">4bf92f3577b34da6…</text>
+  <text x="964" y="348" class="val">parent 0a0a0a0a…</text>
+  <text x="964" y="368" class="val">sampled</text>
+  <text x="964" y="388" class="val">tenant=green</text>
+
+  <text x="700" y="404" class="small">首次差异：阶段 3（第三传播器）</text>
+  <text x="20" y="404" class="small">阶段 1、2 在两个 profile 中逐字节一致 → 分歧不可能来自入站 W3C 解析或 baggage 读取。</text>
+</svg>
+  <div class="legend">
+    <span class="tag parent">parent 改变</span>
+    <span class="tag state">tracestate 不再适用</span>
+    <span class="tag baggage">baggage 被改写</span>
+    <span class="tag sampling">采样结论改变</span>
+    <span class="small">橙色边框 = 该阶段 A/B 返回上下文出现差异。</span>
+  </div>
+</div>
+
+<h2>四类观察（每个阶段都记录）</h2>
+<div class="panel">
+  <table><thead><tr><th>观察</th><th>内容</th><th>证据路径</th></tr></thead>
+  <tbody><tr><td><strong>入站载体</strong></td><td>请求级入站 header，按 key 排序；三个 stage 都从同一份载体重新读取，因此前两阶段一致可以排除入站差异。</td><td><code>runs[].stages[].inbound_carrier</code></td></tr><tr><td><strong>传播器返回的上下文</strong></td><td>span_id / is_remote / sampled / trace_flags / tracestate / baggage。</td><td><code>runs[].stages[].returned_context</code></td></tr><tr><td><strong>子 span</strong></td><td>用该阶段上下文真实启动的 SDK SERVER span：是否 recording、是否导出、parent。</td><td><code>runs[].stages[].child_span</code></td></tr><tr><td><strong>最后注入值</strong></td><td>该 profile 从该阶段上下文注入到下游的全部 header。</td><td><code>runs[].stages[].final_injected</code></td></tr></tbody></table>
+  <p class="note">每个 stage 的 <code>final_injected</code> 都是“从该阶段返回的上下文继续注入”的快照，因此可区分“传播器返回的上下文”与“最终真正写出的 header”。</p>
+</div>
+
+<h2>实验矩阵</h2>
+<div class="panel">
+  <h3>两种传播器排列</h3>
+  <table><thead><tr><th>ID</th><th>OTEL_PROPAGATORS 等价值</th><th>阶段顺序</th><th>说明</th></tr></thead>
+  <tbody><tr><td><code>A</code></td><td><code>tracecontext,baggage,b3</code></td><td>TraceContextTextMapPropagator → W3CBaggagePropagator → B3MultiFormat</td><td>Service A terminates W3C then B3.</td></tr><tr><td><code>B</code></td><td><code>tracecontext,baggage,jaeger</code></td><td>TraceContextTextMapPropagator → W3CBaggagePropagator → JaegerPropagator</td><td>Service B terminates W3C then Jaeger.</td></tr></tbody></table>
+  <h3>两个合成请求</h3>
+  <table><thead><tr><th>ID</th><th>类型</th><th>缺失字段</th><th>说明</th></tr></thead>
+  <tbody><tr><td><code>full</code></td><td>完整请求</td><td>无</td><td>所有传播器都能找到自己的字段。</td></tr><tr><td><code>partial</code></td><td>缺少部分追踪字段的合成请求</td><td>tracestate, baggage, x-b3-sampled, uberctx-tenant</td><td>W3C traceparent 仍完整且带 sampled=01；B3 缺 x-b3-sampled；Jaeger 的 uber-trace-id 仍带 flags=1；没有 W3C baggage，也没有 uberctx-*。</td></tr></tbody></table>
+</div>
+
+<h2>图 2 · 逐阶段 A/B 对照</h2>
+<h3>完整请求</h3>
+<div class="panel"><table><thead><tr><th>阶段 / 传播器</th><th>A：tracecontext,baggage,b3</th><th>B：tracecontext,baggage,jaeger</th><th>该阶段 A/B 差异</th></tr></thead><tbody><tr><td><strong>1</strong><br><span class="small">TraceContextTextMapPropagator<br>vs<br>TraceContextTextMapPropagator</span></td><td>parent=<code>00f067aa0ba902b7</code> sampled=<code>true</code> tracestate=<code>vendor=alpha,region=cn-north</code><br><span class="small">child recording=true, exported=1</span></td><td>parent=<code>00f067aa0ba902b7</code> sampled=<code>true</code> tracestate=<code>vendor=alpha,region=cn-north</code><br><span class="small">child recording=true, exported=1</span></td><td><span class="badge neutral">无变化</span></td></tr><tr><td><strong>2</strong><br><span class="small">W3CBaggagePropagator<br>vs<br>W3CBaggagePropagator</span></td><td>parent=<code>00f067aa0ba902b7</code> sampled=<code>true</code> tracestate=<code>vendor=alpha,region=cn-north</code><br><span class="small">child recording=true, exported=1</span></td><td>parent=<code>00f067aa0ba902b7</code> sampled=<code>true</code> tracestate=<code>vendor=alpha,region=cn-north</code><br><span class="small">child recording=true, exported=1</span></td><td><span class="badge neutral">无变化</span></td></tr><tr class="divergent"><td><strong>3</strong><br><span class="small">B3MultiFormat<br>vs<br>JaegerPropagator</span></td><td>parent=<code>b3b3b3b3b3b3b3b3</code> sampled=<code>true</code> tracestate=<code>—</code><br><span class="small">child recording=true, exported=1</span></td><td>parent=<code>0a0a0a0a0a0a0a0a</code> sampled=<code>true</code> tracestate=<code>—</code><br><span class="small">child recording=true, exported=1</span></td><td><span class="tag baggage">baggage 被改写</span> <span class="tag parent">parent 改变</span></td></tr></tbody></table></div>
+<h3>缺少部分追踪字段的合成请求</h3>
+<div class="panel"><table><thead><tr><th>阶段 / 传播器</th><th>A：tracecontext,baggage,b3</th><th>B：tracecontext,baggage,jaeger</th><th>该阶段 A/B 差异</th></tr></thead><tbody><tr><td><strong>1</strong><br><span class="small">TraceContextTextMapPropagator<br>vs<br>TraceContextTextMapPropagator</span></td><td>parent=<code>00f067aa0ba902b7</code> sampled=<code>true</code> tracestate=<code>—</code><br><span class="small">child recording=true, exported=1</span></td><td>parent=<code>00f067aa0ba902b7</code> sampled=<code>true</code> tracestate=<code>—</code><br><span class="small">child recording=true, exported=1</span></td><td><span class="badge neutral">无变化</span></td></tr><tr><td><strong>2</strong><br><span class="small">W3CBaggagePropagator<br>vs<br>W3CBaggagePropagator</span></td><td>parent=<code>00f067aa0ba902b7</code> sampled=<code>true</code> tracestate=<code>—</code><br><span class="small">child recording=true, exported=1</span></td><td>parent=<code>00f067aa0ba902b7</code> sampled=<code>true</code> tracestate=<code>—</code><br><span class="small">child recording=true, exported=1</span></td><td><span class="badge neutral">无变化</span></td></tr><tr class="divergent"><td><strong>3</strong><br><span class="small">B3MultiFormat<br>vs<br>JaegerPropagator</span></td><td>parent=<code>b3b3b3b3b3b3b3b3</code> sampled=<code>false</code> tracestate=<code>—</code><br><span class="small">child recording=false, exported=0</span></td><td>parent=<code>0a0a0a0a0a0a0a0a</code> sampled=<code>true</code> tracestate=<code>—</code><br><span class="small">child recording=true, exported=1</span></td><td><span class="tag parent">parent 改变</span> <span class="tag sampling">采样结论改变</span></td></tr></tbody></table></div>
+
+<h3>完整请求 · 阶段明细</h3>
+<div class="cards"><div class="card hot"><div class="k">阶段 1 · TraceContextTextMapPropagator</div><div class="v">00f067aa0ba902b7</div><div class="s">sampled=true · tracestate=vendor=alpha,region=cn-north</div><div class="s">child recording=true, exported=1</div><div class="s">注入 <code>traceparent, tracestate, x-b3-sampled, x-b3-spanid, x-b3-traceid</code></div><div style="margin-top:6px"><span class="tag parent">parent 改变</span> <span class="tag sampling">采样结论改变</span> <span class="tag state">tracestate 不再适用</span></div></div><div class="card hot"><div class="k">阶段 2 · W3CBaggagePropagator</div><div class="v">00f067aa0ba902b7</div><div class="s">sampled=true · tracestate=vendor=alpha,region=cn-north</div><div class="s">child recording=true, exported=1</div><div class="s">注入 <code>baggage, traceparent, tracestate, x-b3-sampled, x-b3-spanid, x-b3-traceid</code></div><div style="margin-top:6px"><span class="tag baggage">baggage 被改写</span></div></div><div class="card hot"><div class="k">阶段 3 · B3MultiFormat</div><div class="v">b3b3b3b3b3b3b3b3</div><div class="s">sampled=true · tracestate=—</div><div class="s">child recording=true, exported=1</div><div class="s">注入 <code>baggage, traceparent, x-b3-sampled, x-b3-spanid, x-b3-traceid</code></div><div style="margin-top:6px"><span class="tag parent">parent 改变</span> <span class="tag state">tracestate 不再适用</span></div></div></div>
+<p class="note">以上为 A 侧；B 侧同名阶段仅第三阶段不同：parent=0a0a0a0a0a0a0a0a，baggage tenant=green。</p>
+
+<h3>缺字段请求 · 阶段明细</h3>
+<div class="cards"><div class="card hot"><div class="k">阶段 1 · TraceContextTextMapPropagator</div><div class="v">00f067aa0ba902b7</div><div class="s">sampled=true · tracestate=—</div><div class="s">child recording=true, exported=1</div><div class="s">注入 <code>traceparent, x-b3-sampled, x-b3-spanid, x-b3-traceid</code></div><div style="margin-top:6px"><span class="tag parent">parent 改变</span> <span class="tag sampling">采样结论改变</span></div></div><div class="card"><div class="k">阶段 2 · W3CBaggagePropagator</div><div class="v">00f067aa0ba902b7</div><div class="s">sampled=true · tracestate=—</div><div class="s">child recording=true, exported=1</div><div class="s">注入 <code>traceparent, x-b3-sampled, x-b3-spanid, x-b3-traceid</code></div><div style="margin-top:6px"><span class="badge neutral">无变化</span></div></div><div class="card hot"><div class="k">阶段 3 · B3MultiFormat</div><div class="v">b3b3b3b3b3b3b3b3</div><div class="s">sampled=false · tracestate=—</div><div class="s">child recording=false, exported=0</div><div class="s">注入 <code>traceparent, x-b3-sampled, x-b3-spanid, x-b3-traceid</code></div><div style="margin-top:6px"><span class="tag parent">parent 改变</span> <span class="tag sampling">采样结论改变</span></div></div></div>
+<p class="note">A 的第三阶段因缺少 x-b3-sampled，B3 将父上下文降为未采样，子 span 不导出；B 的 Jaeger 使用 uber-trace-id 的 flags=1，仍导出。</p>
+
+<h2>最终注入值对照</h2>
+<p class="note">完整请求 · A 与 B 的最终下游 header；橙色行表示不同。</p>
+<div class="panel"><table><thead><tr><th>注入 header</th><th>A 最终注入</th><th>B 最终注入</th></tr></thead><tbody><tr class="divergent"><td><code>baggage</code></td><td><code>tenant=blue,request.id=e2e-jw175-0001</code></td><td><code>tenant=green,request.id=e2e-jw175-0001</code></td></tr><tr class="divergent"><td><code>traceparent</code></td><td><code>00-4bf92f3577b34da6a3ce929d0e0e4736-b3b3b3b3b3b3b3b3-01</code></td><td><code>00-4bf92f3577b34da6a3ce929d0e0e4736-0a0a0a0a0a0a0a0a-01</code></td></tr><tr class="divergent"><td><code>uber-trace-id</code></td><td><code>—</code></td><td><code>4bf92f3577b34da6a3ce929d0e0e4736:0a0a0a0a0a0a0a0a:0000000000000000:03</code></td></tr><tr class="divergent"><td><code>uberctx-request.id</code></td><td><code>—</code></td><td><code>e2e-jw175-0001</code></td></tr><tr class="divergent"><td><code>uberctx-tenant</code></td><td><code>—</code></td><td><code>green</code></td></tr><tr class="divergent"><td><code>x-b3-sampled</code></td><td><code>1</code></td><td><code>—</code></td></tr><tr class="divergent"><td><code>x-b3-spanid</code></td><td><code>b3b3b3b3b3b3b3b3</code></td><td><code>—</code></td></tr><tr class="divergent"><td><code>x-b3-traceid</code></td><td><code>4bf92f3577b34da6a3ce929d0e0e4736</code></td><td><code>—</code></td></tr></tbody></table></div>
+<h3>缺字段请求</h3>
+<div class="panel"><table><thead><tr><th>注入 header</th><th>A 最终注入</th><th>B 最终注入</th></tr></thead><tbody><tr class="divergent"><td><code>traceparent</code></td><td><code>00-4bf92f3577b34da6a3ce929d0e0e4736-b3b3b3b3b3b3b3b3-00</code></td><td><code>00-4bf92f3577b34da6a3ce929d0e0e4736-0a0a0a0a0a0a0a0a-01</code></td></tr><tr class="divergent"><td><code>uber-trace-id</code></td><td><code>—</code></td><td><code>4bf92f3577b34da6a3ce929d0e0e4736:0a0a0a0a0a0a0a0a:0000000000000000:03</code></td></tr><tr class="divergent"><td><code>x-b3-sampled</code></td><td><code>0</code></td><td><code>—</code></td></tr><tr class="divergent"><td><code>x-b3-spanid</code></td><td><code>b3b3b3b3b3b3b3b3</code></td><td><code>—</code></td></tr><tr class="divergent"><td><code>x-b3-traceid</code></td><td><code>4bf92f3577b34da6a3ce929d0e0e4736</code></td><td><code>—</code></td></tr></tbody></table></div>
+
+<h2>值班判断表</h2>
+<div class="panel">
+  <table>
+    <thead><tr><th>观察点</th><th>A：tracecontext,baggage,b3</th><th>B：tracecontext,baggage,jaeger</th><th>为何不能只看 trace ID</th></tr></thead>
+    <tbody>
+      <tr><td>远端 parent</td><td><code>b3b3b3b3b3b3b3b3</code></td><td><code>0a0a0a0a0a0a0a0a</code></td><td>同一 trace ID 下 parent 不同，服务跳转的因果关系不同。</td></tr>
+      <tr><td>tracestate</td><td>阶段 2 有，阶段 3 清空</td><td>阶段 2 有，阶段 3 清空</td><td>vendor 状态在第三阶段已不可用，不能拿最终 span 的 tracestate 做路由判断。</td></tr>
+      <tr><td>baggage.tenant</td><td><code>blue</code></td><td><code>green</code></td><td>业务租户在两条 profile 中不同，按 trace ID 聚合会把 blue 与 green 混在一起。</td></tr>
+      <tr><td>缺字段请求的 sampled</td><td><code>false</code>（子 span 不导出）</td><td><code>true</code>（子 span 导出）</td><td>一条 trace 有缺口 vs 完整，采样来源不同，排查入口不同。</td></tr>
+      <tr><td>建议先查</td><td>B3 的 x-b3-sampled 是否缺失；B3 是否覆盖了 W3C parent</td><td>Jaeger 的 uberctx-* 是否覆盖 W3C baggage；Jaeger parent 来源</td><td>同一 trace ID 不能同时回答“丢 span”和“业务关联错”两个问题。</td></tr>
+    </tbody>
+  </table>
+</div>
+
+<h2>Finding 明细</h2>
+<section class="panel"><h3>完整请求 <span class="badge neutral">full</span></h3><p>首个发生差异的传播器与阶段：<code>阶段 3 · B3MultiFormat vs JaegerPropagator</code> <span class="tag parent">parent 改变</span> <span class="tag baggage">baggage 被改写</span></p><div class="stack"><div class="finding neutral"><strong>trace ID 相同并不等于链路可互换</strong><div>两侧最终 trace ID 都是 <code>4bf92f3577b34da6a3ce929d0e0e4736</code>，但 parent、tracestate、baggage 或采样结论不同；值班时必须以 parent + baggage + sampled 三者联合判断。</div></div></div><ul class="clean"><li>parent 改变：两条 trace 的 trace ID 相同，但下游 span.parent 分别指向 b3b3b3b3b3b3b3b3（A/B3）和 0a0a0a0a0a0a0a0a（B/Jaeger）。按 trace ID 能搜到同一条 trace，但按 parent 还原服务跳转时会得到不同的因果关系。</li><li>tracestate 不再适用：第 2 阶段仍有 vendor=alpha,region=cn-north，第 3 阶段 B3/Jaeger 重建远端 SpanContext 时被清空。依赖 tracestate 做租户路由或采样权重的一方会看到“同 trace ID 但无 vendor 状态”。</li><li>baggage 被另一个传播器改写：A 保留 W3C baggage 的 tenant=blue；B 的 JaegerPropagator 读取 uberctx-tenant=green 并覆盖同名 baggage。</li><li>两种排查结论：A 侧应按“parent 指向 B3 span、baggage 仍是 blue”排查；B 侧应按“parent 指向 Jaeger span、baggage 已变成 green”排查。只看 trace ID 会把两者误判为同一条链路。</li></ul></section><section class="panel"><h3>缺少部分追踪字段的合成请求 <span class="badge neutral">partial</span></h3><p>首个发生差异的传播器与阶段：<code>阶段 3 · B3MultiFormat vs JaegerPropagator</code> <span class="tag parent">parent 改变</span> <span class="tag sampling">采样结论改变</span></p><div class="stack"><div class="finding neutral"><strong>trace ID 相同并不等于链路可互换</strong><div>两侧最终 trace ID 都是 <code>4bf92f3577b34da6a3ce929d0e0e4736</code>，但 parent、tracestate、baggage 或采样结论不同；值班时必须以 parent + baggage + sampled 三者联合判断。</div></div></div><ul class="clean"><li>parent 改变：两条 trace 的 trace ID 相同，但下游 span.parent 分别指向 b3b3b3b3b3b3b3b3（A/B3）和 0a0a0a0a0a0a0a0a（B/Jaeger）。按 trace ID 能搜到同一条 trace，但按 parent 还原服务跳转时会得到不同的因果关系。</li><li>tracestate 自入站就缺失：第 2 阶段没有可传播的 tracestate，第 3 阶段并未额外清空。这与完整请求的“阶段 2 有、阶段 3 被清空”是两种不同故障，不能都归因为传播器丢状态。</li><li>采样结论改变：A 的 B3 缺少 x-b3-sampled，按默认 &quot;0&quot; 把父上下文降为未采样，子 span 不导出；B 的 Jaeger uber-trace-id flags=1，子 span 正常导出。</li><li>两种排查结论：A 侧先查 B3 采样字段缺失导致的丢 span；B 侧先查为何 parent 换成 Jaeger span、但 trace 仍完整。缺少 x-b3-sampled 与缺少 W3C baggage 是两类不同的告警，不能用同一条“按 trace ID 查全链路”结论覆盖。</li></ul></section>
+
+<h2>复跑步骤（值班可直接执行）</h2>
+<div class="panel">
+  <ol>
+    <li>在仓库根目录确认解释器：<code>.venv/bin/python -V</code>，应为 Python 3.12。</li>
+    <li>执行采集：<code>.venv/bin/python -m forensics.collect --out forensics/out</code></li>
+    <li>执行断言：<code>.venv/bin/python -m pytest -q forensics/tests/test_collect.py</code></li>
+    <li>复跑并比对字节：<code>forensics/reproduce.sh</code>；脚本会输出 <code>evidence.sha256</code> 与 diff 结果。</li>
+    <li>离线打开 <code>forensics/out/report.html</code>；无需网络、无需 collector。</li>
+  </ol>
+  <pre>.venv/bin/python -m forensics.collect --out forensics/out
+.venv/bin/python -m pytest -q forensics/tests/test_collect.py
+forensics/reproduce.sh</pre>
+  <p class="note">预期：full 与 partial 均输出 <code>first divergence=阶段 3 B3MultiFormat vs JaegerPropagator</code>；两侧 trace ID 都是 <code>4bf92f3577b34da6a3ce929d0e0e4736</code>。若你的值不同，先看 <code>evidence.json</code> 的 <code>comparisons[].stage_pairs</code> 与 <code>runs[].stages[].returned_context</code>。</p>
+</div>
+
+<h2>原始证据</h2>
+<details>
+  <summary>展开 evidence.json（完整）</summary>
+  <pre>{
+  &quot;schema&quot;: &quot;otel-propagator-forensics/v1&quot;,
+  &quot;generated_by&quot;: &quot;forensics/collect.py&quot;,
+  &quot;e2e_id&quot;: &quot;e2e-jw175-0001&quot;,
+  &quot;synthetic_fields&quot;: {
+    &quot;trace_id&quot;: &quot;4bf92f3577b34da6a3ce929d0e0e4736&quot;,
+    &quot;inbound_span_id&quot;: &quot;00f067aa0ba902b7&quot;,
+    &quot;b3_span_id&quot;: &quot;b3b3b3b3b3b3b3b3&quot;,
+    &quot;jaeger_span_id&quot;: &quot;0a0a0a0a0a0a0a0a&quot;,
+    &quot;jaeger_parent_id&quot;: &quot;cacacacacacacaca&quot;,
+    &quot;child_span_id&quot;: &quot;00c0ffee00c0ffee&quot;,
+    &quot;baggage_keys&quot;: [
+      &quot;tenant&quot;,
+      &quot;request.id&quot;
+    ]
+  },
+  &quot;orderings&quot;: [
+    {
+      &quot;id&quot;: &quot;A&quot;,
+      &quot;label&quot;: &quot;tracecontext,baggage,b3&quot;,
+      &quot;description&quot;: &quot;Service A terminates W3C then B3.&quot;,
+      &quot;propagators&quot;: [
+        &quot;TraceContextTextMapPropagator&quot;,
+        &quot;W3CBaggagePropagator&quot;,
+        &quot;B3MultiFormat&quot;
+      ]
+    },
+    {
+      &quot;id&quot;: &quot;B&quot;,
+      &quot;label&quot;: &quot;tracecontext,baggage,jaeger&quot;,
+      &quot;description&quot;: &quot;Service B terminates W3C then Jaeger.&quot;,
+      &quot;propagators&quot;: [
+        &quot;TraceContextTextMapPropagator&quot;,
+        &quot;W3CBaggagePropagator&quot;,
+        &quot;JaegerPropagator&quot;
+      ]
+    }
+  ],
+  &quot;fixtures&quot;: [
+    {
+      &quot;id&quot;: &quot;full&quot;,
+      &quot;label&quot;: &quot;完整请求&quot;,
+      &quot;e2e_id&quot;: &quot;e2e-jw175-0001&quot;,
+      &quot;missing&quot;: [],
+      &quot;note&quot;: &quot;所有传播器都能找到自己的字段。&quot;,
+      &quot;carrier&quot;: {
+        &quot;baggage&quot;: &quot;tenant=blue,request.id=e2e-jw175-0001&quot;,
+        &quot;traceparent&quot;: &quot;00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01&quot;,
+        &quot;tracestate&quot;: &quot;vendor=alpha,region=cn-north&quot;,
+        &quot;uber-trace-id&quot;: &quot;4bf92f3577b34da6a3ce929d0e0e4736:0a0a0a0a0a0a0a0a:cacacacacacacaca:1&quot;,
+        &quot;uberctx-tenant&quot;: &quot;green&quot;,
+        &quot;x-b3-sampled&quot;: &quot;1&quot;,
+        &quot;x-b3-spanid&quot;: &quot;b3b3b3b3b3b3b3b3&quot;,
+        &quot;x-b3-traceid&quot;: &quot;4bf92f3577b34da6a3ce929d0e0e4736&quot;
+      }
+    },
+    {
+      &quot;id&quot;: &quot;partial&quot;,
+      &quot;label&quot;: &quot;缺少部分追踪字段的合成请求&quot;,
+      &quot;e2e_id&quot;: &quot;e2e-jw175-0001&quot;,
+      &quot;missing&quot;: [
+        &quot;tracestate&quot;,
+        &quot;baggage&quot;,
+        &quot;x-b3-sampled&quot;,
+        &quot;uberctx-tenant&quot;
+      ],
+      &quot;note&quot;: &quot;W3C traceparent 仍完整且带 sampled=01；B3 缺 x-b3-sampled；Jaeger 的 uber-trace-id 仍带 flags=1；没有 W3C baggage，也没有 uberctx-*。&quot;,
+      &quot;carrier&quot;: {
+        &quot;traceparent&quot;: &quot;00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01&quot;,
+        &quot;uber-trace-id&quot;: &quot;4bf92f3577b34da6a3ce929d0e0e4736:0a0a0a0a0a0a0a0a:cacacacacacacaca:1&quot;,
+        &quot;x-b3-spanid&quot;: &quot;b3b3b3b3b3b3b3b3&quot;,
+        &quot;x-b3-traceid&quot;: &quot;4bf92f3577b34da6a3ce929d0e0e4736&quot;
+      }
+    }
+  ],
+  &quot;runs&quot;: [
+    {
+      &quot;order_id&quot;: &quot;A&quot;,
+      &quot;order_label&quot;: &quot;tracecontext,baggage,b3&quot;,
+      &quot;fixture_id&quot;: &quot;full&quot;,
+      &quot;e2e_id&quot;: &quot;e2e-jw175-0001&quot;,
+      &quot;stages&quot;: [
+        {
+          &quot;index&quot;: 1,
+          &quot;propagator&quot;: &quot;TraceContextTextMapPropagator&quot;,
+          &quot;reads&quot;: [
+            &quot;traceparent&quot;,
+            &quot;tracestate&quot;
+          ],
+          &quot;explanation&quot;: &quot;Parses traceparent and tracestate, then installs a remote NonRecordingSpan with is_remote=True.&quot;,
+          &quot;inbound_carrier&quot;: {
+            &quot;baggage&quot;: &quot;tenant=blue,request.id=e2e-jw175-0001&quot;,
+            &quot;traceparent&quot;: &quot;00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01&quot;,
+            &quot;tracestate&quot;: &quot;vendor=alpha,region=cn-north&quot;,
+            &quot;uber-trace-id&quot;: &quot;4bf92f3577b34da6a3ce929d0e0e4736:0a0a0a0a0a0a0a0a:cacacacacacacaca:1&quot;,
+            &quot;uberctx-tenant&quot;: &quot;green&quot;,
+            &quot;x-b3-sampled&quot;: &quot;1&quot;,
+            &quot;x-b3-spanid&quot;: &quot;b3b3b3b3b3b3b3b3&quot;,
+            &quot;x-b3-traceid&quot;: &quot;4bf92f3577b34da6a3ce929d0e0e4736&quot;
+          },
+          &quot;returned_context&quot;: {
+            &quot;span&quot;: {
+              &quot;valid&quot;: true,
+              &quot;trace_id&quot;: &quot;4bf92f3577b34da6a3ce929d0e0e4736&quot;,
+              &quot;span_id&quot;: &quot;00f067aa0ba902b7&quot;,
+              &quot;is_remote&quot;: true,
+              &quot;sampled&quot;: true,
+              &quot;trace_flags&quot;: &quot;01&quot;,
+              &quot;tracestate&quot;: &quot;vendor=alpha,region=cn-north&quot;
+            },
+            &quot;baggage&quot;: {},
+            &quot;baggage_header&quot;: &quot;&quot;
+          },
+          &quot;context_diff&quot;: {
+            &quot;changed&quot;: {
+              &quot;span.valid&quot;: {
+                &quot;before&quot;: false,
+                &quot;after&quot;: true
+              },
+              &quot;span.trace_id&quot;: {
+                &quot;before&quot;: null,
+                &quot;after&quot;: &quot;4bf92f3577b34da6a3ce929d0e0e4736&quot;
+              },
+              &quot;span.span_id&quot;: {
+                &quot;before&quot;: null,
+                &quot;after&quot;: &quot;00f067aa0ba902b7&quot;
+              },
+              &quot;span.is_remote&quot;: {
+                &quot;before&quot;: false,
+                &quot;after&quot;: true
+              },
+              &quot;span.sampled&quot;: {
+                &quot;before&quot;: false,
+                &quot;after&quot;: true
+              },
+              &quot;span.trace_flags&quot;: {
+                &quot;before&quot;: &quot;00&quot;,
+                &quot;after&quot;: &quot;01&quot;
+              },
+              &quot;span.tracestate&quot;: {
+                &quot;before&quot;: null,
+                &quot;after&quot;: &quot;vendor=alpha,region=cn-north&quot;
+              }
+            },
+            &quot;categories&quot;: [
+              &quot;parent&quot;,
+              &quot;sampling&quot;,
+              &quot;tracestate&quot;
+            ],
+            &quot;material&quot;: true
+          },
+          &quot;child_span&quot;: {
+            &quot;recording&quot;: true,
+            &quot;span_context&quot;: {
+              &quot;valid&quot;: true,
+              &quot;trace_id&quot;: &quot;4bf92f3577b34da6a3ce929d0e0e4736&quot;,
+              &quot;span_id&quot;: &quot;00c0ffee00c0ffee&quot;,
+              &quot;is_remote&quot;: false,
+              &quot;sampled&quot;: true,
+              &quot;trace_flags&quot;: &quot;01&quot;,
+              &quot;tracestate&quot;: &quot;vendor=alpha,region=cn-north&quot;
+            },
+            &quot;exported_count&quot;: 1,
+            &quot;exported&quot;: [
+              {
+                &quot;name&quot;: &quot;full-A-s1&quot;,
+                &quot;trace_id&quot;: &quot;4bf92f3577b34da6a3ce929d0e0e4736&quot;,
+                &quot;span_id&quot;: &quot;00c0ffee00c0ffee&quot;,
+                &quot;parent_span_id&quot;: &quot;00f067aa0ba902b7&quot;,
+                &quot;sampled&quot;: true,
+                &quot;tracestate&quot;: &quot;vendor=alpha,region=cn-north&quot;,
+                &quot;attributes&quot;: {
+                  &quot;e2e.id&quot;: &quot;e2e-jw175-0001&quot;,
+                  &quot;synthetic.order&quot;: &quot;A&quot;,
+                  &quot;synthetic.stage&quot;: 1,
+                  &quot;synthetic.propagator&quot;: &quot;TraceContextTextMapPropagator&quot;
+                }
+              }
+            ]
+          },
+          &quot;final_injected&quot;: {
+            &quot;traceparent&quot;: &quot;00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01&quot;,
+            &quot;tracestate&quot;: &quot;vendor=alpha,region=cn-north&quot;,
+            &quot;x-b3-sampled&quot;: &quot;1&quot;,
+            &quot;x-b3-spanid&quot;: &quot;00f067aa0ba902b7&quot;,
+            &quot;x-b3-traceid&quot;: &quot;4bf92f3577b34da6a3ce929d0e0e4736&quot;
+          }
+        },
+        {
+          &quot;index&quot;: 2,
+          &quot;propagator&quot;: &quot;W3CBaggagePropagator&quot;,
+          &quot;reads&quot;: [
+            &quot;baggage&quot;
+          ],
+          &quot;explanation&quot;: &quot;Reads the W3C baggage header into the baggage context key. It does not touch the span or tracestate.&quot;,
+          &quot;inbound_carrier&quot;: {
+            &quot;baggage&quot;: &quot;tenant=blue,request.id=e2e-jw175-0001&quot;,
+            &quot;traceparent&quot;: &quot;00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01&quot;,
+            &quot;tracestate&quot;: &quot;vendor=alpha,region=cn-north&quot;,
+            &quot;uber-trace-id&quot;: &quot;4bf92f3577b34da6a3ce929d0e0e4736:0a0a0a0a0a0a0a0a:cacacacacacacaca:1&quot;,
+            &quot;uberctx-tenant&quot;: &quot;green&quot;,
+            &quot;x-b3-sampled&quot;: &quot;1&quot;,
+            &quot;x-b3-spanid&quot;: &quot;b3b3b3b3b3b3b3b3&quot;,
+            &quot;x-b3-traceid&quot;: &quot;4bf92f3577b34da6a3ce929d0e0e4736&quot;
+          },
+          &quot;returned_context&quot;: {
+            &quot;span&quot;: {
+              &quot;valid&quot;: true,
+              &quot;trace_id&quot;: &quot;4bf92f3577b34da6a3ce929d0e0e4736&quot;,
+              &quot;span_id&quot;: &quot;00f067aa0ba902b7&quot;,
+              &quot;is_remote&quot;: true,
+              &quot;sampled&quot;: true,
+              &quot;trace_flags&quot;: &quot;01&quot;,
+              &quot;tracestate&quot;: &quot;vendor=alpha,region=cn-north&quot;
+            },
+            &quot;baggage&quot;: {
+              &quot;tenant&quot;: &quot;blue&quot;,
+              &quot;request.id&quot;: &quot;e2e-jw175-0001&quot;
+            },
+            &quot;baggage_header&quot;: &quot;tenant=blue,request.id=e2e-jw175-0001&quot;
+          },
+          &quot;context_diff&quot;: {
+            &quot;changed&quot;: {
+              &quot;baggage&quot;: {
+                &quot;before&quot;: {},
+                &quot;after&quot;: {
+                  &quot;tenant&quot;: &quot;blue&quot;,
+                  &quot;request.id&quot;: &quot;e2e-jw175-0001&quot;
+                }
+              },
+              &quot;baggage_header&quot;: {
+                &quot;before&quot;: &quot;&quot;,
+                &quot;after&quot;: &quot;tenant=blue,request.id=e2e-jw175-0001&quot;
+              }
+            },
+            &quot;categories&quot;: [
+              &quot;baggage&quot;
+            ],
+            &quot;material&quot;: true
+          },
+          &quot;child_span&quot;: {
+            &quot;recording&quot;: true,
+            &quot;span_context&quot;: {
+              &quot;valid&quot;: true,
+              &quot;trace_id&quot;: &quot;4bf92f3577b34da6a3ce929d0e0e4736&quot;,
+              &quot;span_id&quot;: &quot;00c0ffee00c0ffee&quot;,
+              &quot;is_remote&quot;: false,
+              &quot;sampled&quot;: true,
+              &quot;trace_flags&quot;: &quot;01&quot;,
+              &quot;tracestate&quot;: &quot;vendor=alpha,region=cn-north&quot;
+            },
+            &quot;exported_count&quot;: 1,
+            &quot;exported&quot;: [
+              {
+                &quot;name&quot;: &quot;full-A-s2&quot;,
+                &quot;trace_id&quot;: &quot;4bf92f3577b34da6a3ce929d0e0e4736&quot;,
+                &quot;span_id&quot;: &quot;00c0ffee00c0ffee&quot;,
+                &quot;parent_span_id&quot;: &quot;00f067aa0ba902b7&quot;,
+                &quot;sampled&quot;: true,
+                &quot;tracestate&quot;: &quot;vendor=alpha,region=cn-north&quot;,
+                &quot;attributes&quot;: {
+                  &quot;e2e.id&quot;: &quot;e2e-jw175-0001&quot;,
+                  &quot;synthetic.order&quot;: &quot;A&quot;,
+                  &quot;synthetic.stage&quot;: 2,
+                  &quot;synthetic.propagator&quot;: &quot;W3CBaggagePropagator&quot;
+                }
+              }
+            ]
+          },
+          &quot;final_injected&quot;: {
+            &quot;baggage&quot;: &quot;tenant=blue,request.id=e2e-jw175-0001&quot;,
+            &quot;traceparent&quot;: &quot;00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01&quot;,
+            &quot;tracestate&quot;: &quot;vendor=alpha,region=cn-north&quot;,
+            &quot;x-b3-sampled&quot;: &quot;1&quot;,
+            &quot;x-b3-spanid&quot;: &quot;00f067aa0ba902b7&quot;,
+            &quot;x-b3-traceid&quot;: &quot;4bf92f3577b34da6a3ce929d0e0e4736&quot;
+          }
+        },
+        {
+          &quot;index&quot;: 3,
+          &quot;propagator&quot;: &quot;B3MultiFormat&quot;,
+          &quot;reads&quot;: [
+            &quot;b3&quot;,
+            &quot;x-b3-traceid&quot;,
+            &quot;x-b3-spanid&quot;,
+            &quot;x-b3-sampled&quot;,
+            &quot;x-b3-flags&quot;
+          ],
+          &quot;explanation&quot;: &quot;Rebuilds the remote parent from x-b3-* with trace_state=TraceState() (empty). A missing x-b3-sampled defaults to \&quot;0\&quot;, so an unsampled B3 parent replaces an already-sampled W3C parent.&quot;,
+          &quot;inbound_carrier&quot;: {
+            &quot;baggage&quot;: &quot;tenant=blue,request.id=e2e-jw175-0001&quot;,
+            &quot;traceparent&quot;: &quot;00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01&quot;,
+            &quot;tracestate&quot;: &quot;vendor=alpha,region=cn-north&quot;,
+            &quot;uber-trace-id&quot;: &quot;4bf92f3577b34da6a3ce929d0e0e4736:0a0a0a0a0a0a0a0a:cacacacacacacaca:1&quot;,
+            &quot;uberctx-tenant&quot;: &quot;green&quot;,
+            &quot;x-b3-sampled&quot;: &quot;1&quot;,
+            &quot;x-b3-spanid&quot;: &quot;b3b3b3b3b3b3b3b3&quot;,
+            &quot;x-b3-traceid&quot;: &quot;4bf92f3577b34da6a3ce929d0e0e4736&quot;
+          },
+          &quot;returned_context&quot;: {
+            &quot;span&quot;: {
+              &quot;valid&quot;: true,
+              &quot;trace_id&quot;: &quot;4bf92f3577b34da6a3ce929d0e0e4736&quot;,
+              &quot;span_id&quot;: &quot;b3b3b3b3b3b3b3b3&quot;,
+              &quot;is_remote&quot;: true,
+              &quot;sampled&quot;: true,
+              &quot;trace_flags&quot;: &quot;01&quot;,
+              &quot;tracestate&quot;: null
+            },
+            &quot;baggage&quot;: {
+              &quot;tenant&quot;: &quot;blue&quot;,
+              &quot;request.id&quot;: &quot;e2e-jw175-0001&quot;
+            },
+            &quot;baggage_header&quot;: &quot;tenant=blue,request.id=e2e-jw175-0001&quot;
+          },
+          &quot;context_diff&quot;: {
+            &quot;changed&quot;: {
+              &quot;span.span_id&quot;: {
+                &quot;before&quot;: &quot;00f067aa0ba902b7&quot;,
+                &quot;after&quot;: &quot;b3b3b3b3b3b3b3b3&quot;
+              },
+              &quot;span.tracestate&quot;: {
+                &quot;before&quot;: &quot;vendor=alpha,region=cn-north&quot;,
+                &quot;after&quot;: null
+              }
+            },
+            &quot;categories&quot;: [
+              &quot;parent&quot;,
+              &quot;tracestate&quot;
+            ],
+            &quot;material&quot;: true
+          },
+          &quot;child_span&quot;: {
+            &quot;recording&quot;: true,
+            &quot;span_context&quot;: {
+              &quot;valid&quot;: true,
+              &quot;trace_id&quot;: &quot;4bf92f3577b34da6a3ce929d0e0e4736&quot;,
+              &quot;span_id&quot;: &quot;00c0ffee00c0ffee&quot;,
+              &quot;is_remote&quot;: false,
+              &quot;sampled&quot;: true,
+              &quot;trace_flags&quot;: &quot;01&quot;,
+              &quot;tracestate&quot;: null
+            },
+            &quot;exported_count&quot;: 1,
+            &quot;exported&quot;: [
+              {
+                &quot;name&quot;: &quot;full-A-s3&quot;,
+                &quot;trace_id&quot;: &quot;4bf92f3577b34da6a3ce929d0e0e4736&quot;,
+                &quot;span_id&quot;: &quot;00c0ffee00c0ffee&quot;,
+                &quot;parent_span_id&quot;: &quot;b3b3b3b3b3b3b3b3&quot;,
+                &quot;sampled&quot;: true,
+                &quot;tracestate&quot;: null,
+                &quot;attributes&quot;: {
+                  &quot;e2e.id&quot;: &quot;e2e-jw175-0001&quot;,
+                  &quot;synthetic.order&quot;: &quot;A&quot;,
+                  &quot;synthetic.stage&quot;: 3,
+                  &quot;synthetic.propagator&quot;: &quot;B3MultiFormat&quot;
+                }
+              }
+            ]
+          },
+          &quot;final_injected&quot;: {
+            &quot;baggage&quot;: &quot;tenant=blue,request.id=e2e-jw175-0001&quot;,
+            &quot;traceparent&quot;: &quot;00-4bf92f3577b34da6a3ce929d0e0e4736-b3b3b3b3b3b3b3b3-01&quot;,
+            &quot;x-b3-sampled&quot;: &quot;1&quot;,
+            &quot;x-b3-spanid&quot;: &quot;b3b3b3b3b3b3b3b3&quot;,
+            &quot;x-b3-traceid&quot;: &quot;4bf92f3577b34da6a3ce929d0e0e4736&quot;
+          }
+        }
+      ],
+      &quot;composite_extract&quot;: {
+        &quot;span&quot;: {
+          &quot;valid&quot;: true,
+          &quot;trace_id&quot;: &quot;4bf92f3577b34da6a3ce929d0e0e4736&quot;,
+          &quot;span_id&quot;: &quot;b3b3b3b3b3b3b3b3&quot;,
+          &quot;is_remote&quot;: true,
+          &quot;sampled&quot;: true,
+          &quot;trace_flags&quot;: &quot;01&quot;,
+          &quot;tracestate&quot;: null
+        },
+        &quot;baggage&quot;: {
+          &quot;tenant&quot;: &quot;blue&quot;,
+          &quot;request.id&quot;: &quot;e2e-jw175-0001&quot;
+        },
+        &quot;baggage_header&quot;: &quot;tenant=blue,request.id=e2e-jw175-0001&quot;
+      },
+      &quot;composite_matches_replay&quot;: true,
+      &quot;final_injected&quot;: {
+        &quot;baggage&quot;: &quot;tenant=blue,request.id=e2e-jw175-0001&quot;,
+        &quot;traceparent&quot;: &quot;00-4bf92f3577b34da6a3ce929d0e0e4736-b3b3b3b3b3b3b3b3-01&quot;,
+        &quot;x-b3-sampled&quot;: &quot;1&quot;,
+        &quot;x-b3-spanid&quot;: &quot;b3b3b3b3b3b3b3b3&quot;,
+        &quot;x-b3-traceid&quot;: &quot;4bf92f3577b34da6a3ce929d0e0e4736&quot;
+      }
+    },
+    {
+      &quot;order_id&quot;: &quot;A&quot;,
+      &quot;order_label&quot;: &quot;tracecontext,baggage,b3&quot;,
+      &quot;fixture_id&quot;: &quot;partial&quot;,
+      &quot;e2e_id&quot;: &quot;e2e-jw175-0001&quot;,
+      &quot;stages&quot;: [
+        {
+          &quot;index&quot;: 1,
+          &quot;propagator&quot;: &quot;TraceContextTextMapPropagator&quot;,
+          &quot;reads&quot;: [
+            &quot;traceparent&quot;,
+            &quot;tracestate&quot;
+          ],
+          &quot;explanation&quot;: &quot;Parses traceparent and tracestate, then installs a remote NonRecordingSpan with is_remote=True.&quot;,
+          &quot;inbound_carrier&quot;: {
+            &quot;traceparent&quot;: &quot;00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01&quot;,
+            &quot;uber-trace-id&quot;: &quot;4bf92f3577b34da6a3ce929d0e0e4736:0a0a0a0a0a0a0a0a:cacacacacacacaca:1&quot;,
+            &quot;x-b3-spanid&quot;: &quot;b3b3b3b3b3b3b3b3&quot;,
+            &quot;x-b3-traceid&quot;: &quot;4bf92f3577b34da6a3ce929d0e0e4736&quot;
+          },
+          &quot;returned_context&quot;: {
+            &quot;span&quot;: {
+              &quot;valid&quot;: true,
+              &quot;trace_id&quot;: &quot;4bf92f3577b34da6a3ce929d0e0e4736&quot;,
+              &quot;span_id&quot;: &quot;00f067aa0ba902b7&quot;,
+              &quot;is_remote&quot;: true,
+              &quot;sampled&quot;: true,
+              &quot;trace_flags&quot;: &quot;01&quot;,
+              &quot;tracestate&quot;: null
+            },
+            &quot;baggage&quot;: {},
+            &quot;baggage_header&quot;: &quot;&quot;
+          },
+          &quot;context_diff&quot;: {
+            &quot;changed&quot;: {
+              &quot;span.valid&quot;: {
+                &quot;before&quot;: false,
+                &quot;after&quot;: true
+              },
+              &quot;span.trace_id&quot;: {
+                &quot;before&quot;: null,
+                &quot;after&quot;: &quot;4bf92f3577b34da6a3ce929d0e0e4736&quot;
+              },
+              &quot;span.span_id&quot;: {
+                &quot;before&quot;: null,
+                &quot;after&quot;: &quot;00f067aa0ba902b7&quot;
+              },
+              &quot;span.is_remote&quot;: {
+                &quot;before&quot;: false,
+                &quot;after&quot;: true
+              },
+              &quot;span.sampled&quot;: {
+                &quot;before&quot;: false,
+                &quot;after&quot;: true
+              },
+              &quot;span.trace_flags&quot;: {
+                &quot;before&quot;: &quot;00&quot;,
+                &quot;after&quot;: &quot;01&quot;
+              }
+            },
+            &quot;categories&quot;: [
+              &quot;parent&quot;,
+              &quot;sampling&quot;
+            ],
+            &quot;material&quot;: true
+          },
+          &quot;child_span&quot;: {
+            &quot;recording&quot;: true,
+            &quot;span_context&quot;: {
+              &quot;valid&quot;: true,
+              &quot;trace_id&quot;: &quot;4bf92f3577b34da6a3ce929d0e0e4736&quot;,
+              &quot;span_id&quot;: &quot;00c0ffee00c0ffee&quot;,
+              &quot;is_remote&quot;: false,
+              &quot;sampled&quot;: true,
+              &quot;trace_flags&quot;: &quot;01&quot;,
+              &quot;tracestate&quot;: null
+            },
+            &quot;exported_count&quot;: 1,
+            &quot;exported&quot;: [
+              {
+                &quot;name&quot;: &quot;partial-A-s1&quot;,
+                &quot;trace_id&quot;: &quot;4bf92f3577b34da6a3ce929d0e0e4736&quot;,
+                &quot;span_id&quot;: &quot;00c0ffee00c0ffee&quot;,
+                &quot;parent_span_id&quot;: &quot;00f067aa0ba902b7&quot;,
+                &quot;sampled&quot;: true,
+                &quot;tracestate&quot;: null,
+                &quot;attributes&quot;: {
+                  &quot;e2e.id&quot;: &quot;e2e-jw175-0001&quot;,
+                  &quot;synthetic.order&quot;: &quot;A&quot;,
+                  &quot;synthetic.stage&quot;: 1,
+                  &quot;synthetic.propagator&quot;: &quot;TraceContextTextMapPropagator&quot;
+                }
+              }
+            ]
+          },
+          &quot;final_injected&quot;: {
+            &quot;traceparent&quot;: &quot;00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01&quot;,
+            &quot;x-b3-sampled&quot;: &quot;1&quot;,
+            &quot;x-b3-spanid&quot;: &quot;00f067aa0ba902b7&quot;,
+            &quot;x-b3-traceid&quot;: &quot;4bf92f3577b34da6a3ce929d0e0e4736&quot;
+          }
+        },
+        {
+          &quot;index&quot;: 2,
+          &quot;propagator&quot;: &quot;W3CBaggagePropagator&quot;,
+          &quot;reads&quot;: [
+            &quot;baggage&quot;
+          ],
+          &quot;explanation&quot;: &quot;Reads the W3C baggage header into the baggage context key. It does not touch the span or tracestate.&quot;,
+          &quot;inbound_carrier&quot;: {
+            &quot;traceparent&quot;: &quot;00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01&quot;,
+            &quot;uber-trace-id&quot;: &quot;4bf92f3577b34da6a3ce929d0e0e4736:0a0a0a0a0a0a0a0a:cacacacacacacaca:1&quot;,
+            &quot;x-b3-spanid&quot;: &quot;b3b3b3b3b3b3b3b3&quot;,
+            &quot;x-b3-traceid&quot;: &quot;4bf92f3577b34da6a3ce929d0e0e4736&quot;
+          },
+          &quot;returned_context&quot;: {
+            &quot;span&quot;: {
+              &quot;valid&quot;: true,
+              &quot;trace_id&quot;: &quot;4bf92f3577b34da6a3ce929d0e0e4736&quot;,
+              &quot;span_id&quot;: &quot;00f067aa0ba902b7&quot;,
+              &quot;is_remote&quot;: true,
+              &quot;sampled&quot;: true,
+              &quot;trace_flags&quot;: &quot;01&quot;,
+              &quot;tracestate&quot;: null
+            },
+            &quot;baggage&quot;: {},
+            &quot;baggage_header&quot;: &quot;&quot;
+          },
+          &quot;context_diff&quot;: {
+            &quot;changed&quot;: {},
+            &quot;categories&quot;: [],
+            &quot;material&quot;: false
+          },
+          &quot;child_span&quot;: {
+            &quot;recording&quot;: true,
+            &quot;span_context&quot;: {
+              &quot;valid&quot;: true,
+              &quot;trace_id&quot;: &quot;4bf92f3577b34da6a3ce929d0e0e4736&quot;,
+              &quot;span_id&quot;: &quot;00c0ffee00c0ffee&quot;,
+              &quot;is_remote&quot;: false,
+              &quot;sampled&quot;: true,
+              &quot;trace_flags&quot;: &quot;01&quot;,
+              &quot;tracestate&quot;: null
+            },
+            &quot;exported_count&quot;: 1,
+            &quot;exported&quot;: [
+              {
+                &quot;name&quot;: &quot;partial-A-s2&quot;,
+                &quot;trace_id&quot;: &quot;4bf92f3577b34da6a3ce929d0e0e4736&quot;,
+                &quot;span_id&quot;: &quot;00c0ffee00c0ffee&quot;,
+                &quot;parent_span_id&quot;: &quot;00f067aa0ba902b7&quot;,
+                &quot;sampled&quot;: true,
+                &quot;tracestate&quot;: null,
+                &quot;attributes&quot;: {
+                  &quot;e2e.id&quot;: &quot;e2e-jw175-0001&quot;,
+                  &quot;synthetic.order&quot;: &quot;A&quot;,
+                  &quot;synthetic.stage&quot;: 2,
+                  &quot;synthetic.propagator&quot;: &quot;W3CBaggagePropagator&quot;
+                }
+              }
+            ]
+          },
+          &quot;final_injected&quot;: {
+            &quot;traceparent&quot;: &quot;00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01&quot;,
+            &quot;x-b3-sampled&quot;: &quot;1&quot;,
+            &quot;x-b3-spanid&quot;: &quot;00f067aa0ba902b7&quot;,
+            &quot;x-b3-traceid&quot;: &quot;4bf92f3577b34da6a3ce929d0e0e4736&quot;
+          }
+        },
+        {
+          &quot;index&quot;: 3,
+          &quot;propagator&quot;: &quot;B3MultiFormat&quot;,
+          &quot;reads&quot;: [
+            &quot;b3&quot;,
+            &quot;x-b3-traceid&quot;,
+            &quot;x-b3-spanid&quot;,
+            &quot;x-b3-sampled&quot;,
+            &quot;x-b3-flags&quot;
+          ],
+          &quot;explanation&quot;: &quot;Rebuilds the remote parent from x-b3-* with trace_state=TraceState() (empty). A missing x-b3-sampled defaults to \&quot;0\&quot;, so an unsampled B3 parent replaces an already-sampled W3C parent.&quot;,
+          &quot;inbound_carrier&quot;: {
+            &quot;traceparent&quot;: &quot;00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01&quot;,
+            &quot;uber-trace-id&quot;: &quot;4bf92f3577b34da6a3ce929d0e0e4736:0a0a0a0a0a0a0a0a:cacacacacacacaca:1&quot;,
+            &quot;x-b3-spanid&quot;: &quot;b3b3b3b3b3b3b3b3&quot;,
+            &quot;x-b3-traceid&quot;: &quot;4bf92f3577b34da6a3ce929d0e0e4736&quot;
+          },
+          &quot;returned_context&quot;: {
+            &quot;span&quot;: {
+              &quot;valid&quot;: true,
+              &quot;trace_id&quot;: &quot;4bf92f3577b34da6a3ce929d0e0e4736&quot;,
+              &quot;span_id&quot;: &quot;b3b3b3b3b3b3b3b3&quot;,
+              &quot;is_remote&quot;: true,
+              &quot;sampled&quot;: false,
+              &quot;trace_flags&quot;: &quot;00&quot;,
+              &quot;tracestate&quot;: null
+            },
+            &quot;baggage&quot;: {},
+            &quot;baggage_header&quot;: &quot;&quot;
+          },
+          &quot;context_diff&quot;: {
+            &quot;changed&quot;: {
+              &quot;span.span_id&quot;: {
+                &quot;before&quot;: &quot;00f067aa0ba902b7&quot;,
+                &quot;after&quot;: &quot;b3b3b3b3b3b3b3b3&quot;
+              },
+              &quot;span.sampled&quot;: {
+                &quot;before&quot;: true,
+                &quot;after&quot;: false
+              },
+              &quot;span.trace_flags&quot;: {
+                &quot;before&quot;: &quot;01&quot;,
+                &quot;after&quot;: &quot;00&quot;
+              }
+            },
+            &quot;categories&quot;: [
+              &quot;parent&quot;,
+              &quot;sampling&quot;
+            ],
+            &quot;material&quot;: true
+          },
+          &quot;child_span&quot;: {
+            &quot;recording&quot;: false,
+            &quot;span_context&quot;: {
+              &quot;valid&quot;: true,
+              &quot;trace_id&quot;: &quot;4bf92f3577b34da6a3ce929d0e0e4736&quot;,
+              &quot;span_id&quot;: &quot;00c0ffee00c0ffee&quot;,
+              &quot;is_remote&quot;: false,
+              &quot;sampled&quot;: false,
+              &quot;trace_flags&quot;: &quot;00&quot;,
+              &quot;tracestate&quot;: null
+            },
+            &quot;exported_count&quot;: 0,
+            &quot;exported&quot;: []
+          },
+          &quot;final_injected&quot;: {
+            &quot;traceparent&quot;: &quot;00-4bf92f3577b34da6a3ce929d0e0e4736-b3b3b3b3b3b3b3b3-00&quot;,
+            &quot;x-b3-sampled&quot;: &quot;0&quot;,
+            &quot;x-b3-spanid&quot;: &quot;b3b3b3b3b3b3b3b3&quot;,
+            &quot;x-b3-traceid&quot;: &quot;4bf92f3577b34da6a3ce929d0e0e4736&quot;
+          }
+        }
+      ],
+      &quot;composite_extract&quot;: {
+        &quot;span&quot;: {
+          &quot;valid&quot;: true,
+          &quot;trace_id&quot;: &quot;4bf92f3577b34da6a3ce929d0e0e4736&quot;,
+          &quot;span_id&quot;: &quot;b3b3b3b3b3b3b3b3&quot;,
+          &quot;is_remote&quot;: true,
+          &quot;sampled&quot;: false,
+          &quot;trace_flags&quot;: &quot;00&quot;,
+          &quot;tracestate&quot;: null
+        },
+        &quot;baggage&quot;: {},
+        &quot;baggage_header&quot;: &quot;&quot;
+      },
+      &quot;composite_matches_replay&quot;: true,
+      &quot;final_injected&quot;: {
+        &quot;traceparent&quot;: &quot;00-4bf92f3577b34da6a3ce929d0e0e4736-b3b3b3b3b3b3b3b3-00&quot;,
+        &quot;x-b3-sampled&quot;: &quot;0&quot;,
+        &quot;x-b3-spanid&quot;: &quot;b3b3b3b3b3b3b3b3&quot;,
+        &quot;x-b3-traceid&quot;: &quot;4bf92f3577b34da6a3ce929d0e0e4736&quot;
+      }
+    },
+    {
+      &quot;order_id&quot;: &quot;B&quot;,
+      &quot;order_label&quot;: &quot;tracecontext,baggage,jaeger&quot;,
+      &quot;fixture_id&quot;: &quot;full&quot;,
+      &quot;e2e_id&quot;: &quot;e2e-jw175-0001&quot;,
+      &quot;stages&quot;: [
+        {
+          &quot;index&quot;: 1,
+          &quot;propagator&quot;: &quot;TraceContextTextMapPropagator&quot;,
+          &quot;reads&quot;: [
+            &quot;traceparent&quot;,
+            &quot;tracestate&quot;
+          ],
+          &quot;explanation&quot;: &quot;Parses traceparent and tracestate, then installs a remote NonRecordingSpan with is_remote=True.&quot;,
+          &quot;inbound_carrier&quot;: {
+            &quot;baggage&quot;: &quot;tenant=blue,request.id=e2e-jw175-0001&quot;,
+            &quot;traceparent&quot;: &quot;00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01&quot;,
+            &quot;tracestate&quot;: &quot;vendor=alpha,region=cn-north&quot;,
+            &quot;uber-trace-id&quot;: &quot;4bf92f3577b34da6a3ce929d0e0e4736:0a0a0a0a0a0a0a0a:cacacacacacacaca:1&quot;,
+            &quot;uberctx-tenant&quot;: &quot;green&quot;,
+            &quot;x-b3-sampled&quot;: &quot;1&quot;,
+            &quot;x-b3-spanid&quot;: &quot;b3b3b3b3b3b3b3b3&quot;,
+            &quot;x-b3-traceid&quot;: &quot;4bf92f3577b34da6a3ce929d0e0e4736&quot;
+          },
+          &quot;returned_context&quot;: {
+            &quot;span&quot;: {
+              &quot;valid&quot;: true,
+              &quot;trace_id&quot;: &quot;4bf92f3577b34da6a3ce929d0e0e4736&quot;,
+              &quot;span_id&quot;: &quot;00f067aa0ba902b7&quot;,
+              &quot;is_remote&quot;: true,
+              &quot;sampled&quot;: true,
+              &quot;trace_flags&quot;: &quot;01&quot;,
+              &quot;tracestate&quot;: &quot;vendor=alpha,region=cn-north&quot;
+            },
+            &quot;baggage&quot;: {},
+            &quot;baggage_header&quot;: &quot;&quot;
+          },
+          &quot;context_diff&quot;: {
+            &quot;changed&quot;: {
+              &quot;span.valid&quot;: {
+                &quot;before&quot;: false,
+                &quot;after&quot;: true
+              },
+              &quot;span.trace_id&quot;: {
+                &quot;before&quot;: null,
+                &quot;after&quot;: &quot;4bf92f3577b34da6a3ce929d0e0e4736&quot;
+              },
+              &quot;span.span_id&quot;: {
+                &quot;before&quot;: null,
+                &quot;after&quot;: &quot;00f067aa0ba902b7&quot;
+              },
+              &quot;span.is_remote&quot;: {
+                &quot;before&quot;: false,
+                &quot;after&quot;: true
+              },
+              &quot;span.sampled&quot;: {
+                &quot;before&quot;: false,
+                &quot;after&quot;: true
+              },
+              &quot;span.trace_flags&quot;: {
+                &quot;before&quot;: &quot;00&quot;,
+                &quot;after&quot;: &quot;01&quot;
+              },
+              &quot;span.tracestate&quot;: {
+                &quot;before&quot;: null,
+                &quot;after&quot;: &quot;vendor=alpha,region=cn-north&quot;
+              }
+            },
+            &quot;categories&quot;: [
+              &quot;parent&quot;,
+              &quot;sampling&quot;,
+              &quot;tracestate&quot;
+            ],
+            &quot;material&quot;: true
+          },
+          &quot;child_span&quot;: {
+            &quot;recording&quot;: true,
+            &quot;span_context&quot;: {
+              &quot;valid&quot;: true,
+              &quot;trace_id&quot;: &quot;4bf92f3577b34da6a3ce929d0e0e4736&quot;,
+              &quot;span_id&quot;: &quot;00c0ffee00c0ffee&quot;,
+              &quot;is_remote&quot;: false,
+              &quot;sampled&quot;: true,
+              &quot;trace_flags&quot;: &quot;01&quot;,
+              &quot;tracestate&quot;: &quot;vendor=alpha,region=cn-north&quot;
+            },
+            &quot;exported_count&quot;: 1,
+            &quot;exported&quot;: [
+              {
+                &quot;name&quot;: &quot;full-B-s1&quot;,
+                &quot;trace_id&quot;: &quot;4bf92f3577b34da6a3ce929d0e0e4736&quot;,
+                &quot;span_id&quot;: &quot;00c0ffee00c0ffee&quot;,
+                &quot;parent_span_id&quot;: &quot;00f067aa0ba902b7&quot;,
+                &quot;sampled&quot;: true,
+                &quot;tracestate&quot;: &quot;vendor=alpha,region=cn-north&quot;,
+                &quot;attributes&quot;: {
+                  &quot;e2e.id&quot;: &quot;e2e-jw175-0001&quot;,
+                  &quot;synthetic.order&quot;: &quot;B&quot;,
+                  &quot;synthetic.stage&quot;: 1,
+                  &quot;synthetic.propagator&quot;: &quot;TraceContextTextMapPropagator&quot;
+                }
+              }
+            ]
+          },
+          &quot;final_injected&quot;: {
+            &quot;traceparent&quot;: &quot;00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01&quot;,
+            &quot;tracestate&quot;: &quot;vendor=alpha,region=cn-north&quot;,
+            &quot;uber-trace-id&quot;: &quot;4bf92f3577b34da6a3ce929d0e0e4736:00f067aa0ba902b7:0000000000000000:03&quot;
+          }
+        },
+        {
+          &quot;index&quot;: 2,
+          &quot;propagator&quot;: &quot;W3CBaggagePropagator&quot;,
+          &quot;reads&quot;: [
+            &quot;baggage&quot;
+          ],
+          &quot;explanation&quot;: &quot;Reads the W3C baggage header into the baggage context key. It does not touch the span or tracestate.&quot;,
+          &quot;inbound_carrier&quot;: {
+            &quot;baggage&quot;: &quot;tenant=blue,request.id=e2e-jw175-0001&quot;,
+            &quot;traceparent&quot;: &quot;00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01&quot;,
+            &quot;tracestate&quot;: &quot;vendor=alpha,region=cn-north&quot;,
+            &quot;uber-trace-id&quot;: &quot;4bf92f3577b34da6a3ce929d0e0e4736:0a0a0a0a0a0a0a0a:cacacacacacacaca:1&quot;,
+            &quot;uberctx-tenant&quot;: &quot;green&quot;,
+            &quot;x-b3-sampled&quot;: &quot;1&quot;,
+            &quot;x-b3-spanid&quot;: &quot;b3b3b3b3b3b3b3b3&quot;,
+            &quot;x-b3-traceid&quot;: &quot;4bf92f3577b34da6a3ce929d0e0e4736&quot;
+          },
+          &quot;returned_context&quot;: {
+            &quot;span&quot;: {
+              &quot;valid&quot;: true,
+              &quot;trace_id&quot;: &quot;4bf92f3577b34da6a3ce929d0e0e4736&quot;,
+              &quot;span_id&quot;: &quot;00f067aa0ba902b7&quot;,
+              &quot;is_remote&quot;: true,
+              &quot;sampled&quot;: true,
+              &quot;trace_flags&quot;: &quot;01&quot;,
+              &quot;tracestate&quot;: &quot;vendor=alpha,region=cn-north&quot;
+            },
+            &quot;baggage&quot;: {
+              &quot;tenant&quot;: &quot;blue&quot;,
+              &quot;request.id&quot;: &quot;e2e-jw175-0001&quot;
+            },
+            &quot;baggage_header&quot;: &quot;tenant=blue,request.id=e2e-jw175-0001&quot;
+          },
+          &quot;context_diff&quot;: {
+            &quot;changed&quot;: {
+              &quot;baggage&quot;: {
+                &quot;before&quot;: {},
+                &quot;after&quot;: {
+                  &quot;tenant&quot;: &quot;blue&quot;,
+                  &quot;request.id&quot;: &quot;e2e-jw175-0001&quot;
+                }
+              },
+              &quot;baggage_header&quot;: {
+                &quot;before&quot;: &quot;&quot;,
+                &quot;after&quot;: &quot;tenant=blue,request.id=e2e-jw175-0001&quot;
+              }
+            },
+            &quot;categories&quot;: [
+              &quot;baggage&quot;
+            ],
+            &quot;material&quot;: true
+          },
+          &quot;child_span&quot;: {
+            &quot;recording&quot;: true,
+            &quot;span_context&quot;: {
+              &quot;valid&quot;: true,
+              &quot;trace_id&quot;: &quot;4bf92f3577b34da6a3ce929d0e0e4736&quot;,
+              &quot;span_id&quot;: &quot;00c0ffee00c0ffee&quot;,
+              &quot;is_remote&quot;: false,
+              &quot;sampled&quot;: true,
+              &quot;trace_flags&quot;: &quot;01&quot;,
+              &quot;tracestate&quot;: &quot;vendor=alpha,region=cn-north&quot;
+            },
+            &quot;exported_count&quot;: 1,
+            &quot;exported&quot;: [
+              {
+                &quot;name&quot;: &quot;full-B-s2&quot;,
+                &quot;trace_id&quot;: &quot;4bf92f3577b34da6a3ce929d0e0e4736&quot;,
+                &quot;span_id&quot;: &quot;00c0ffee00c0ffee&quot;,
+                &quot;parent_span_id&quot;: &quot;00f067aa0ba902b7&quot;,
+                &quot;sampled&quot;: true,
+                &quot;tracestate&quot;: &quot;vendor=alpha,region=cn-north&quot;,
+                &quot;attributes&quot;: {
+                  &quot;e2e.id&quot;: &quot;e2e-jw175-0001&quot;,
+                  &quot;synthetic.order&quot;: &quot;B&quot;,
+                  &quot;synthetic.stage&quot;: 2,
+                  &quot;synthetic.propagator&quot;: &quot;W3CBaggagePropagator&quot;
+                }
+              }
+            ]
+          },
+          &quot;final_injected&quot;: {
+            &quot;baggage&quot;: &quot;tenant=blue,request.id=e2e-jw175-0001&quot;,
+            &quot;traceparent&quot;: &quot;00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01&quot;,
+            &quot;tracestate&quot;: &quot;vendor=alpha,region=cn-north&quot;,
+            &quot;uber-trace-id&quot;: &quot;4bf92f3577b34da6a3ce929d0e0e4736:00f067aa0ba902b7:0000000000000000:03&quot;,
+            &quot;uberctx-request.id&quot;: &quot;e2e-jw175-0001&quot;,
+            &quot;uberctx-tenant&quot;: &quot;blue&quot;
+          }
+        },
+        {
+          &quot;index&quot;: 3,
+          &quot;propagator&quot;: &quot;JaegerPropagator&quot;,
+          &quot;reads&quot;: [
+            &quot;uber-trace-id&quot;,
+            &quot;uberctx-*&quot;
+          ],
+          &quot;explanation&quot;: &quot;Rebuilds the remote parent from uber-trace-id with trace_state=TraceState() (empty), then reads every uberctx-* key into baggage. Those entries overwrite same-named W3C baggage entries because this propagator runs later.&quot;,
+          &quot;inbound_carrier&quot;: {
+            &quot;baggage&quot;: &quot;tenant=blue,request.id=e2e-jw175-0001&quot;,
+            &quot;traceparent&quot;: &quot;00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01&quot;,
+            &quot;tracestate&quot;: &quot;vendor=alpha,region=cn-north&quot;,
+            &quot;uber-trace-id&quot;: &quot;4bf92f3577b34da6a3ce929d0e0e4736:0a0a0a0a0a0a0a0a:cacacacacacacaca:1&quot;,
+            &quot;uberctx-tenant&quot;: &quot;green&quot;,
+            &quot;x-b3-sampled&quot;: &quot;1&quot;,
+            &quot;x-b3-spanid&quot;: &quot;b3b3b3b3b3b3b3b3&quot;,
+            &quot;x-b3-traceid&quot;: &quot;4bf92f3577b34da6a3ce929d0e0e4736&quot;
+          },
+          &quot;returned_context&quot;: {
+            &quot;span&quot;: {
+              &quot;valid&quot;: true,
+              &quot;trace_id&quot;: &quot;4bf92f3577b34da6a3ce929d0e0e4736&quot;,
+              &quot;span_id&quot;: &quot;0a0a0a0a0a0a0a0a&quot;,
+              &quot;is_remote&quot;: true,
+              &quot;sampled&quot;: true,
+              &quot;trace_flags&quot;: &quot;01&quot;,
+              &quot;tracestate&quot;: null
+            },
+            &quot;baggage&quot;: {
+              &quot;tenant&quot;: &quot;green&quot;,
+              &quot;request.id&quot;: &quot;e2e-jw175-0001&quot;
+            },
+            &quot;baggage_header&quot;: &quot;tenant=green,request.id=e2e-jw175-0001&quot;
+          },
+          &quot;context_diff&quot;: {
+            &quot;changed&quot;: {
+              &quot;span.span_id&quot;: {
+                &quot;before&quot;: &quot;00f067aa0ba902b7&quot;,
+                &quot;after&quot;: &quot;0a0a0a0a0a0a0a0a&quot;
+              },
+              &quot;span.tracestate&quot;: {
+                &quot;before&quot;: &quot;vendor=alpha,region=cn-north&quot;,
+                &quot;after&quot;: null
+              },
+              &quot;baggage&quot;: {
+                &quot;before&quot;: {
+                  &quot;tenant&quot;: &quot;blue&quot;,
+                  &quot;request.id&quot;: &quot;e2e-jw175-0001&quot;
+                },
+                &quot;after&quot;: {
+                  &quot;tenant&quot;: &quot;green&quot;,
+                  &quot;request.id&quot;: &quot;e2e-jw175-0001&quot;
+                }
+              },
+              &quot;baggage_header&quot;: {
+                &quot;before&quot;: &quot;tenant=blue,request.id=e2e-jw175-0001&quot;,
+                &quot;after&quot;: &quot;tenant=green,request.id=e2e-jw175-0001&quot;
+              }
+            },
+            &quot;categories&quot;: [
+              &quot;baggage&quot;,
+              &quot;parent&quot;,
+              &quot;tracestate&quot;
+            ],
+            &quot;material&quot;: true
+          },
+          &quot;child_span&quot;: {
+            &quot;recording&quot;: true,
+            &quot;span_context&quot;: {
+              &quot;valid&quot;: true,
+              &quot;trace_id&quot;: &quot;4bf92f3577b34da6a3ce929d0e0e4736&quot;,
+              &quot;span_id&quot;: &quot;00c0ffee00c0ffee&quot;,
+              &quot;is_remote&quot;: false,
+              &quot;sampled&quot;: true,
+              &quot;trace_flags&quot;: &quot;01&quot;,
+              &quot;tracestate&quot;: null
+            },
+            &quot;exported_count&quot;: 1,
+            &quot;exported&quot;: [
+              {
+                &quot;name&quot;: &quot;full-B-s3&quot;,
+                &quot;trace_id&quot;: &quot;4bf92f3577b34da6a3ce929d0e0e4736&quot;,
+                &quot;span_id&quot;: &quot;00c0ffee00c0ffee&quot;,
+                &quot;parent_span_id&quot;: &quot;0a0a0a0a0a0a0a0a&quot;,
+                &quot;sampled&quot;: true,
+                &quot;tracestate&quot;: null,
+                &quot;attributes&quot;: {
+                  &quot;e2e.id&quot;: &quot;e2e-jw175-0001&quot;,
+                  &quot;synthetic.order&quot;: &quot;B&quot;,
+                  &quot;synthetic.stage&quot;: 3,
+                  &quot;synthetic.propagator&quot;: &quot;JaegerPropagator&quot;
+                }
+              }
+            ]
+          },
+          &quot;final_injected&quot;: {
+            &quot;baggage&quot;: &quot;tenant=green,request.id=e2e-jw175-0001&quot;,
+            &quot;traceparent&quot;: &quot;00-4bf92f3577b34da6a3ce929d0e0e4736-0a0a0a0a0a0a0a0a-01&quot;,
+            &quot;uber-trace-id&quot;: &quot;4bf92f3577b34da6a3ce929d0e0e4736:0a0a0a0a0a0a0a0a:0000000000000000:03&quot;,
+            &quot;uberctx-request.id&quot;: &quot;e2e-jw175-0001&quot;,
+            &quot;uberctx-tenant&quot;: &quot;green&quot;
+          }
+        }
+      ],
+      &quot;composite_extract&quot;: {
+        &quot;span&quot;: {
+          &quot;valid&quot;: true,
+          &quot;trace_id&quot;: &quot;4bf92f3577b34da6a3ce929d0e0e4736&quot;,
+          &quot;span_id&quot;: &quot;0a0a0a0a0a0a0a0a&quot;,
+          &quot;is_remote&quot;: true,
+          &quot;sampled&quot;: true,
+          &quot;trace_flags&quot;: &quot;01&quot;,
+          &quot;tracestate&quot;: null
+        },
+        &quot;baggage&quot;: {
+          &quot;tenant&quot;: &quot;green&quot;,
+          &quot;request.id&quot;: &quot;e2e-jw175-0001&quot;
+        },
+        &quot;baggage_header&quot;: &quot;tenant=green,request.id=e2e-jw175-0001&quot;
+      },
+      &quot;composite_matches_replay&quot;: true,
+      &quot;final_injected&quot;: {
+        &quot;baggage&quot;: &quot;tenant=green,request.id=e2e-jw175-0001&quot;,
+        &quot;traceparent&quot;: &quot;00-4bf92f3577b34da6a3ce929d0e0e4736-0a0a0a0a0a0a0a0a-01&quot;,
+        &quot;uber-trace-id&quot;: &quot;4bf92f3577b34da6a3ce929d0e0e4736:0a0a0a0a0a0a0a0a:0000000000000000:03&quot;,
+        &quot;uberctx-request.id&quot;: &quot;e2e-jw175-0001&quot;,
+        &quot;uberctx-tenant&quot;: &quot;green&quot;
+      }
+    },
+    {
+      &quot;order_id&quot;: &quot;B&quot;,
+      &quot;order_label&quot;: &quot;tracecontext,baggage,jaeger&quot;,
+      &quot;fixture_id&quot;: &quot;partial&quot;,
+      &quot;e2e_id&quot;: &quot;e2e-jw175-0001&quot;,
+      &quot;stages&quot;: [
+        {
+          &quot;index&quot;: 1,
+          &quot;propagator&quot;: &quot;TraceContextTextMapPropagator&quot;,
+          &quot;reads&quot;: [
+            &quot;traceparent&quot;,
+            &quot;tracestate&quot;
+          ],
+          &quot;explanation&quot;: &quot;Parses traceparent and tracestate, then installs a remote NonRecordingSpan with is_remote=True.&quot;,
+          &quot;inbound_carrier&quot;: {
+            &quot;traceparent&quot;: &quot;00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01&quot;,
+            &quot;uber-trace-id&quot;: &quot;4bf92f3577b34da6a3ce929d0e0e4736:0a0a0a0a0a0a0a0a:cacacacacacacaca:1&quot;,
+            &quot;x-b3-spanid&quot;: &quot;b3b3b3b3b3b3b3b3&quot;,
+            &quot;x-b3-traceid&quot;: &quot;4bf92f3577b34da6a3ce929d0e0e4736&quot;
+          },
+          &quot;returned_context&quot;: {
+            &quot;span&quot;: {
+              &quot;valid&quot;: true,
+              &quot;trace_id&quot;: &quot;4bf92f3577b34da6a3ce929d0e0e4736&quot;,
+              &quot;span_id&quot;: &quot;00f067aa0ba902b7&quot;,
+              &quot;is_remote&quot;: true,
+              &quot;sampled&quot;: true,
+              &quot;trace_flags&quot;: &quot;01&quot;,
+              &quot;tracestate&quot;: null
+            },
+            &quot;baggage&quot;: {},
+            &quot;baggage_header&quot;: &quot;&quot;
+          },
+          &quot;context_diff&quot;: {
+            &quot;changed&quot;: {
+              &quot;span.valid&quot;: {
+                &quot;before&quot;: false,
+                &quot;after&quot;: true
+              },
+              &quot;span.trace_id&quot;: {
+                &quot;before&quot;: null,
+                &quot;after&quot;: &quot;4bf92f3577b34da6a3ce929d0e0e4736&quot;
+              },
+              &quot;span.span_id&quot;: {
+                &quot;before&quot;: null,
+                &quot;after&quot;: &quot;00f067aa0ba902b7&quot;
+              },
+              &quot;span.is_remote&quot;: {
+                &quot;before&quot;: false,
+                &quot;after&quot;: true
+              },
+              &quot;span.sampled&quot;: {
+                &quot;before&quot;: false,
+                &quot;after&quot;: true
+              },
+              &quot;span.trace_flags&quot;: {
+                &quot;before&quot;: &quot;00&quot;,
+                &quot;after&quot;: &quot;01&quot;
+              }
+            },
+            &quot;categories&quot;: [
+              &quot;parent&quot;,
+              &quot;sampling&quot;
+            ],
+            &quot;material&quot;: true
+          },
+          &quot;child_span&quot;: {
+            &quot;recording&quot;: true,
+            &quot;span_context&quot;: {
+              &quot;valid&quot;: true,
+              &quot;trace_id&quot;: &quot;4bf92f3577b34da6a3ce929d0e0e4736&quot;,
+              &quot;span_id&quot;: &quot;00c0ffee00c0ffee&quot;,
+              &quot;is_remote&quot;: false,
+              &quot;sampled&quot;: true,
+              &quot;trace_flags&quot;: &quot;01&quot;,
+              &quot;tracestate&quot;: null
+            },
+            &quot;exported_count&quot;: 1,
+            &quot;exported&quot;: [
+              {
+                &quot;name&quot;: &quot;partial-B-s1&quot;,
+                &quot;trace_id&quot;: &quot;4bf92f3577b34da6a3ce929d0e0e4736&quot;,
+                &quot;span_id&quot;: &quot;00c0ffee00c0ffee&quot;,
+                &quot;parent_span_id&quot;: &quot;00f067aa0ba902b7&quot;,
+                &quot;sampled&quot;: true,
+                &quot;tracestate&quot;: null,
+                &quot;attributes&quot;: {
+                  &quot;e2e.id&quot;: &quot;e2e-jw175-0001&quot;,
+                  &quot;synthetic.order&quot;: &quot;B&quot;,
+                  &quot;synthetic.stage&quot;: 1,
+                  &quot;synthetic.propagator&quot;: &quot;TraceContextTextMapPropagator&quot;
+                }
+              }
+            ]
+          },
+          &quot;final_injected&quot;: {
+            &quot;traceparent&quot;: &quot;00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01&quot;,
+            &quot;uber-trace-id&quot;: &quot;4bf92f3577b34da6a3ce929d0e0e4736:00f067aa0ba902b7:0000000000000000:03&quot;
+          }
+        },
+        {
+          &quot;index&quot;: 2,
+          &quot;propagator&quot;: &quot;W3CBaggagePropagator&quot;,
+          &quot;reads&quot;: [
+            &quot;baggage&quot;
+          ],
+          &quot;explanation&quot;: &quot;Reads the W3C baggage header into the baggage context key. It does not touch the span or tracestate.&quot;,
+          &quot;inbound_carrier&quot;: {
+            &quot;traceparent&quot;: &quot;00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01&quot;,
+            &quot;uber-trace-id&quot;: &quot;4bf92f3577b34da6a3ce929d0e0e4736:0a0a0a0a0a0a0a0a:cacacacacacacaca:1&quot;,
+            &quot;x-b3-spanid&quot;: &quot;b3b3b3b3b3b3b3b3&quot;,
+            &quot;x-b3-traceid&quot;: &quot;4bf92f3577b34da6a3ce929d0e0e4736&quot;
+          },
+          &quot;returned_context&quot;: {
+            &quot;span&quot;: {
+              &quot;valid&quot;: true,
+              &quot;trace_id&quot;: &quot;4bf92f3577b34da6a3ce929d0e0e4736&quot;,
+              &quot;span_id&quot;: &quot;00f067aa0ba902b7&quot;,
+              &quot;is_remote&quot;: true,
+              &quot;sampled&quot;: true,
+              &quot;trace_flags&quot;: &quot;01&quot;,
+              &quot;tracestate&quot;: null
+            },
+            &quot;baggage&quot;: {},
+            &quot;baggage_header&quot;: &quot;&quot;
+          },
+          &quot;context_diff&quot;: {
+            &quot;changed&quot;: {},
+            &quot;categories&quot;: [],
+            &quot;material&quot;: false
+          },
+          &quot;child_span&quot;: {
+            &quot;recording&quot;: true,
+            &quot;span_context&quot;: {
+              &quot;valid&quot;: true,
+              &quot;trace_id&quot;: &quot;4bf92f3577b34da6a3ce929d0e0e4736&quot;,
+              &quot;span_id&quot;: &quot;00c0ffee00c0ffee&quot;,
+              &quot;is_remote&quot;: false,
+              &quot;sampled&quot;: true,
+              &quot;trace_flags&quot;: &quot;01&quot;,
+              &quot;tracestate&quot;: null
+            },
+            &quot;exported_count&quot;: 1,
+            &quot;exported&quot;: [
+              {
+                &quot;name&quot;: &quot;partial-B-s2&quot;,
+                &quot;trace_id&quot;: &quot;4bf92f3577b34da6a3ce929d0e0e4736&quot;,
+                &quot;span_id&quot;: &quot;00c0ffee00c0ffee&quot;,
+                &quot;parent_span_id&quot;: &quot;00f067aa0ba902b7&quot;,
+                &quot;sampled&quot;: true,
+                &quot;tracestate&quot;: null,
+                &quot;attributes&quot;: {
+                  &quot;e2e.id&quot;: &quot;e2e-jw175-0001&quot;,
+                  &quot;synthetic.order&quot;: &quot;B&quot;,
+                  &quot;synthetic.stage&quot;: 2,
+                  &quot;synthetic.propagator&quot;: &quot;W3CBaggagePropagator&quot;
+                }
+              }
+            ]
+          },
+          &quot;final_injected&quot;: {
+            &quot;traceparent&quot;: &quot;00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01&quot;,
+            &quot;uber-trace-id&quot;: &quot;4bf92f3577b34da6a3ce929d0e0e4736:00f067aa0ba902b7:0000000000000000:03&quot;
+          }
+        },
+        {
+          &quot;index&quot;: 3,
+          &quot;propagator&quot;: &quot;JaegerPropagator&quot;,
+          &quot;reads&quot;: [
+            &quot;uber-trace-id&quot;,
+            &quot;uberctx-*&quot;
+          ],
+          &quot;explanation&quot;: &quot;Rebuilds the remote parent from uber-trace-id with trace_state=TraceState() (empty), then reads every uberctx-* key into baggage. Those entries overwrite same-named W3C baggage entries because this propagator runs later.&quot;,
+          &quot;inbound_carrier&quot;: {
+            &quot;traceparent&quot;: &quot;00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01&quot;,
+            &quot;uber-trace-id&quot;: &quot;4bf92f3577b34da6a3ce929d0e0e4736:0a0a0a0a0a0a0a0a:cacacacacacacaca:1&quot;,
+            &quot;x-b3-spanid&quot;: &quot;b3b3b3b3b3b3b3b3&quot;,
+            &quot;x-b3-traceid&quot;: &quot;4bf92f3577b34da6a3ce929d0e0e4736&quot;
+          },
+          &quot;returned_context&quot;: {
+            &quot;span&quot;: {
+              &quot;valid&quot;: true,
+              &quot;trace_id&quot;: &quot;4bf92f3577b34da6a3ce929d0e0e4736&quot;,
+              &quot;span_id&quot;: &quot;0a0a0a0a0a0a0a0a&quot;,
+              &quot;is_remote&quot;: true,
+              &quot;sampled&quot;: true,
+              &quot;trace_flags&quot;: &quot;01&quot;,
+              &quot;tracestate&quot;: null
+            },
+            &quot;baggage&quot;: {},
+            &quot;baggage_header&quot;: &quot;&quot;
+          },
+          &quot;context_diff&quot;: {
+            &quot;changed&quot;: {
+              &quot;span.span_id&quot;: {
+                &quot;before&quot;: &quot;00f067aa0ba902b7&quot;,
+                &quot;after&quot;: &quot;0a0a0a0a0a0a0a0a&quot;
+              }
+            },
+            &quot;categories&quot;: [
+              &quot;parent&quot;
+            ],
+            &quot;material&quot;: true
+          },
+          &quot;child_span&quot;: {
+            &quot;recording&quot;: true,
+            &quot;span_context&quot;: {
+              &quot;valid&quot;: true,
+              &quot;trace_id&quot;: &quot;4bf92f3577b34da6a3ce929d0e0e4736&quot;,
+              &quot;span_id&quot;: &quot;00c0ffee00c0ffee&quot;,
+              &quot;is_remote&quot;: false,
+              &quot;sampled&quot;: true,
+              &quot;trace_flags&quot;: &quot;01&quot;,
+              &quot;tracestate&quot;: null
+            },
+            &quot;exported_count&quot;: 1,
+            &quot;exported&quot;: [
+              {
+                &quot;name&quot;: &quot;partial-B-s3&quot;,
+                &quot;trace_id&quot;: &quot;4bf92f3577b34da6a3ce929d0e0e4736&quot;,
+                &quot;span_id&quot;: &quot;00c0ffee00c0ffee&quot;,
+                &quot;parent_span_id&quot;: &quot;0a0a0a0a0a0a0a0a&quot;,
+                &quot;sampled&quot;: true,
+                &quot;tracestate&quot;: null,
+                &quot;attributes&quot;: {
+                  &quot;e2e.id&quot;: &quot;e2e-jw175-0001&quot;,
+                  &quot;synthetic.order&quot;: &quot;B&quot;,
+                  &quot;synthetic.stage&quot;: 3,
+                  &quot;synthetic.propagator&quot;: &quot;JaegerPropagator&quot;
+                }
+              }
+            ]
+          },
+          &quot;final_injected&quot;: {
+            &quot;traceparent&quot;: &quot;00-4bf92f3577b34da6a3ce929d0e0e4736-0a0a0a0a0a0a0a0a-01&quot;,
+            &quot;uber-trace-id&quot;: &quot;4bf92f3577b34da6a3ce929d0e0e4736:0a0a0a0a0a0a0a0a:0000000000000000:03&quot;
+          }
+        }
+      ],
+      &quot;composite_extract&quot;: {
+        &quot;span&quot;: {
+          &quot;valid&quot;: true,
+          &quot;trace_id&quot;: &quot;4bf92f3577b34da6a3ce929d0e0e4736&quot;,
+          &quot;span_id&quot;: &quot;0a0a0a0a0a0a0a0a&quot;,
+          &quot;is_remote&quot;: true,
+          &quot;sampled&quot;: true,
+          &quot;trace_flags&quot;: &quot;01&quot;,
+          &quot;tracestate&quot;: null
+        },
+        &quot;baggage&quot;: {},
+        &quot;baggage_header&quot;: &quot;&quot;
+      },
+      &quot;composite_matches_replay&quot;: true,
+      &quot;final_injected&quot;: {
+        &quot;traceparent&quot;: &quot;00-4bf92f3577b34da6a3ce929d0e0e4736-0a0a0a0a0a0a0a0a-01&quot;,
+        &quot;uber-trace-id&quot;: &quot;4bf92f3577b34da6a3ce929d0e0e4736:0a0a0a0a0a0a0a0a:0000000000000000:03&quot;
+      }
+    }
+  ],
+  &quot;comparisons&quot;: [
+    {
+      &quot;fixture_id&quot;: &quot;full&quot;,
+      &quot;fixture_label&quot;: &quot;完整请求&quot;,
+      &quot;e2e_id&quot;: &quot;e2e-jw175-0001&quot;,
+      &quot;stage_pairs&quot;: [
+        {
+          &quot;index&quot;: 1,
+          &quot;propagator_A&quot;: &quot;TraceContextTextMapPropagator&quot;,
+          &quot;propagator_B&quot;: &quot;TraceContextTextMapPropagator&quot;,
+          &quot;categories_A&quot;: [
+            &quot;parent&quot;,
+            &quot;sampling&quot;,
+            &quot;tracestate&quot;
+          ],
+          &quot;categories_B&quot;: [
+            &quot;parent&quot;,
+            &quot;sampling&quot;,
+            &quot;tracestate&quot;
+          ],
+          &quot;differing_fields&quot;: {},
+          &quot;categories&quot;: [],
+          &quot;material&quot;: false
+        },
+        {
+          &quot;index&quot;: 2,
+          &quot;propagator_A&quot;: &quot;W3CBaggagePropagator&quot;,
+          &quot;propagator_B&quot;: &quot;W3CBaggagePropagator&quot;,
+          &quot;categories_A&quot;: [
+            &quot;baggage&quot;
+          ],
+          &quot;categories_B&quot;: [
+            &quot;baggage&quot;
+          ],
+          &quot;differing_fields&quot;: {},
+          &quot;categories&quot;: [],
+          &quot;material&quot;: false
+        },
+        {
+          &quot;index&quot;: 3,
+          &quot;propagator_A&quot;: &quot;B3MultiFormat&quot;,
+          &quot;propagator_B&quot;: &quot;JaegerPropagator&quot;,
+          &quot;categories_A&quot;: [
+            &quot;parent&quot;,
+            &quot;tracestate&quot;
+          ],
+          &quot;categories_B&quot;: [
+            &quot;baggage&quot;,
+            &quot;parent&quot;,
+            &quot;tracestate&quot;
+          ],
+          &quot;differing_fields&quot;: {
+            &quot;span.span_id&quot;: {
+              &quot;A&quot;: &quot;b3b3b3b3b3b3b3b3&quot;,
+              &quot;B&quot;: &quot;0a0a0a0a0a0a0a0a&quot;
+            },
+            &quot;baggage&quot;: {
+              &quot;A&quot;: {
+                &quot;tenant&quot;: &quot;blue&quot;,
+                &quot;request.id&quot;: &quot;e2e-jw175-0001&quot;
+              },
+              &quot;B&quot;: {
+                &quot;tenant&quot;: &quot;green&quot;,
+                &quot;request.id&quot;: &quot;e2e-jw175-0001&quot;
+              }
+            },
+            &quot;baggage_header&quot;: {
+              &quot;A&quot;: &quot;tenant=blue,request.id=e2e-jw175-0001&quot;,
+              &quot;B&quot;: &quot;tenant=green,request.id=e2e-jw175-0001&quot;
+            }
+          },
+          &quot;categories&quot;: [
+            &quot;baggage&quot;,
+            &quot;parent&quot;
+          ],
+          &quot;material&quot;: true
+        }
+      ],
+      &quot;first_divergence&quot;: {
+        &quot;index&quot;: 3,
+        &quot;propagator_A&quot;: &quot;B3MultiFormat&quot;,
+        &quot;propagator_B&quot;: &quot;JaegerPropagator&quot;,
+        &quot;categories_A&quot;: [
+          &quot;parent&quot;,
+          &quot;tracestate&quot;
+        ],
+        &quot;categories_B&quot;: [
+          &quot;baggage&quot;,
+          &quot;parent&quot;,
+          &quot;tracestate&quot;
+        ],
+        &quot;differing_fields&quot;: {
+          &quot;span.span_id&quot;: {
+            &quot;A&quot;: &quot;b3b3b3b3b3b3b3b3&quot;,
+            &quot;B&quot;: &quot;0a0a0a0a0a0a0a0a&quot;
+          },
+          &quot;baggage&quot;: {
+            &quot;A&quot;: {
+              &quot;tenant&quot;: &quot;blue&quot;,
+              &quot;request.id&quot;: &quot;e2e-jw175-0001&quot;
+            },
+            &quot;B&quot;: {
+              &quot;tenant&quot;: &quot;green&quot;,
+              &quot;request.id&quot;: &quot;e2e-jw175-0001&quot;
+            }
+          },
+          &quot;baggage_header&quot;: {
+            &quot;A&quot;: &quot;tenant=blue,request.id=e2e-jw175-0001&quot;,
+            &quot;B&quot;: &quot;tenant=green,request.id=e2e-jw175-0001&quot;
+          }
+        },
+        &quot;categories&quot;: [
+          &quot;baggage&quot;,
+          &quot;parent&quot;
+        ],
+        &quot;material&quot;: true
+      },
+      &quot;final&quot;: {
+        &quot;trace_id_A&quot;: &quot;4bf92f3577b34da6a3ce929d0e0e4736&quot;,
+        &quot;trace_id_B&quot;: &quot;4bf92f3577b34da6a3ce929d0e0e4736&quot;,
+        &quot;same_trace_id&quot;: true,
+        &quot;parent_A&quot;: &quot;b3b3b3b3b3b3b3b3&quot;,
+        &quot;parent_B&quot;: &quot;0a0a0a0a0a0a0a0a&quot;,
+        &quot;sampled_A&quot;: true,
+        &quot;sampled_B&quot;: true,
+        &quot;tracestate_A&quot;: null,
+        &quot;tracestate_B&quot;: null,
+        &quot;tracestate_stage2_A&quot;: &quot;vendor=alpha,region=cn-north&quot;,
+        &quot;tracestate_stage2_B&quot;: &quot;vendor=alpha,region=cn-north&quot;,
+        &quot;tracestate_lost_in_stage3_A&quot;: true,
+        &quot;tracestate_lost_in_stage3_B&quot;: true,
+        &quot;baggage_A&quot;: {
+          &quot;tenant&quot;: &quot;blue&quot;,
+          &quot;request.id&quot;: &quot;e2e-jw175-0001&quot;
+        },
+        &quot;baggage_B&quot;: {
+          &quot;tenant&quot;: &quot;green&quot;,
+          &quot;request.id&quot;: &quot;e2e-jw175-0001&quot;
+        },
+        &quot;injected_A&quot;: {
+          &quot;baggage&quot;: &quot;tenant=blue,request.id=e2e-jw175-0001&quot;,
+          &quot;traceparent&quot;: &quot;00-4bf92f3577b34da6a3ce929d0e0e4736-b3b3b3b3b3b3b3b3-01&quot;,
+          &quot;x-b3-sampled&quot;: &quot;1&quot;,
+          &quot;x-b3-spanid&quot;: &quot;b3b3b3b3b3b3b3b3&quot;,
+          &quot;x-b3-traceid&quot;: &quot;4bf92f3577b34da6a3ce929d0e0e4736&quot;
+        },
+        &quot;injected_B&quot;: {
+          &quot;baggage&quot;: &quot;tenant=green,request.id=e2e-jw175-0001&quot;,
+          &quot;traceparent&quot;: &quot;00-4bf92f3577b34da6a3ce929d0e0e4736-0a0a0a0a0a0a0a0a-01&quot;,
+          &quot;uber-trace-id&quot;: &quot;4bf92f3577b34da6a3ce929d0e0e4736:0a0a0a0a0a0a0a0a:0000000000000000:03&quot;,
+          &quot;uberctx-request.id&quot;: &quot;e2e-jw175-0001&quot;,
+          &quot;uberctx-tenant&quot;: &quot;green&quot;
+        }
+      }
+    },
+    {
+      &quot;fixture_id&quot;: &quot;partial&quot;,
+      &quot;fixture_label&quot;: &quot;缺少部分追踪字段的合成请求&quot;,
+      &quot;e2e_id&quot;: &quot;e2e-jw175-0001&quot;,
+      &quot;stage_pairs&quot;: [
+        {
+          &quot;index&quot;: 1,
+          &quot;propagator_A&quot;: &quot;TraceContextTextMapPropagator&quot;,
+          &quot;propagator_B&quot;: &quot;TraceContextTextMapPropagator&quot;,
+          &quot;categories_A&quot;: [
+            &quot;parent&quot;,
+            &quot;sampling&quot;
+          ],
+          &quot;categories_B&quot;: [
+            &quot;parent&quot;,
+            &quot;sampling&quot;
+          ],
+          &quot;differing_fields&quot;: {},
+          &quot;categories&quot;: [],
+          &quot;material&quot;: false
+        },
+        {
+          &quot;index&quot;: 2,
+          &quot;propagator_A&quot;: &quot;W3CBaggagePropagator&quot;,
+          &quot;propagator_B&quot;: &quot;W3CBaggagePropagator&quot;,
+          &quot;categories_A&quot;: [],
+          &quot;categories_B&quot;: [],
+          &quot;differing_fields&quot;: {},
+          &quot;categories&quot;: [],
+          &quot;material&quot;: false
+        },
+        {
+          &quot;index&quot;: 3,
+          &quot;propagator_A&quot;: &quot;B3MultiFormat&quot;,
+          &quot;propagator_B&quot;: &quot;JaegerPropagator&quot;,
+          &quot;categories_A&quot;: [
+            &quot;parent&quot;,
+            &quot;sampling&quot;
+          ],
+          &quot;categories_B&quot;: [
+            &quot;parent&quot;
+          ],
+          &quot;differing_fields&quot;: {
+            &quot;span.span_id&quot;: {
+              &quot;A&quot;: &quot;b3b3b3b3b3b3b3b3&quot;,
+              &quot;B&quot;: &quot;0a0a0a0a0a0a0a0a&quot;
+            },
+            &quot;span.sampled&quot;: {
+              &quot;A&quot;: false,
+              &quot;B&quot;: true
+            },
+            &quot;span.trace_flags&quot;: {
+              &quot;A&quot;: &quot;00&quot;,
+              &quot;B&quot;: &quot;01&quot;
+            }
+          },
+          &quot;categories&quot;: [
+            &quot;parent&quot;,
+            &quot;sampling&quot;
+          ],
+          &quot;material&quot;: true
+        }
+      ],
+      &quot;first_divergence&quot;: {
+        &quot;index&quot;: 3,
+        &quot;propagator_A&quot;: &quot;B3MultiFormat&quot;,
+        &quot;propagator_B&quot;: &quot;JaegerPropagator&quot;,
+        &quot;categories_A&quot;: [
+          &quot;parent&quot;,
+          &quot;sampling&quot;
+        ],
+        &quot;categories_B&quot;: [
+          &quot;parent&quot;
+        ],
+        &quot;differing_fields&quot;: {
+          &quot;span.span_id&quot;: {
+            &quot;A&quot;: &quot;b3b3b3b3b3b3b3b3&quot;,
+            &quot;B&quot;: &quot;0a0a0a0a0a0a0a0a&quot;
+          },
+          &quot;span.sampled&quot;: {
+            &quot;A&quot;: false,
+            &quot;B&quot;: true
+          },
+          &quot;span.trace_flags&quot;: {
+            &quot;A&quot;: &quot;00&quot;,
+            &quot;B&quot;: &quot;01&quot;
+          }
+        },
+        &quot;categories&quot;: [
+          &quot;parent&quot;,
+          &quot;sampling&quot;
+        ],
+        &quot;material&quot;: true
+      },
+      &quot;final&quot;: {
+        &quot;trace_id_A&quot;: &quot;4bf92f3577b34da6a3ce929d0e0e4736&quot;,
+        &quot;trace_id_B&quot;: &quot;4bf92f3577b34da6a3ce929d0e0e4736&quot;,
+        &quot;same_trace_id&quot;: true,
+        &quot;parent_A&quot;: &quot;b3b3b3b3b3b3b3b3&quot;,
+        &quot;parent_B&quot;: &quot;0a0a0a0a0a0a0a0a&quot;,
+        &quot;sampled_A&quot;: false,
+        &quot;sampled_B&quot;: true,
+        &quot;tracestate_A&quot;: null,
+        &quot;tracestate_B&quot;: null,
+        &quot;tracestate_stage2_A&quot;: null,
+        &quot;tracestate_stage2_B&quot;: null,
+        &quot;tracestate_lost_in_stage3_A&quot;: false,
+        &quot;tracestate_lost_in_stage3_B&quot;: false,
+        &quot;baggage_A&quot;: {},
+        &quot;baggage_B&quot;: {},
+        &quot;injected_A&quot;: {
+          &quot;traceparent&quot;: &quot;00-4bf92f3577b34da6a3ce929d0e0e4736-b3b3b3b3b3b3b3b3-00&quot;,
+          &quot;x-b3-sampled&quot;: &quot;0&quot;,
+          &quot;x-b3-spanid&quot;: &quot;b3b3b3b3b3b3b3b3&quot;,
+          &quot;x-b3-traceid&quot;: &quot;4bf92f3577b34da6a3ce929d0e0e4736&quot;
+        },
+        &quot;injected_B&quot;: {
+          &quot;traceparent&quot;: &quot;00-4bf92f3577b34da6a3ce929d0e0e4736-0a0a0a0a0a0a0a0a-01&quot;,
+          &quot;uber-trace-id&quot;: &quot;4bf92f3577b34da6a3ce929d0e0e4736:0a0a0a0a0a0a0a0a:0000000000000000:03&quot;
+        }
+      }
+    }
+  ],
+  &quot;findings&quot;: {
+    &quot;full&quot;: {
+      &quot;fixture_label&quot;: &quot;完整请求&quot;,
+      &quot;first_divergence_stage&quot;: &quot;阶段 3：B3MultiFormat vs JaegerPropagator&quot;,
+      &quot;first_divergence_categories&quot;: [
+        &quot;baggage&quot;,
+        &quot;parent&quot;
+      ],
+      &quot;parent_changed&quot;: true,
+      &quot;tracestate_no_longer_applies&quot;: true,
+      &quot;tracestate_absent_inbound&quot;: false,
+      &quot;baggage_rewritten&quot;: true,
+      &quot;sampling_changed&quot;: false,
+      &quot;same_trace_id&quot;: true,
+      &quot;conclusions&quot;: [
+        &quot;parent 改变：两条 trace 的 trace ID 相同，但下游 span.parent 分别指向 b3b3b3b3b3b3b3b3（A/B3）和 0a0a0a0a0a0a0a0a（B/Jaeger）。按 trace ID 能搜到同一条 trace，但按 parent 还原服务跳转时会得到不同的因果关系。&quot;,
+        &quot;tracestate 不再适用：第 2 阶段仍有 vendor=alpha,region=cn-north，第 3 阶段 B3/Jaeger 重建远端 SpanContext 时被清空。依赖 tracestate 做租户路由或采样权重的一方会看到“同 trace ID 但无 vendor 状态”。&quot;,
+        &quot;baggage 被另一个传播器改写：A 保留 W3C baggage 的 tenant=blue；B 的 JaegerPropagator 读取 uberctx-tenant=green 并覆盖同名 baggage。&quot;,
+        &quot;两种排查结论：A 侧应按“parent 指向 B3 span、baggage 仍是 blue”排查；B 侧应按“parent 指向 Jaeger span、baggage 已变成 green”排查。只看 trace ID 会把两者误判为同一条链路。&quot;
+      ]
+    },
+    &quot;partial&quot;: {
+      &quot;fixture_label&quot;: &quot;缺少部分追踪字段的合成请求&quot;,
+      &quot;first_divergence_stage&quot;: &quot;阶段 3：B3MultiFormat vs JaegerPropagator&quot;,
+      &quot;first_divergence_categories&quot;: [
+        &quot;parent&quot;,
+        &quot;sampling&quot;
+      ],
+      &quot;parent_changed&quot;: true,
+      &quot;tracestate_no_longer_applies&quot;: false,
+      &quot;tracestate_absent_inbound&quot;: true,
+      &quot;baggage_rewritten&quot;: false,
+      &quot;sampling_changed&quot;: true,
+      &quot;same_trace_id&quot;: true,
+      &quot;conclusions&quot;: [
+        &quot;parent 改变：两条 trace 的 trace ID 相同，但下游 span.parent 分别指向 b3b3b3b3b3b3b3b3（A/B3）和 0a0a0a0a0a0a0a0a（B/Jaeger）。按 trace ID 能搜到同一条 trace，但按 parent 还原服务跳转时会得到不同的因果关系。&quot;,
+        &quot;tracestate 自入站就缺失：第 2 阶段没有可传播的 tracestate，第 3 阶段并未额外清空。这与完整请求的“阶段 2 有、阶段 3 被清空”是两种不同故障，不能都归因为传播器丢状态。&quot;,
+        &quot;采样结论改变：A 的 B3 缺少 x-b3-sampled，按默认 \&quot;0\&quot; 把父上下文降为未采样，子 span 不导出；B 的 Jaeger uber-trace-id flags=1，子 span 正常导出。&quot;,
+        &quot;两种排查结论：A 侧先查 B3 采样字段缺失导致的丢 span；B 侧先查为何 parent 换成 Jaeger span、但 trace 仍完整。缺少 x-b3-sampled 与缺少 W3C baggage 是两类不同的告警，不能用同一条“按 trace ID 查全链路”结论覆盖。&quot;
+      ]
+    }
+  },
+  &quot;runbook&quot;: {
+    &quot;command&quot;: &quot;.venv/bin/python -m forensics.collect --out forensics/out&quot;,
+    &quot;repeat_command&quot;: &quot;forensics/reproduce.sh&quot;,
+    &quot;test_command&quot;: &quot;.venv/bin/python -m pytest -q forensics/tests/test_collect.py&quot;,
+    &quot;assertion&quot;: &quot;两次运行的 evidence.json 必须逐字节相同；full 与 partial 的 first_divergence 都必须是阶段 3（B3MultiFormat vs JaegerPropagator），且 trace ID 相同。&quot;
+  }
+}</pre>
+</details>
+
+<footer>
+  生成器：<code>forensics/collect.py</code> · schema <code>otel-propagator-forensics/v1</code> ·
+  合成字段：trace=<code>4bf92f3577b34da6a3ce929d0e0e4736</code>, child span=<code>00c0ffee00c0ffee</code> ·
+  端到端关联号 <code>e2e-jw175-0001</code>。
+  本报告完全离线生成，不含真实用户数据。
+</footer>
+</main>
+</body>
+</html>

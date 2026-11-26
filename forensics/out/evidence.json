@@ -1,0 +1,1573 @@
+{
+  "schema": "otel-propagator-forensics/v1",
+  "generated_by": "forensics/collect.py",
+  "e2e_id": "e2e-jw175-0001",
+  "synthetic_fields": {
+    "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+    "inbound_span_id": "00f067aa0ba902b7",
+    "b3_span_id": "b3b3b3b3b3b3b3b3",
+    "jaeger_span_id": "0a0a0a0a0a0a0a0a",
+    "jaeger_parent_id": "cacacacacacacaca",
+    "child_span_id": "00c0ffee00c0ffee",
+    "baggage_keys": [
+      "tenant",
+      "request.id"
+    ]
+  },
+  "orderings": [
+    {
+      "id": "A",
+      "label": "tracecontext,baggage,b3",
+      "description": "Service A terminates W3C then B3.",
+      "propagators": [
+        "TraceContextTextMapPropagator",
+        "W3CBaggagePropagator",
+        "B3MultiFormat"
+      ]
+    },
+    {
+      "id": "B",
+      "label": "tracecontext,baggage,jaeger",
+      "description": "Service B terminates W3C then Jaeger.",
+      "propagators": [
+        "TraceContextTextMapPropagator",
+        "W3CBaggagePropagator",
+        "JaegerPropagator"
+      ]
+    }
+  ],
+  "fixtures": [
+    {
+      "id": "full",
+      "label": "完整请求",
+      "e2e_id": "e2e-jw175-0001",
+      "missing": [],
+      "note": "所有传播器都能找到自己的字段。",
+      "carrier": {
+        "baggage": "tenant=blue,request.id=e2e-jw175-0001",
+        "traceparent": "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+        "tracestate": "vendor=alpha,region=cn-north",
+        "uber-trace-id": "4bf92f3577b34da6a3ce929d0e0e4736:0a0a0a0a0a0a0a0a:cacacacacacacaca:1",
+        "uberctx-tenant": "green",
+        "x-b3-sampled": "1",
+        "x-b3-spanid": "b3b3b3b3b3b3b3b3",
+        "x-b3-traceid": "4bf92f3577b34da6a3ce929d0e0e4736"
+      }
+    },
+    {
+      "id": "partial",
+      "label": "缺少部分追踪字段的合成请求",
+      "e2e_id": "e2e-jw175-0001",
+      "missing": [
+        "tracestate",
+        "baggage",
+        "x-b3-sampled",
+        "uberctx-tenant"
+      ],
+      "note": "W3C traceparent 仍完整且带 sampled=01；B3 缺 x-b3-sampled；Jaeger 的 uber-trace-id 仍带 flags=1；没有 W3C baggage，也没有 uberctx-*。",
+      "carrier": {
+        "traceparent": "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+        "uber-trace-id": "4bf92f3577b34da6a3ce929d0e0e4736:0a0a0a0a0a0a0a0a:cacacacacacacaca:1",
+        "x-b3-spanid": "b3b3b3b3b3b3b3b3",
+        "x-b3-traceid": "4bf92f3577b34da6a3ce929d0e0e4736"
+      }
+    }
+  ],
+  "runs": [
+    {
+      "order_id": "A",
+      "order_label": "tracecontext,baggage,b3",
+      "fixture_id": "full",
+      "e2e_id": "e2e-jw175-0001",
+      "stages": [
+        {
+          "index": 1,
+          "propagator": "TraceContextTextMapPropagator",
+          "reads": [
+            "traceparent",
+            "tracestate"
+          ],
+          "explanation": "Parses traceparent and tracestate, then installs a remote NonRecordingSpan with is_remote=True.",
+          "inbound_carrier": {
+            "baggage": "tenant=blue,request.id=e2e-jw175-0001",
+            "traceparent": "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+            "tracestate": "vendor=alpha,region=cn-north",
+            "uber-trace-id": "4bf92f3577b34da6a3ce929d0e0e4736:0a0a0a0a0a0a0a0a:cacacacacacacaca:1",
+            "uberctx-tenant": "green",
+            "x-b3-sampled": "1",
+            "x-b3-spanid": "b3b3b3b3b3b3b3b3",
+            "x-b3-traceid": "4bf92f3577b34da6a3ce929d0e0e4736"
+          },
+          "returned_context": {
+            "span": {
+              "valid": true,
+              "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+              "span_id": "00f067aa0ba902b7",
+              "is_remote": true,
+              "sampled": true,
+              "trace_flags": "01",
+              "tracestate": "vendor=alpha,region=cn-north"
+            },
+            "baggage": {},
+            "baggage_header": ""
+          },
+          "context_diff": {
+            "changed": {
+              "span.valid": {
+                "before": false,
+                "after": true
+              },
+              "span.trace_id": {
+                "before": null,
+                "after": "4bf92f3577b34da6a3ce929d0e0e4736"
+              },
+              "span.span_id": {
+                "before": null,
+                "after": "00f067aa0ba902b7"
+              },
+              "span.is_remote": {
+                "before": false,
+                "after": true
+              },
+              "span.sampled": {
+                "before": false,
+                "after": true
+              },
+              "span.trace_flags": {
+                "before": "00",
+                "after": "01"
+              },
+              "span.tracestate": {
+                "before": null,
+                "after": "vendor=alpha,region=cn-north"
+              }
+            },
+            "categories": [
+              "parent",
+              "sampling",
+              "tracestate"
+            ],
+            "material": true
+          },
+          "child_span": {
+            "recording": true,
+            "span_context": {
+              "valid": true,
+              "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+              "span_id": "00c0ffee00c0ffee",
+              "is_remote": false,
+              "sampled": true,
+              "trace_flags": "01",
+              "tracestate": "vendor=alpha,region=cn-north"
+            },
+            "exported_count": 1,
+            "exported": [
+              {
+                "name": "full-A-s1",
+                "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+                "span_id": "00c0ffee00c0ffee",
+                "parent_span_id": "00f067aa0ba902b7",
+                "sampled": true,
+                "tracestate": "vendor=alpha,region=cn-north",
+                "attributes": {
+                  "e2e.id": "e2e-jw175-0001",
+                  "synthetic.order": "A",
+                  "synthetic.stage": 1,
+                  "synthetic.propagator": "TraceContextTextMapPropagator"
+                }
+              }
+            ]
+          },
+          "final_injected": {
+            "traceparent": "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+            "tracestate": "vendor=alpha,region=cn-north",
+            "x-b3-sampled": "1",
+            "x-b3-spanid": "00f067aa0ba902b7",
+            "x-b3-traceid": "4bf92f3577b34da6a3ce929d0e0e4736"
+          }
+        },
+        {
+          "index": 2,
+          "propagator": "W3CBaggagePropagator",
+          "reads": [
+            "baggage"
+          ],
+          "explanation": "Reads the W3C baggage header into the baggage context key. It does not touch the span or tracestate.",
+          "inbound_carrier": {
+            "baggage": "tenant=blue,request.id=e2e-jw175-0001",
+            "traceparent": "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+            "tracestate": "vendor=alpha,region=cn-north",
+            "uber-trace-id": "4bf92f3577b34da6a3ce929d0e0e4736:0a0a0a0a0a0a0a0a:cacacacacacacaca:1",
+            "uberctx-tenant": "green",
+            "x-b3-sampled": "1",
+            "x-b3-spanid": "b3b3b3b3b3b3b3b3",
+            "x-b3-traceid": "4bf92f3577b34da6a3ce929d0e0e4736"
+          },
+          "returned_context": {
+            "span": {
+              "valid": true,
+              "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+              "span_id": "00f067aa0ba902b7",
+              "is_remote": true,
+              "sampled": true,
+              "trace_flags": "01",
+              "tracestate": "vendor=alpha,region=cn-north"
+            },
+            "baggage": {
+              "tenant": "blue",
+              "request.id": "e2e-jw175-0001"
+            },
+            "baggage_header": "tenant=blue,request.id=e2e-jw175-0001"
+          },
+          "context_diff": {
+            "changed": {
+              "baggage": {
+                "before": {},
+                "after": {
+                  "tenant": "blue",
+                  "request.id": "e2e-jw175-0001"
+                }
+              },
+              "baggage_header": {
+                "before": "",
+                "after": "tenant=blue,request.id=e2e-jw175-0001"
+              }
+            },
+            "categories": [
+              "baggage"
+            ],
+            "material": true
+          },
+          "child_span": {
+            "recording": true,
+            "span_context": {
+              "valid": true,
+              "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+              "span_id": "00c0ffee00c0ffee",
+              "is_remote": false,
+              "sampled": true,
+              "trace_flags": "01",
+              "tracestate": "vendor=alpha,region=cn-north"
+            },
+            "exported_count": 1,
+            "exported": [
+              {
+                "name": "full-A-s2",
+                "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+                "span_id": "00c0ffee00c0ffee",
+                "parent_span_id": "00f067aa0ba902b7",
+                "sampled": true,
+                "tracestate": "vendor=alpha,region=cn-north",
+                "attributes": {
+                  "e2e.id": "e2e-jw175-0001",
+                  "synthetic.order": "A",
+                  "synthetic.stage": 2,
+                  "synthetic.propagator": "W3CBaggagePropagator"
+                }
+              }
+            ]
+          },
+          "final_injected": {
+            "baggage": "tenant=blue,request.id=e2e-jw175-0001",
+            "traceparent": "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+            "tracestate": "vendor=alpha,region=cn-north",
+            "x-b3-sampled": "1",
+            "x-b3-spanid": "00f067aa0ba902b7",
+            "x-b3-traceid": "4bf92f3577b34da6a3ce929d0e0e4736"
+          }
+        },
+        {
+          "index": 3,
+          "propagator": "B3MultiFormat",
+          "reads": [
+            "b3",
+            "x-b3-traceid",
+            "x-b3-spanid",
+            "x-b3-sampled",
+            "x-b3-flags"
+          ],
+          "explanation": "Rebuilds the remote parent from x-b3-* with trace_state=TraceState() (empty). A missing x-b3-sampled defaults to \"0\", so an unsampled B3 parent replaces an already-sampled W3C parent.",
+          "inbound_carrier": {
+            "baggage": "tenant=blue,request.id=e2e-jw175-0001",
+            "traceparent": "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+            "tracestate": "vendor=alpha,region=cn-north",
+            "uber-trace-id": "4bf92f3577b34da6a3ce929d0e0e4736:0a0a0a0a0a0a0a0a:cacacacacacacaca:1",
+            "uberctx-tenant": "green",
+            "x-b3-sampled": "1",
+            "x-b3-spanid": "b3b3b3b3b3b3b3b3",
+            "x-b3-traceid": "4bf92f3577b34da6a3ce929d0e0e4736"
+          },
+          "returned_context": {
+            "span": {
+              "valid": true,
+              "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+              "span_id": "b3b3b3b3b3b3b3b3",
+              "is_remote": true,
+              "sampled": true,
+              "trace_flags": "01",
+              "tracestate": null
+            },
+            "baggage": {
+              "tenant": "blue",
+              "request.id": "e2e-jw175-0001"
+            },
+            "baggage_header": "tenant=blue,request.id=e2e-jw175-0001"
+          },
+          "context_diff": {
+            "changed": {
+              "span.span_id": {
+                "before": "00f067aa0ba902b7",
+                "after": "b3b3b3b3b3b3b3b3"
+              },
+              "span.tracestate": {
+                "before": "vendor=alpha,region=cn-north",
+                "after": null
+              }
+            },
+            "categories": [
+              "parent",
+              "tracestate"
+            ],
+            "material": true
+          },
+          "child_span": {
+            "recording": true,
+            "span_context": {
+              "valid": true,
+              "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+              "span_id": "00c0ffee00c0ffee",
+              "is_remote": false,
+              "sampled": true,
+              "trace_flags": "01",
+              "tracestate": null
+            },
+            "exported_count": 1,
+            "exported": [
+              {
+                "name": "full-A-s3",
+                "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+                "span_id": "00c0ffee00c0ffee",
+                "parent_span_id": "b3b3b3b3b3b3b3b3",
+                "sampled": true,
+                "tracestate": null,
+                "attributes": {
+                  "e2e.id": "e2e-jw175-0001",
+                  "synthetic.order": "A",
+                  "synthetic.stage": 3,
+                  "synthetic.propagator": "B3MultiFormat"
+                }
+              }
+            ]
+          },
+          "final_injected": {
+            "baggage": "tenant=blue,request.id=e2e-jw175-0001",
+            "traceparent": "00-4bf92f3577b34da6a3ce929d0e0e4736-b3b3b3b3b3b3b3b3-01",
+            "x-b3-sampled": "1",
+            "x-b3-spanid": "b3b3b3b3b3b3b3b3",
+            "x-b3-traceid": "4bf92f3577b34da6a3ce929d0e0e4736"
+          }
+        }
+      ],
+      "composite_extract": {
+        "span": {
+          "valid": true,
+          "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+          "span_id": "b3b3b3b3b3b3b3b3",
+          "is_remote": true,
+          "sampled": true,
+          "trace_flags": "01",
+          "tracestate": null
+        },
+        "baggage": {
+          "tenant": "blue",
+          "request.id": "e2e-jw175-0001"
+        },
+        "baggage_header": "tenant=blue,request.id=e2e-jw175-0001"
+      },
+      "composite_matches_replay": true,
+      "final_injected": {
+        "baggage": "tenant=blue,request.id=e2e-jw175-0001",
+        "traceparent": "00-4bf92f3577b34da6a3ce929d0e0e4736-b3b3b3b3b3b3b3b3-01",
+        "x-b3-sampled": "1",
+        "x-b3-spanid": "b3b3b3b3b3b3b3b3",
+        "x-b3-traceid": "4bf92f3577b34da6a3ce929d0e0e4736"
+      }
+    },
+    {
+      "order_id": "A",
+      "order_label": "tracecontext,baggage,b3",
+      "fixture_id": "partial",
+      "e2e_id": "e2e-jw175-0001",
+      "stages": [
+        {
+          "index": 1,
+          "propagator": "TraceContextTextMapPropagator",
+          "reads": [
+            "traceparent",
+            "tracestate"
+          ],
+          "explanation": "Parses traceparent and tracestate, then installs a remote NonRecordingSpan with is_remote=True.",
+          "inbound_carrier": {
+            "traceparent": "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+            "uber-trace-id": "4bf92f3577b34da6a3ce929d0e0e4736:0a0a0a0a0a0a0a0a:cacacacacacacaca:1",
+            "x-b3-spanid": "b3b3b3b3b3b3b3b3",
+            "x-b3-traceid": "4bf92f3577b34da6a3ce929d0e0e4736"
+          },
+          "returned_context": {
+            "span": {
+              "valid": true,
+              "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+              "span_id": "00f067aa0ba902b7",
+              "is_remote": true,
+              "sampled": true,
+              "trace_flags": "01",
+              "tracestate": null
+            },
+            "baggage": {},
+            "baggage_header": ""
+          },
+          "context_diff": {
+            "changed": {
+              "span.valid": {
+                "before": false,
+                "after": true
+              },
+              "span.trace_id": {
+                "before": null,
+                "after": "4bf92f3577b34da6a3ce929d0e0e4736"
+              },
+              "span.span_id": {
+                "before": null,
+                "after": "00f067aa0ba902b7"
+              },
+              "span.is_remote": {
+                "before": false,
+                "after": true
+              },
+              "span.sampled": {
+                "before": false,
+                "after": true
+              },
+              "span.trace_flags": {
+                "before": "00",
+                "after": "01"
+              }
+            },
+            "categories": [
+              "parent",
+              "sampling"
+            ],
+            "material": true
+          },
+          "child_span": {
+            "recording": true,
+            "span_context": {
+              "valid": true,
+              "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+              "span_id": "00c0ffee00c0ffee",
+              "is_remote": false,
+              "sampled": true,
+              "trace_flags": "01",
+              "tracestate": null
+            },
+            "exported_count": 1,
+            "exported": [
+              {
+                "name": "partial-A-s1",
+                "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+                "span_id": "00c0ffee00c0ffee",
+                "parent_span_id": "00f067aa0ba902b7",
+                "sampled": true,
+                "tracestate": null,
+                "attributes": {
+                  "e2e.id": "e2e-jw175-0001",
+                  "synthetic.order": "A",
+                  "synthetic.stage": 1,
+                  "synthetic.propagator": "TraceContextTextMapPropagator"
+                }
+              }
+            ]
+          },
+          "final_injected": {
+            "traceparent": "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+            "x-b3-sampled": "1",
+            "x-b3-spanid": "00f067aa0ba902b7",
+            "x-b3-traceid": "4bf92f3577b34da6a3ce929d0e0e4736"
+          }
+        },
+        {
+          "index": 2,
+          "propagator": "W3CBaggagePropagator",
+          "reads": [
+            "baggage"
+          ],
+          "explanation": "Reads the W3C baggage header into the baggage context key. It does not touch the span or tracestate.",
+          "inbound_carrier": {
+            "traceparent": "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+            "uber-trace-id": "4bf92f3577b34da6a3ce929d0e0e4736:0a0a0a0a0a0a0a0a:cacacacacacacaca:1",
+            "x-b3-spanid": "b3b3b3b3b3b3b3b3",
+            "x-b3-traceid": "4bf92f3577b34da6a3ce929d0e0e4736"
+          },
+          "returned_context": {
+            "span": {
+              "valid": true,
+              "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+              "span_id": "00f067aa0ba902b7",
+              "is_remote": true,
+              "sampled": true,
+              "trace_flags": "01",
+              "tracestate": null
+            },
+            "baggage": {},
+            "baggage_header": ""
+          },
+          "context_diff": {
+            "changed": {},
+            "categories": [],
+            "material": false
+          },
+          "child_span": {
+            "recording": true,
+            "span_context": {
+              "valid": true,
+              "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+              "span_id": "00c0ffee00c0ffee",
+              "is_remote": false,
+              "sampled": true,
+              "trace_flags": "01",
+              "tracestate": null
+            },
+            "exported_count": 1,
+            "exported": [
+              {
+                "name": "partial-A-s2",
+                "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+                "span_id": "00c0ffee00c0ffee",
+                "parent_span_id": "00f067aa0ba902b7",
+                "sampled": true,
+                "tracestate": null,
+                "attributes": {
+                  "e2e.id": "e2e-jw175-0001",
+                  "synthetic.order": "A",
+                  "synthetic.stage": 2,
+                  "synthetic.propagator": "W3CBaggagePropagator"
+                }
+              }
+            ]
+          },
+          "final_injected": {
+            "traceparent": "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+            "x-b3-sampled": "1",
+            "x-b3-spanid": "00f067aa0ba902b7",
+            "x-b3-traceid": "4bf92f3577b34da6a3ce929d0e0e4736"
+          }
+        },
+        {
+          "index": 3,
+          "propagator": "B3MultiFormat",
+          "reads": [
+            "b3",
+            "x-b3-traceid",
+            "x-b3-spanid",
+            "x-b3-sampled",
+            "x-b3-flags"
+          ],
+          "explanation": "Rebuilds the remote parent from x-b3-* with trace_state=TraceState() (empty). A missing x-b3-sampled defaults to \"0\", so an unsampled B3 parent replaces an already-sampled W3C parent.",
+          "inbound_carrier": {
+            "traceparent": "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+            "uber-trace-id": "4bf92f3577b34da6a3ce929d0e0e4736:0a0a0a0a0a0a0a0a:cacacacacacacaca:1",
+            "x-b3-spanid": "b3b3b3b3b3b3b3b3",
+            "x-b3-traceid": "4bf92f3577b34da6a3ce929d0e0e4736"
+          },
+          "returned_context": {
+            "span": {
+              "valid": true,
+              "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+              "span_id": "b3b3b3b3b3b3b3b3",
+              "is_remote": true,
+              "sampled": false,
+              "trace_flags": "00",
+              "tracestate": null
+            },
+            "baggage": {},
+            "baggage_header": ""
+          },
+          "context_diff": {
+            "changed": {
+              "span.span_id": {
+                "before": "00f067aa0ba902b7",
+                "after": "b3b3b3b3b3b3b3b3"
+              },
+              "span.sampled": {
+                "before": true,
+                "after": false
+              },
+              "span.trace_flags": {
+                "before": "01",
+                "after": "00"
+              }
+            },
+            "categories": [
+              "parent",
+              "sampling"
+            ],
+            "material": true
+          },
+          "child_span": {
+            "recording": false,
+            "span_context": {
+              "valid": true,
+              "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+              "span_id": "00c0ffee00c0ffee",
+              "is_remote": false,
+              "sampled": false,
+              "trace_flags": "00",
+              "tracestate": null
+            },
+            "exported_count": 0,
+            "exported": []
+          },
+          "final_injected": {
+            "traceparent": "00-4bf92f3577b34da6a3ce929d0e0e4736-b3b3b3b3b3b3b3b3-00",
+            "x-b3-sampled": "0",
+            "x-b3-spanid": "b3b3b3b3b3b3b3b3",
+            "x-b3-traceid": "4bf92f3577b34da6a3ce929d0e0e4736"
+          }
+        }
+      ],
+      "composite_extract": {
+        "span": {
+          "valid": true,
+          "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+          "span_id": "b3b3b3b3b3b3b3b3",
+          "is_remote": true,
+          "sampled": false,
+          "trace_flags": "00",
+          "tracestate": null
+        },
+        "baggage": {},
+        "baggage_header": ""
+      },
+      "composite_matches_replay": true,
+      "final_injected": {
+        "traceparent": "00-4bf92f3577b34da6a3ce929d0e0e4736-b3b3b3b3b3b3b3b3-00",
+        "x-b3-sampled": "0",
+        "x-b3-spanid": "b3b3b3b3b3b3b3b3",
+        "x-b3-traceid": "4bf92f3577b34da6a3ce929d0e0e4736"
+      }
+    },
+    {
+      "order_id": "B",
+      "order_label": "tracecontext,baggage,jaeger",
+      "fixture_id": "full",
+      "e2e_id": "e2e-jw175-0001",
+      "stages": [
+        {
+          "index": 1,
+          "propagator": "TraceContextTextMapPropagator",
+          "reads": [
+            "traceparent",
+            "tracestate"
+          ],
+          "explanation": "Parses traceparent and tracestate, then installs a remote NonRecordingSpan with is_remote=True.",
+          "inbound_carrier": {
+            "baggage": "tenant=blue,request.id=e2e-jw175-0001",
+            "traceparent": "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+            "tracestate": "vendor=alpha,region=cn-north",
+            "uber-trace-id": "4bf92f3577b34da6a3ce929d0e0e4736:0a0a0a0a0a0a0a0a:cacacacacacacaca:1",
+            "uberctx-tenant": "green",
+            "x-b3-sampled": "1",
+            "x-b3-spanid": "b3b3b3b3b3b3b3b3",
+            "x-b3-traceid": "4bf92f3577b34da6a3ce929d0e0e4736"
+          },
+          "returned_context": {
+            "span": {
+              "valid": true,
+              "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+              "span_id": "00f067aa0ba902b7",
+              "is_remote": true,
+              "sampled": true,
+              "trace_flags": "01",
+              "tracestate": "vendor=alpha,region=cn-north"
+            },
+            "baggage": {},
+            "baggage_header": ""
+          },
+          "context_diff": {
+            "changed": {
+              "span.valid": {
+                "before": false,
+                "after": true
+              },
+              "span.trace_id": {
+                "before": null,
+                "after": "4bf92f3577b34da6a3ce929d0e0e4736"
+              },
+              "span.span_id": {
+                "before": null,
+                "after": "00f067aa0ba902b7"
+              },
+              "span.is_remote": {
+                "before": false,
+                "after": true
+              },
+              "span.sampled": {
+                "before": false,
+                "after": true
+              },
+              "span.trace_flags": {
+                "before": "00",
+                "after": "01"
+              },
+              "span.tracestate": {
+                "before": null,
+                "after": "vendor=alpha,region=cn-north"
+              }
+            },
+            "categories": [
+              "parent",
+              "sampling",
+              "tracestate"
+            ],
+            "material": true
+          },
+          "child_span": {
+            "recording": true,
+            "span_context": {
+              "valid": true,
+              "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+              "span_id": "00c0ffee00c0ffee",
+              "is_remote": false,
+              "sampled": true,
+              "trace_flags": "01",
+              "tracestate": "vendor=alpha,region=cn-north"
+            },
+            "exported_count": 1,
+            "exported": [
+              {
+                "name": "full-B-s1",
+                "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+                "span_id": "00c0ffee00c0ffee",
+                "parent_span_id": "00f067aa0ba902b7",
+                "sampled": true,
+                "tracestate": "vendor=alpha,region=cn-north",
+                "attributes": {
+                  "e2e.id": "e2e-jw175-0001",
+                  "synthetic.order": "B",
+                  "synthetic.stage": 1,
+                  "synthetic.propagator": "TraceContextTextMapPropagator"
+                }
+              }
+            ]
+          },
+          "final_injected": {
+            "traceparent": "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+            "tracestate": "vendor=alpha,region=cn-north",
+            "uber-trace-id": "4bf92f3577b34da6a3ce929d0e0e4736:00f067aa0ba902b7:0000000000000000:03"
+          }
+        },
+        {
+          "index": 2,
+          "propagator": "W3CBaggagePropagator",
+          "reads": [
+            "baggage"
+          ],
+          "explanation": "Reads the W3C baggage header into the baggage context key. It does not touch the span or tracestate.",
+          "inbound_carrier": {
+            "baggage": "tenant=blue,request.id=e2e-jw175-0001",
+            "traceparent": "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+            "tracestate": "vendor=alpha,region=cn-north",
+            "uber-trace-id": "4bf92f3577b34da6a3ce929d0e0e4736:0a0a0a0a0a0a0a0a:cacacacacacacaca:1",
+            "uberctx-tenant": "green",
+            "x-b3-sampled": "1",
+            "x-b3-spanid": "b3b3b3b3b3b3b3b3",
+            "x-b3-traceid": "4bf92f3577b34da6a3ce929d0e0e4736"
+          },
+          "returned_context": {
+            "span": {
+              "valid": true,
+              "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+              "span_id": "00f067aa0ba902b7",
+              "is_remote": true,
+              "sampled": true,
+              "trace_flags": "01",
+              "tracestate": "vendor=alpha,region=cn-north"
+            },
+            "baggage": {
+              "tenant": "blue",
+              "request.id": "e2e-jw175-0001"
+            },
+            "baggage_header": "tenant=blue,request.id=e2e-jw175-0001"
+          },
+          "context_diff": {
+            "changed": {
+              "baggage": {
+                "before": {},
+                "after": {
+                  "tenant": "blue",
+                  "request.id": "e2e-jw175-0001"
+                }
+              },
+              "baggage_header": {
+                "before": "",
+                "after": "tenant=blue,request.id=e2e-jw175-0001"
+              }
+            },
+            "categories": [
+              "baggage"
+            ],
+            "material": true
+          },
+          "child_span": {
+            "recording": true,
+            "span_context": {
+              "valid": true,
+              "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+              "span_id": "00c0ffee00c0ffee",
+              "is_remote": false,
+              "sampled": true,
+              "trace_flags": "01",
+              "tracestate": "vendor=alpha,region=cn-north"
+            },
+            "exported_count": 1,
+            "exported": [
+              {
+                "name": "full-B-s2",
+                "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+                "span_id": "00c0ffee00c0ffee",
+                "parent_span_id": "00f067aa0ba902b7",
+                "sampled": true,
+                "tracestate": "vendor=alpha,region=cn-north",
+                "attributes": {
+                  "e2e.id": "e2e-jw175-0001",
+                  "synthetic.order": "B",
+                  "synthetic.stage": 2,
+                  "synthetic.propagator": "W3CBaggagePropagator"
+                }
+              }
+            ]
+          },
+          "final_injected": {
+            "baggage": "tenant=blue,request.id=e2e-jw175-0001",
+            "traceparent": "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+            "tracestate": "vendor=alpha,region=cn-north",
+            "uber-trace-id": "4bf92f3577b34da6a3ce929d0e0e4736:00f067aa0ba902b7:0000000000000000:03",
+            "uberctx-request.id": "e2e-jw175-0001",
+            "uberctx-tenant": "blue"
+          }
+        },
+        {
+          "index": 3,
+          "propagator": "JaegerPropagator",
+          "reads": [
+            "uber-trace-id",
+            "uberctx-*"
+          ],
+          "explanation": "Rebuilds the remote parent from uber-trace-id with trace_state=TraceState() (empty), then reads every uberctx-* key into baggage. Those entries overwrite same-named W3C baggage entries because this propagator runs later.",
+          "inbound_carrier": {
+            "baggage": "tenant=blue,request.id=e2e-jw175-0001",
+            "traceparent": "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+            "tracestate": "vendor=alpha,region=cn-north",
+            "uber-trace-id": "4bf92f3577b34da6a3ce929d0e0e4736:0a0a0a0a0a0a0a0a:cacacacacacacaca:1",
+            "uberctx-tenant": "green",
+            "x-b3-sampled": "1",
+            "x-b3-spanid": "b3b3b3b3b3b3b3b3",
+            "x-b3-traceid": "4bf92f3577b34da6a3ce929d0e0e4736"
+          },
+          "returned_context": {
+            "span": {
+              "valid": true,
+              "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+              "span_id": "0a0a0a0a0a0a0a0a",
+              "is_remote": true,
+              "sampled": true,
+              "trace_flags": "01",
+              "tracestate": null
+            },
+            "baggage": {
+              "tenant": "green",
+              "request.id": "e2e-jw175-0001"
+            },
+            "baggage_header": "tenant=green,request.id=e2e-jw175-0001"
+          },
+          "context_diff": {
+            "changed": {
+              "span.span_id": {
+                "before": "00f067aa0ba902b7",
+                "after": "0a0a0a0a0a0a0a0a"
+              },
+              "span.tracestate": {
+                "before": "vendor=alpha,region=cn-north",
+                "after": null
+              },
+              "baggage": {
+                "before": {
+                  "tenant": "blue",
+                  "request.id": "e2e-jw175-0001"
+                },
+                "after": {
+                  "tenant": "green",
+                  "request.id": "e2e-jw175-0001"
+                }
+              },
+              "baggage_header": {
+                "before": "tenant=blue,request.id=e2e-jw175-0001",
+                "after": "tenant=green,request.id=e2e-jw175-0001"
+              }
+            },
+            "categories": [
+              "baggage",
+              "parent",
+              "tracestate"
+            ],
+            "material": true
+          },
+          "child_span": {
+            "recording": true,
+            "span_context": {
+              "valid": true,
+              "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+              "span_id": "00c0ffee00c0ffee",
+              "is_remote": false,
+              "sampled": true,
+              "trace_flags": "01",
+              "tracestate": null
+            },
+            "exported_count": 1,
+            "exported": [
+              {
+                "name": "full-B-s3",
+                "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+                "span_id": "00c0ffee00c0ffee",
+                "parent_span_id": "0a0a0a0a0a0a0a0a",
+                "sampled": true,
+                "tracestate": null,
+                "attributes": {
+                  "e2e.id": "e2e-jw175-0001",
+                  "synthetic.order": "B",
+                  "synthetic.stage": 3,
+                  "synthetic.propagator": "JaegerPropagator"
+                }
+              }
+            ]
+          },
+          "final_injected": {
+            "baggage": "tenant=green,request.id=e2e-jw175-0001",
+            "traceparent": "00-4bf92f3577b34da6a3ce929d0e0e4736-0a0a0a0a0a0a0a0a-01",
+            "uber-trace-id": "4bf92f3577b34da6a3ce929d0e0e4736:0a0a0a0a0a0a0a0a:0000000000000000:03",
+            "uberctx-request.id": "e2e-jw175-0001",
+            "uberctx-tenant": "green"
+          }
+        }
+      ],
+      "composite_extract": {
+        "span": {
+          "valid": true,
+          "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+          "span_id": "0a0a0a0a0a0a0a0a",
+          "is_remote": true,
+          "sampled": true,
+          "trace_flags": "01",
+          "tracestate": null
+        },
+        "baggage": {
+          "tenant": "green",
+          "request.id": "e2e-jw175-0001"
+        },
+        "baggage_header": "tenant=green,request.id=e2e-jw175-0001"
+      },
+      "composite_matches_replay": true,
+      "final_injected": {
+        "baggage": "tenant=green,request.id=e2e-jw175-0001",
+        "traceparent": "00-4bf92f3577b34da6a3ce929d0e0e4736-0a0a0a0a0a0a0a0a-01",
+        "uber-trace-id": "4bf92f3577b34da6a3ce929d0e0e4736:0a0a0a0a0a0a0a0a:0000000000000000:03",
+        "uberctx-request.id": "e2e-jw175-0001",
+        "uberctx-tenant": "green"
+      }
+    },
+    {
+      "order_id": "B",
+      "order_label": "tracecontext,baggage,jaeger",
+      "fixture_id": "partial",
+      "e2e_id": "e2e-jw175-0001",
+      "stages": [
+        {
+          "index": 1,
+          "propagator": "TraceContextTextMapPropagator",
+          "reads": [
+            "traceparent",
+            "tracestate"
+          ],
+          "explanation": "Parses traceparent and tracestate, then installs a remote NonRecordingSpan with is_remote=True.",
+          "inbound_carrier": {
+            "traceparent": "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+            "uber-trace-id": "4bf92f3577b34da6a3ce929d0e0e4736:0a0a0a0a0a0a0a0a:cacacacacacacaca:1",
+            "x-b3-spanid": "b3b3b3b3b3b3b3b3",
+            "x-b3-traceid": "4bf92f3577b34da6a3ce929d0e0e4736"
+          },
+          "returned_context": {
+            "span": {
+              "valid": true,
+              "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+              "span_id": "00f067aa0ba902b7",
+              "is_remote": true,
+              "sampled": true,
+              "trace_flags": "01",
+              "tracestate": null
+            },
+            "baggage": {},
+            "baggage_header": ""
+          },
+          "context_diff": {
+            "changed": {
+              "span.valid": {
+                "before": false,
+                "after": true
+              },
+              "span.trace_id": {
+                "before": null,
+                "after": "4bf92f3577b34da6a3ce929d0e0e4736"
+              },
+              "span.span_id": {
+                "before": null,
+                "after": "00f067aa0ba902b7"
+              },
+              "span.is_remote": {
+                "before": false,
+                "after": true
+              },
+              "span.sampled": {
+                "before": false,
+                "after": true
+              },
+              "span.trace_flags": {
+                "before": "00",
+                "after": "01"
+              }
+            },
+            "categories": [
+              "parent",
+              "sampling"
+            ],
+            "material": true
+          },
+          "child_span": {
+            "recording": true,
+            "span_context": {
+              "valid": true,
+              "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+              "span_id": "00c0ffee00c0ffee",
+              "is_remote": false,
+              "sampled": true,
+              "trace_flags": "01",
+              "tracestate": null
+            },
+            "exported_count": 1,
+            "exported": [
+              {
+                "name": "partial-B-s1",
+                "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+                "span_id": "00c0ffee00c0ffee",
+                "parent_span_id": "00f067aa0ba902b7",
+                "sampled": true,
+                "tracestate": null,
+                "attributes": {
+                  "e2e.id": "e2e-jw175-0001",
+                  "synthetic.order": "B",
+                  "synthetic.stage": 1,
+                  "synthetic.propagator": "TraceContextTextMapPropagator"
+                }
+              }
+            ]
+          },
+          "final_injected": {
+            "traceparent": "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+            "uber-trace-id": "4bf92f3577b34da6a3ce929d0e0e4736:00f067aa0ba902b7:0000000000000000:03"
+          }
+        },
+        {
+          "index": 2,
+          "propagator": "W3CBaggagePropagator",
+          "reads": [
+            "baggage"
+          ],
+          "explanation": "Reads the W3C baggage header into the baggage context key. It does not touch the span or tracestate.",
+          "inbound_carrier": {
+            "traceparent": "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+            "uber-trace-id": "4bf92f3577b34da6a3ce929d0e0e4736:0a0a0a0a0a0a0a0a:cacacacacacacaca:1",
+            "x-b3-spanid": "b3b3b3b3b3b3b3b3",
+            "x-b3-traceid": "4bf92f3577b34da6a3ce929d0e0e4736"
+          },
+          "returned_context": {
+            "span": {
+              "valid": true,
+              "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+              "span_id": "00f067aa0ba902b7",
+              "is_remote": true,
+              "sampled": true,
+              "trace_flags": "01",
+              "tracestate": null
+            },
+            "baggage": {},
+            "baggage_header": ""
+          },
+          "context_diff": {
+            "changed": {},
+            "categories": [],
+            "material": false
+          },
+          "child_span": {
+            "recording": true,
+            "span_context": {
+              "valid": true,
+              "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+              "span_id": "00c0ffee00c0ffee",
+              "is_remote": false,
+              "sampled": true,
+              "trace_flags": "01",
+              "tracestate": null
+            },
+            "exported_count": 1,
+            "exported": [
+              {
+                "name": "partial-B-s2",
+                "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+                "span_id": "00c0ffee00c0ffee",
+                "parent_span_id": "00f067aa0ba902b7",
+                "sampled": true,
+                "tracestate": null,
+                "attributes": {
+                  "e2e.id": "e2e-jw175-0001",
+                  "synthetic.order": "B",
+                  "synthetic.stage": 2,
+                  "synthetic.propagator": "W3CBaggagePropagator"
+                }
+              }
+            ]
+          },
+          "final_injected": {
+            "traceparent": "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+            "uber-trace-id": "4bf92f3577b34da6a3ce929d0e0e4736:00f067aa0ba902b7:0000000000000000:03"
+          }
+        },
+        {
+          "index": 3,
+          "propagator": "JaegerPropagator",
+          "reads": [
+            "uber-trace-id",
+            "uberctx-*"
+          ],
+          "explanation": "Rebuilds the remote parent from uber-trace-id with trace_state=TraceState() (empty), then reads every uberctx-* key into baggage. Those entries overwrite same-named W3C baggage entries because this propagator runs later.",
+          "inbound_carrier": {
+            "traceparent": "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+            "uber-trace-id": "4bf92f3577b34da6a3ce929d0e0e4736:0a0a0a0a0a0a0a0a:cacacacacacacaca:1",
+            "x-b3-spanid": "b3b3b3b3b3b3b3b3",
+            "x-b3-traceid": "4bf92f3577b34da6a3ce929d0e0e4736"
+          },
+          "returned_context": {
+            "span": {
+              "valid": true,
+              "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+              "span_id": "0a0a0a0a0a0a0a0a",
+              "is_remote": true,
+              "sampled": true,
+              "trace_flags": "01",
+              "tracestate": null
+            },
+            "baggage": {},
+            "baggage_header": ""
+          },
+          "context_diff": {
+            "changed": {
+              "span.span_id": {
+                "before": "00f067aa0ba902b7",
+                "after": "0a0a0a0a0a0a0a0a"
+              }
+            },
+            "categories": [
+              "parent"
+            ],
+            "material": true
+          },
+          "child_span": {
+            "recording": true,
+            "span_context": {
+              "valid": true,
+              "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+              "span_id": "00c0ffee00c0ffee",
+              "is_remote": false,
+              "sampled": true,
+              "trace_flags": "01",
+              "tracestate": null
+            },
+            "exported_count": 1,
+            "exported": [
+              {
+                "name": "partial-B-s3",
+                "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+                "span_id": "00c0ffee00c0ffee",
+                "parent_span_id": "0a0a0a0a0a0a0a0a",
+                "sampled": true,
+                "tracestate": null,
+                "attributes": {
+                  "e2e.id": "e2e-jw175-0001",
+                  "synthetic.order": "B",
+                  "synthetic.stage": 3,
+                  "synthetic.propagator": "JaegerPropagator"
+                }
+              }
+            ]
+          },
+          "final_injected": {
+            "traceparent": "00-4bf92f3577b34da6a3ce929d0e0e4736-0a0a0a0a0a0a0a0a-01",
+            "uber-trace-id": "4bf92f3577b34da6a3ce929d0e0e4736:0a0a0a0a0a0a0a0a:0000000000000000:03"
+          }
+        }
+      ],
+      "composite_extract": {
+        "span": {
+          "valid": true,
+          "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+          "span_id": "0a0a0a0a0a0a0a0a",
+          "is_remote": true,
+          "sampled": true,
+          "trace_flags": "01",
+          "tracestate": null
+        },
+        "baggage": {},
+        "baggage_header": ""
+      },
+      "composite_matches_replay": true,
+      "final_injected": {
+        "traceparent": "00-4bf92f3577b34da6a3ce929d0e0e4736-0a0a0a0a0a0a0a0a-01",
+        "uber-trace-id": "4bf92f3577b34da6a3ce929d0e0e4736:0a0a0a0a0a0a0a0a:0000000000000000:03"
+      }
+    }
+  ],
+  "comparisons": [
+    {
+      "fixture_id": "full",
+      "fixture_label": "完整请求",
+      "e2e_id": "e2e-jw175-0001",
+      "stage_pairs": [
+        {
+          "index": 1,
+          "propagator_A": "TraceContextTextMapPropagator",
+          "propagator_B": "TraceContextTextMapPropagator",
+          "categories_A": [
+            "parent",
+            "sampling",
+            "tracestate"
+          ],
+          "categories_B": [
+            "parent",
+            "sampling",
+            "tracestate"
+          ],
+          "differing_fields": {},
+          "categories": [],
+          "material": false
+        },
+        {
+          "index": 2,
+          "propagator_A": "W3CBaggagePropagator",
+          "propagator_B": "W3CBaggagePropagator",
+          "categories_A": [
+            "baggage"
+          ],
+          "categories_B": [
+            "baggage"
+          ],
+          "differing_fields": {},
+          "categories": [],
+          "material": false
+        },
+        {
+          "index": 3,
+          "propagator_A": "B3MultiFormat",
+          "propagator_B": "JaegerPropagator",
+          "categories_A": [
+            "parent",
+            "tracestate"
+          ],
+          "categories_B": [
+            "baggage",
+            "parent",
+            "tracestate"
+          ],
+          "differing_fields": {
+            "span.span_id": {
+              "A": "b3b3b3b3b3b3b3b3",
+              "B": "0a0a0a0a0a0a0a0a"
+            },
+            "baggage": {
+              "A": {
+                "tenant": "blue",
+                "request.id": "e2e-jw175-0001"
+              },
+              "B": {
+                "tenant": "green",
+                "request.id": "e2e-jw175-0001"
+              }
+            },
+            "baggage_header": {
+              "A": "tenant=blue,request.id=e2e-jw175-0001",
+              "B": "tenant=green,request.id=e2e-jw175-0001"
+            }
+          },
+          "categories": [
+            "baggage",
+            "parent"
+          ],
+          "material": true
+        }
+      ],
+      "first_divergence": {
+        "index": 3,
+        "propagator_A": "B3MultiFormat",
+        "propagator_B": "JaegerPropagator",
+        "categories_A": [
+          "parent",
+          "tracestate"
+        ],
+        "categories_B": [
+          "baggage",
+          "parent",
+          "tracestate"
+        ],
+        "differing_fields": {
+          "span.span_id": {
+            "A": "b3b3b3b3b3b3b3b3",
+            "B": "0a0a0a0a0a0a0a0a"
+          },
+          "baggage": {
+            "A": {
+              "tenant": "blue",
+              "request.id": "e2e-jw175-0001"
+            },
+            "B": {
+              "tenant": "green",
+              "request.id": "e2e-jw175-0001"
+            }
+          },
+          "baggage_header": {
+            "A": "tenant=blue,request.id=e2e-jw175-0001",
+            "B": "tenant=green,request.id=e2e-jw175-0001"
+          }
+        },
+        "categories": [
+          "baggage",
+          "parent"
+        ],
+        "material": true
+      },
+      "final": {
+        "trace_id_A": "4bf92f3577b34da6a3ce929d0e0e4736",
+        "trace_id_B": "4bf92f3577b34da6a3ce929d0e0e4736",
+        "same_trace_id": true,
+        "parent_A": "b3b3b3b3b3b3b3b3",
+        "parent_B": "0a0a0a0a0a0a0a0a",
+        "sampled_A": true,
+        "sampled_B": true,
+        "tracestate_A": null,
+        "tracestate_B": null,
+        "tracestate_stage2_A": "vendor=alpha,region=cn-north",
+        "tracestate_stage2_B": "vendor=alpha,region=cn-north",
+        "tracestate_lost_in_stage3_A": true,
+        "tracestate_lost_in_stage3_B": true,
+        "baggage_A": {
+          "tenant": "blue",
+          "request.id": "e2e-jw175-0001"
+        },
+        "baggage_B": {
+          "tenant": "green",
+          "request.id": "e2e-jw175-0001"
+        },
+        "injected_A": {
+          "baggage": "tenant=blue,request.id=e2e-jw175-0001",
+          "traceparent": "00-4bf92f3577b34da6a3ce929d0e0e4736-b3b3b3b3b3b3b3b3-01",
+          "x-b3-sampled": "1",
+          "x-b3-spanid": "b3b3b3b3b3b3b3b3",
+          "x-b3-traceid": "4bf92f3577b34da6a3ce929d0e0e4736"
+        },
+        "injected_B": {
+          "baggage": "tenant=green,request.id=e2e-jw175-0001",
+          "traceparent": "00-4bf92f3577b34da6a3ce929d0e0e4736-0a0a0a0a0a0a0a0a-01",
+          "uber-trace-id": "4bf92f3577b34da6a3ce929d0e0e4736:0a0a0a0a0a0a0a0a:0000000000000000:03",
+          "uberctx-request.id": "e2e-jw175-0001",
+          "uberctx-tenant": "green"
+        }
+      }
+    },
+    {
+      "fixture_id": "partial",
+      "fixture_label": "缺少部分追踪字段的合成请求",
+      "e2e_id": "e2e-jw175-0001",
+      "stage_pairs": [
+        {
+          "index": 1,
+          "propagator_A": "TraceContextTextMapPropagator",
+          "propagator_B": "TraceContextTextMapPropagator",
+          "categories_A": [
+            "parent",
+            "sampling"
+          ],
+          "categories_B": [
+            "parent",
+            "sampling"
+          ],
+          "differing_fields": {},
+          "categories": [],
+          "material": false
+        },
+        {
+          "index": 2,
+          "propagator_A": "W3CBaggagePropagator",
+          "propagator_B": "W3CBaggagePropagator",
+          "categories_A": [],
+          "categories_B": [],
+          "differing_fields": {},
+          "categories": [],
+          "material": false
+        },
+        {
+          "index": 3,
+          "propagator_A": "B3MultiFormat",
+          "propagator_B": "JaegerPropagator",
+          "categories_A": [
+            "parent",
+            "sampling"
+          ],
+          "categories_B": [
+            "parent"
+          ],
+          "differing_fields": {
+            "span.span_id": {
+              "A": "b3b3b3b3b3b3b3b3",
+              "B": "0a0a0a0a0a0a0a0a"
+            },
+            "span.sampled": {
+              "A": false,
+              "B": true
+            },
+            "span.trace_flags": {
+              "A": "00",
+              "B": "01"
+            }
+          },
+          "categories": [
+            "parent",
+            "sampling"
+          ],
+          "material": true
+        }
+      ],
+      "first_divergence": {
+        "index": 3,
+        "propagator_A": "B3MultiFormat",
+        "propagator_B": "JaegerPropagator",
+        "categories_A": [
+          "parent",
+          "sampling"
+        ],
+        "categories_B": [
+          "parent"
+        ],
+        "differing_fields": {
+          "span.span_id": {
+            "A": "b3b3b3b3b3b3b3b3",
+            "B": "0a0a0a0a0a0a0a0a"
+          },
+          "span.sampled": {
+            "A": false,
+            "B": true
+          },
+          "span.trace_flags": {
+            "A": "00",
+            "B": "01"
+          }
+        },
+        "categories": [
+          "parent",
+          "sampling"
+        ],
+        "material": true
+      },
+      "final": {
+        "trace_id_A": "4bf92f3577b34da6a3ce929d0e0e4736",
+        "trace_id_B": "4bf92f3577b34da6a3ce929d0e0e4736",
+        "same_trace_id": true,
+        "parent_A": "b3b3b3b3b3b3b3b3",
+        "parent_B": "0a0a0a0a0a0a0a0a",
+        "sampled_A": false,
+        "sampled_B": true,
+        "tracestate_A": null,
+        "tracestate_B": null,
+        "tracestate_stage2_A": null,
+        "tracestate_stage2_B": null,
+        "tracestate_lost_in_stage3_A": false,
+        "tracestate_lost_in_stage3_B": false,
+        "baggage_A": {},
+        "baggage_B": {},
+        "injected_A": {
+          "traceparent": "00-4bf92f3577b34da6a3ce929d0e0e4736-b3b3b3b3b3b3b3b3-00",
+          "x-b3-sampled": "0",
+          "x-b3-spanid": "b3b3b3b3b3b3b3b3",
+          "x-b3-traceid": "4bf92f3577b34da6a3ce929d0e0e4736"
+        },
+        "injected_B": {
+          "traceparent": "00-4bf92f3577b34da6a3ce929d0e0e4736-0a0a0a0a0a0a0a0a-01",
+          "uber-trace-id": "4bf92f3577b34da6a3ce929d0e0e4736:0a0a0a0a0a0a0a0a:0000000000000000:03"
+        }
+      }
+    }
+  ],
+  "findings": {
+    "full": {
+      "fixture_label": "完整请求",
+      "first_divergence_stage": "阶段 3：B3MultiFormat vs JaegerPropagator",
+      "first_divergence_categories": [
+        "baggage",
+        "parent"
+      ],
+      "parent_changed": true,
+      "tracestate_no_longer_applies": true,
+      "tracestate_absent_inbound": false,
+      "baggage_rewritten": true,
+      "sampling_changed": false,
+      "same_trace_id": true,
+      "conclusions": [
+        "parent 改变：两条 trace 的 trace ID 相同，但下游 span.parent 分别指向 b3b3b3b3b3b3b3b3（A/B3）和 0a0a0a0a0a0a0a0a（B/Jaeger）。按 trace ID 能搜到同一条 trace，但按 parent 还原服务跳转时会得到不同的因果关系。",
+        "tracestate 不再适用：第 2 阶段仍有 vendor=alpha,region=cn-north，第 3 阶段 B3/Jaeger 重建远端 SpanContext 时被清空。依赖 tracestate 做租户路由或采样权重的一方会看到“同 trace ID 但无 vendor 状态”。",
+        "baggage 被另一个传播器改写：A 保留 W3C baggage 的 tenant=blue；B 的 JaegerPropagator 读取 uberctx-tenant=green 并覆盖同名 baggage。",
+        "两种排查结论：A 侧应按“parent 指向 B3 span、baggage 仍是 blue”排查；B 侧应按“parent 指向 Jaeger span、baggage 已变成 green”排查。只看 trace ID 会把两者误判为同一条链路。"
+      ]
+    },
+    "partial": {
+      "fixture_label": "缺少部分追踪字段的合成请求",
+      "first_divergence_stage": "阶段 3：B3MultiFormat vs JaegerPropagator",
+      "first_divergence_categories": [
+        "parent",
+        "sampling"
+      ],
+      "parent_changed": true,
+      "tracestate_no_longer_applies": false,
+      "tracestate_absent_inbound": true,
+      "baggage_rewritten": false,
+      "sampling_changed": true,
+      "same_trace_id": true,
+      "conclusions": [
+        "parent 改变：两条 trace 的 trace ID 相同，但下游 span.parent 分别指向 b3b3b3b3b3b3b3b3（A/B3）和 0a0a0a0a0a0a0a0a（B/Jaeger）。按 trace ID 能搜到同一条 trace，但按 parent 还原服务跳转时会得到不同的因果关系。",
+        "tracestate 自入站就缺失：第 2 阶段没有可传播的 tracestate，第 3 阶段并未额外清空。这与完整请求的“阶段 2 有、阶段 3 被清空”是两种不同故障，不能都归因为传播器丢状态。",
+        "采样结论改变：A 的 B3 缺少 x-b3-sampled，按默认 \"0\" 把父上下文降为未采样，子 span 不导出；B 的 Jaeger uber-trace-id flags=1，子 span 正常导出。",
+        "两种排查结论：A 侧先查 B3 采样字段缺失导致的丢 span；B 侧先查为何 parent 换成 Jaeger span、但 trace 仍完整。缺少 x-b3-sampled 与缺少 W3C baggage 是两类不同的告警，不能用同一条“按 trace ID 查全链路”结论覆盖。"
+      ]
+    }
+  },
+  "runbook": {
+    "command": ".venv/bin/python -m forensics.collect --out forensics/out",
+    "repeat_command": "forensics/reproduce.sh",
+    "test_command": ".venv/bin/python -m pytest -q forensics/tests/test_collect.py",
+    "assertion": "两次运行的 evidence.json 必须逐字节相同；full 与 partial 的 first_divergence 都必须是阶段 3（B3MultiFormat vs JaegerPropagator），且 trace ID 相同。"
+  }
+}
