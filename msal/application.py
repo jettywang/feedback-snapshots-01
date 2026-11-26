@@ -23,6 +23,12 @@ from .mex import send_request as mex_send_request
 from .wstrust_request import send_request as wst_send_request
 from .wstrust_response import *
 from .token_cache import TokenCache, _get_username, _GRANT_TYPE_BROKER, _compute_ext_cache_key, _parse_claims_or_raise, _merge_claims
+from .delegation import (
+    DelegationContext,
+    DelegationGuard,
+    DelegationPolicy,
+    DelegationResultCache,
+)
 import msal.telemetry
 from .region import _detect_region, _validate_region
 from .throttled_http_client import ThrottledHttpClient
@@ -314,6 +320,12 @@ class ClientApplication(object):
             allow_broker=None,
             enable_pii_log=None,
             oidc_authority=None,
+            delegation_check=None,
+            delegation_policy=None,
+            delegation_authorizer=None,
+            delegation_guard=None,
+            delegation=None,
+            delegation_cache=None,
             ):
         """Create an instance of application.
 
@@ -765,6 +777,22 @@ class ClientApplication(object):
 
         self._decide_broker(allow_broker, enable_pii_log)
         self.token_cache = token_cache or TokenCache()
+        self.delegation_cache = delegation_cache or DelegationResultCache()
+        delegation_source = (
+            delegation_guard or delegation_check or delegation_policy
+            or delegation_authorizer or delegation)
+        if delegation_source is True:
+            delegation_source = DelegationPolicy()
+        if delegation_source is None:
+            self.delegation_guard = None
+        elif isinstance(delegation_source, DelegationGuard):
+            self.delegation_guard = delegation_source
+            if delegation_cache is not None:
+                self.delegation_guard.cache = self.delegation_cache
+        else:
+            self.delegation_guard = DelegationGuard(
+                policy=delegation_source,
+                cache=self.delegation_cache)
         self._region_configured = azure_region
         self._region_detected = None
         self.client, self._regional_client = self._build_client(
@@ -2718,7 +2746,13 @@ class ConfidentialClientApplication(ClientApplication):  # server-side web app
                 self.token_cache.remove_at(at)
         # acquire_token_for_client() obtains no RTs, so we have no RT to remove
 
-    def acquire_token_on_behalf_of(self, user_assertion, scopes, claims_challenge=None, forwarded_client_claims=None, **kwargs):
+    def acquire_token_on_behalf_of(
+            self, user_assertion, scopes, claims_challenge=None,
+            forwarded_client_claims=None, delegation_check=None,
+            delegation_policy=None, delegation_context=None,
+            delegation_guard=None, delegation_cache=None,
+            delegation_authorizer=None, delegation=None,
+            raise_on_delegation_deny=None, **kwargs):
         """Acquires token using on-behalf-of (OBO) flow.
 
         The current app is a middle-tier service which was called with a token
@@ -2756,6 +2790,55 @@ class ConfidentialClientApplication(ClientApplication):  # server-side web app
             - A successful response would contain "access_token" key,
             - an error response would contain "error" and usually "error_description".
         """
+        check = (
+            delegation_guard or delegation_check or delegation_policy
+            or delegation_authorizer or delegation or self.delegation_guard)
+        if check is True:
+            check = self.delegation_guard or DelegationPolicy()
+        if check is None:
+            return self._acquire_token_on_behalf_of_uncached(
+                user_assertion,
+                scopes,
+                claims_challenge=claims_challenge,
+                forwarded_client_claims=forwarded_client_claims,
+                **kwargs)
+
+        context_data = {}
+        for aliases in DelegationContext._ALIASES.values():
+            for alias in aliases:
+                if alias in kwargs:
+                    context_data[alias] = kwargs.pop(alias)
+        context = DelegationContext(
+            delegation_context or {},
+            user_assertion=user_assertion,
+            scopes=scopes,
+            **context_data)
+        cache = delegation_cache or self.delegation_cache
+        if isinstance(check, DelegationGuard):
+            guard = check
+            if delegation_cache is not None:
+                guard.cache = cache
+        else:
+            guard = DelegationGuard(policy=check, cache=cache)
+
+        def exchange(assertion, requested_scopes):
+            return self._acquire_token_on_behalf_of_uncached(
+                assertion,
+                requested_scopes,
+                claims_challenge=claims_challenge,
+                forwarded_client_claims=forwarded_client_claims,
+                **kwargs)
+
+        return guard.acquire_token(
+            user_assertion,
+            scopes,
+            context=context,
+            exchange=exchange,
+            raise_on_deny=raise_on_delegation_deny)
+
+    def _acquire_token_on_behalf_of_uncached(
+            self, user_assertion, scopes, claims_challenge=None,
+            forwarded_client_claims=None, **kwargs):
         telemetry_context = self._build_telemetry_context(
             self.ACQUIRE_TOKEN_ON_BEHALF_OF_ID)
         _data = kwargs.pop("data", {})

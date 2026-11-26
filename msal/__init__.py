@@ -34,6 +34,46 @@ from .oauth2cli.assertion import AutoRefresher
 from .oauth2cli.oidc import Prompt, IdTokenError
 from .sku import __version__
 from .token_cache import TokenCache, SerializableTokenCache
+from .delegation import (
+    AuthorizationDenied,
+    AuthorizationReceipt,
+    DelegationApproval,
+    DelegationAuthorizer,
+    DelegationCache,
+    DelegationCheck,
+    DelegationContext,
+    DelegationDecision,
+    DelegationDenialReceipt,
+    DelegationDenied,
+    DelegationDeniedError,
+    DelegationEnforcer,
+    DelegationError,
+    DelegationGrant,
+    DelegationGuard,
+    DelegationManager,
+    DelegationPolicy,
+    DelegationReceipt,
+    DelegationResultCache,
+    DelegationService,
+    DelegationTokenBroker,
+    DelegationVerifier,
+    DelegationAwareTokenClient,
+    DenialReceipt,
+    PermissionGrant,
+    acquire_delegated_token,
+    acquire_on_behalf_of_with_delegation,
+    acquire_token_with_delegation,
+    canonical_delegation_fingerprint,
+    can_reuse_result,
+    check_delegation,
+    compute_delegation_fingerprint,
+    decode_assertion_claims,
+    delegation_identity,
+    delegated_acquire_token,
+    evaluate_delegation,
+    install_delegation_check,
+    is_delegation_current,
+)
 from .auth_scheme import PopAuthScheme
 from .managed_identity import (
     SystemAssignedManagedIdentity, UserAssignedManagedIdentity,
@@ -48,3 +88,10 @@ from .managed_identity import (
 # 2. can still be caught by the user code even if we change the module structure.
 from .oauth2cli.oauth2 import BrowserInteractionTimeoutError
 
+
+
+def __getattr__(name):
+    from . import delegation as _delegation
+    if hasattr(_delegation, name):
+        return getattr(_delegation, name)
+    raise AttributeError("module {!r} has no attribute {!r}".format(__name__, name))
