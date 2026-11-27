@@ -126,9 +126,14 @@ class TokenBackend:
 
         return self.prepared_verifying_key
 
-    def encode(self, payload: dict[str, Any]) -> str:
+    def encode(
+        self, payload: dict[str, Any], headers: dict[str, Any] | None = None
+    ) -> str:
         """
         Returns an encoded token for the given payload dictionary.
+
+        Extra JWT header parameters (such as a ``kid``) can be supplied via the
+        ``headers`` mapping.
         """
         jwt_payload = payload.copy()
         if self.audience is not None:
@@ -140,6 +145,7 @@ class TokenBackend:
             jwt_payload,
             self.prepared_signing_key,
             algorithm=self.algorithm,
+            headers=headers,
             json_encoder=self.json_encoder,
         )
         if isinstance(token, bytes):
