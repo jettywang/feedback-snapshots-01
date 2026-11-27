@@ -430,6 +430,13 @@ Rails.application.config.sorcery.configure do |config|
     #
     # user.reset_password_page_access_count_attribute_name =
 
+    # Optional generation-scoped credential policy for reset tokens.
+    # When nil, the historical plain-token behaviour is used.
+    # See README "Reset Password Credential Lifecycle".
+    # Default: `nil`
+    #
+    # user.reset_password_token_policy =
+
     # -- magic_login --
     # Magic login code attribute name.
     # Default: `:magic_login_token`

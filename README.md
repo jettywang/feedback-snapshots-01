@@ -177,6 +177,54 @@ Inside the initializer, the comments will tell you what each setting does.
 - Configurable mailer, method name, and attribute name
 - Configurable temporary token expiration
 - Configurable time between emails (hammering protection)
+- Optional generation-scoped credential policy with explicit legacy admission,
+  grace-period retirement and token-free lifecycle diagnostics
+
+### Reset Password Credential Lifecycle
+
+By default reset tokens keep their historical plain-token behaviour. Assigning a
+`Sorcery::ResetPasswordTokenPolicy` opts into a verifiable issue/query/retire
+contract without changing the existing `load_from_reset_password_token`,
+`generate_reset_password_token!` or `deliver_reset_password_instructions!` calls.
+
+```ruby
+User.reset_password_token_policy = Sorcery::ResetPasswordTokenPolicy.new(
+  generations: [
+    { id: '2026-10', secret: ENV.fetch('RESET_TOKEN_SECRET_2026_10') },
+    { id: '2026-11', secret: ENV.fetch('RESET_TOKEN_SECRET_2026_11') }
+  ],
+  current: '2026-11',
+  admit_legacy: false,
+  legacy_admitted_until: 24.hours.from_now
+)
+```
+
+- Issuance: new tokens are signed by the current generation. Only an `active`
+  generation can issue. A `pending` generation can verify tokens but never
+  issues, so two generations can be in local use while only one issues. The
+  token is persisted as before, so the mailer can keep using
+  `user.reset_password_token`.
+- Lookup: `load_from_reset_password_token` verifies the signing generation before
+  querying. Tokens from a `pending` generation are accepted. Tokens from a
+  `retiring` generation are accepted until that generation's `retire_at`;
+  `retired` or unknown generations are rejected with `:token_retired` /
+  `:unknown_generation`. `admit_legacy` accepts `true`, `false`, a callable
+  receiving the token, or an array of explicitly admitted legacy tokens (raw or
+  SHA-256 digested). An admitted legacy token is redeemable once, after which it
+  returns `:legacy_already_used`. `legacy_admitted_until` closes admission at a
+  fixed time even when `admit_legacy` is `true`.
+- Retirement: `policy.rotate!('2026-11', grace_period: 1.hour)` moves issuance to
+  the new generation and gives the old one a bounded grace period.
+  `policy.rotate_with_retiring_issuance!` additionally returns an issuance from
+  the outgoing generation for requests already in flight. `policy.retire!(id)`
+  retires immediately; `policy.refresh!` applies elapsed retirement times.
+- Registration and diagnostics: `User.reset_password_token_registry` reports each
+  generation's state and issued count. `User.reset_password_token_diagnostics`
+  reports lifecycle events. Neither includes tokens, token digests or secrets.
+- Failure behaviour: if persistence fails or raises, `generate_reset_password_token!`
+  returns `false`, restores the previous in-memory token and records an
+  `:issue_failed` diagnostic. No email is sent and no issuance is registered,
+  so registry counts only describe credentials that can actually be used.
 
 **Remember Me** (see [lib/sorcery/model/submodules/remember_me.rb](https://github.com/Sorcery/sorcery/blob/main/lib/sorcery/model/submodules/remember_me.rb)):
 

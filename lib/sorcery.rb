@@ -16,6 +16,7 @@ module Sorcery
 
   module Model
     require 'sorcery/model/temporary_token'
+    require 'sorcery/model/reset_password_token_policy'
     require 'sorcery/model/config'
 
     module Submodules
