@@ -44,9 +44,10 @@ module Sorcery
           end
 
           base.class_eval do
-            # don't setup activation if no password supplied - this user is created automatically
-            sorcery_adapter.define_callback :before, :create, :setup_activation, if: proc { |user| user.send(sorcery_config.password_attribute_name).present? }
-            # don't send activation needed email if no crypted password created - this user is external (OAuth etc.)
+            # Every new account starts pending. Accounts created with a password also get an
+            # activation token and, after the record is committed, the "activation needed" email.
+            # External (OAuth) accounts are approved locally instead, so they never receive that email.
+            sorcery_adapter.define_callback :before, :create, :setup_activation
             sorcery_adapter.define_callback :after, :commit, :send_activation_needed_email!, on: :create, if: :send_activation_needed_email?
           end
 
@@ -93,21 +94,56 @@ module Sorcery
         module InstanceMethods
           def setup_activation
             config = sorcery_config
-            generated_activation_token = TemporaryToken.generate_random_token
-            send(:"#{config.activation_token_attribute_name}=", generated_activation_token)
             send(:"#{config.activation_state_attribute_name}=", 'pending')
+
+            # External accounts never get an activation token or email; they wait for local approval.
+            return if external?
+
+            send(:"#{config.activation_token_attribute_name}=", TemporaryToken.generate_random_token)
             return unless config.activation_token_expiration_period
 
             send(:"#{config.activation_token_expires_at_attribute_name}=", Time.now.in_time_zone + config.activation_token_expiration_period)
           end
 
-          # clears activation code, sets the user as 'active' and optionally sends a success email.
+          # Records local approval. The new state must reach the database before any success
+          # notification is sent, so a failed save never leaves an email behind.
+          # Re-running activation on an already active account only persists, never re-notifies.
+          # If persistence fails the in-memory state is rolled back, so the object cannot be
+          # mistaken for an approved account after a rejected submission.
           def activate!
             config = sorcery_config
-            send(:"#{config.activation_token_attribute_name}=", nil)
-            send(:"#{config.activation_state_attribute_name}=", 'active')
-            send_activation_success_email! if send_activation_success_email?
-            sorcery_adapter.save(validate: false, raise_on_failure: true)
+            state_attribute = config.activation_state_attribute_name
+            token_attribute = config.activation_token_attribute_name
+            previous_state = send(state_attribute)
+            previous_token = send(token_attribute)
+            was_active = send(state_attribute) == 'active'
+
+            send(:"#{token_attribute}=", nil)
+            send(:"#{state_attribute}=", 'active')
+
+            begin
+              sorcery_adapter.save(validate: false, raise_on_failure: true)
+            rescue StandardError
+              send(:"#{state_attribute}=", previous_state)
+              send(:"#{token_attribute}=", previous_token)
+              raise
+            end
+
+            send_activation_success_email! if !was_active && send_activation_success_email?
+            true
+          end
+
+          # Strict approval state: the account has been locally approved.
+          def approved_for_authentication?
+            send(sorcery_config.activation_state_attribute_name) == 'active'
+          end
+
+          # Used by the core authenticate flow. Applications may opt out of gating
+          # non-approved accounts via +prevent_non_active_users_to_login+.
+          def active_for_authentication?
+            return true unless sorcery_config.prevent_non_active_users_to_login
+
+            approved_for_authentication?
           end
 
           attr_accessor :skip_activation_needed_email, :skip_activation_success_email
@@ -124,8 +160,7 @@ module Sorcery
           end
 
           def send_activation_success_email?
-            !external? &&
-              !(sorcery_config.activation_success_email_method_name.nil? || sorcery_config.activation_mailer_disabled == true) &&
+            !(sorcery_config.activation_success_email_method_name.nil? || sorcery_config.activation_mailer_disabled == true) &&
               !skip_activation_success_email
           end
 

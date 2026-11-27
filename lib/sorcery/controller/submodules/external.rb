@@ -127,6 +127,10 @@ module Sorcery
 
             return unless (user = user_class.load_from_provider(provider_name, @user_hash[:uid].to_s))
 
+            # Only locally approved external accounts may receive a session. Rejected accounts
+            # are not remembered and do not run the after-login hooks.
+            return reject_login! unless user_approved?(user)
+
             # we found the user.
             # clear the session
             return_to_url = session[:return_to_url]

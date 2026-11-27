@@ -170,6 +170,10 @@ Inside the initializer, the comments will tell you what each setting does.
 - Configurable mailer, method name, and attribute name
 - Configurable temporary token expiration
 - Optionally prevent non-active users to login
+- External (OAuth) accounts are created `pending` without an activation email and must be
+  approved locally (`user.activate!`) before any login source issues a session
+- `activate!` persists the approval before sending the success notification, so a failed
+  save neither emails the user nor changes the stored state
 
 **Reset Password** (see [lib/sorcery/model/submodules/reset_password.rb](https://github.com/Sorcery/sorcery/blob/main/lib/sorcery/model/submodules/reset_password.rb)):
 

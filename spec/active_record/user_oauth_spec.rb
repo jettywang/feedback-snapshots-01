@@ -228,4 +228,61 @@ describe User, :active_record do
       end
     end
   end
+
+  context 'when external accounts require local approval' do
+    before(:all) do
+      MigrationHelper.migrate("#{Rails.root}/db/migrate/external")
+      MigrationHelper.migrate("#{Rails.root}/db/migrate/activation")
+      described_class.reset_column_information
+
+      sorcery_reload!(%i[user_activation external], user_activation_mailer: SorceryMailer)
+      sorcery_model_property_set(:authentications_class, Authentication)
+    end
+
+    after(:all) do
+      MigrationHelper.rollback("#{Rails.root}/db/migrate/external")
+      MigrationHelper.rollback("#{Rails.root}/db/migrate/activation")
+    end
+
+    before do
+      User.sorcery_adapter.delete_all
+      Authentication.sorcery_adapter.delete_all
+    end
+
+    def create_external_account(uid = '456')
+      User.create_and_validate_from_provider(:twitter, uid, username: 'oauth_user', email: 'oauth@example.com')
+    end
+
+    it 'creates external accounts in the pending state' do
+      user, saved = create_external_account
+
+      expect(saved).to be true
+      expect(user.activation_state).to eq 'pending'
+      expect(user.activation_token).to be_nil
+      expect(user.activation_token_expires_at).to be_nil
+    end
+
+    it 'does not send an activation needed email for external accounts' do
+      expect do
+        create_external_account
+      end.not_to(change { ActionMailer::Base.deliveries.size })
+    end
+
+    it 'sends exactly one approval notification, only after the approval is persisted' do
+      create_external_account
+      user = User.sorcery_adapter.find_by_email('oauth@example.com')
+      stored_state_when_notified = nil
+
+      allow(SorceryMailer).to receive(:activation_success_email) do |record|
+        stored_state_when_notified = User.sorcery_adapter.find(record.id).activation_state
+        instance_double(ActionMailer::MessageDelivery, deliver_now: true)
+      end
+
+      user.activate!
+
+      expect(SorceryMailer).to have_received(:activation_success_email).once
+      expect(stored_state_when_notified).to eq 'active'
+      expect(User.sorcery_adapter.find(user.id).activation_state).to eq 'active'
+    end
+  end
 end

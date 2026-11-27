@@ -94,6 +94,41 @@ describe User, :active_record do
         expect(User.sorcery_adapter.find_by_activation_token(activation_token)).to be_nil
       end
 
+      it 'persists the approval before sending the success notification' do
+        created = create_new_user
+        stored_state = nil
+        allow(SorceryMailer).to receive(:activation_success_email) do |record|
+          stored_state = User.sorcery_adapter.find(record.id).activation_state
+          instance_double(ActionMailer::MessageDelivery, deliver_now: true)
+        end
+
+        created.activate!
+
+        expect(stored_state).to eq 'active'
+      end
+
+      it 'keeps the account pending and sends nothing when the approval save fails' do
+        created = create_new_user
+        allow(created.sorcery_adapter).to receive(:save).and_raise(ActiveRecord::StatementInvalid, 'db down')
+
+        expect do
+          expect { created.activate! }.to raise_error(ActiveRecord::StatementInvalid)
+        end.not_to(change { ActionMailer::Base.deliveries.size })
+
+        expect(created.activation_state).to eq 'pending'
+        expect(User.sorcery_adapter.find(created.id).activation_state).to eq 'pending'
+      end
+
+      it 'does not re-send the success notification when activation is repeated' do
+        created = create_new_user
+        created.activate!
+        old_size = ActionMailer::Base.deliveries.size
+
+        created.activate!
+
+        expect(ActionMailer::Base.deliveries.size).to eq old_size
+      end
+
       context 'when mailer is enabled' do
         it 'sends the user an activation email' do
           old_size = ActionMailer::Base.deliveries.size

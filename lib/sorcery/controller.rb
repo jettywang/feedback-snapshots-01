@@ -129,9 +129,14 @@ module Sorcery
 
       # login a user instance
       #
+      # A session is only opened for an approved account. A rejected account is left untouched,
+      # so a caller cannot bypass activation by calling auto_login directly.
+      #
       # @param [<User-Model>] user the user instance.
       # @return - do not depend on the return value.
       def auto_login(user, _should_remember = false)
+        return unless user_approved?(user)
+
         session[:user_id] = user.id.to_s
         @current_user = user
       end
@@ -145,6 +150,29 @@ module Sorcery
 
       protected
 
+      # Single approval gate for every way a session can be acquired without going through
+      # the password authenticate flow: external provider callback, remember-me cookie and
+      # session restore. External accounts always need local approval; regular accounts
+      # honor the model's +prevent_non_active_users_to_login+ setting.
+      # Returns true when the account may hold a session.
+      def user_approved?(user)
+        return false if user.nil?
+        return true unless user.respond_to?(:active_for_authentication?)
+
+        if user.respond_to?(:external?) && user.external?
+          user.approved_for_authentication?
+        else
+          user.active_for_authentication?
+        end
+      end
+
+      # Rejects a candidate login and clears any pending session, returning false.
+      def reject_login!
+        reset_sorcery_session
+        @current_user = false
+        false
+      end
+
       # Tries all available sources (methods) until one doesn't return false.
       def login_from_other_sources
         result = nil
@@ -155,7 +183,13 @@ module Sorcery
       end
 
       def login_from_session
-        @current_user = (user_class.sorcery_adapter.find_by_id(session[:user_id]) if session[:user_id])
+        return unless session[:user_id]
+
+        user = user_class.sorcery_adapter.find_by_id(session[:user_id])
+        return unless user
+
+        # A stored session for an account that is no longer approved must not be revived.
+        @current_user = user_approved?(user) ? user : reject_login!
       end
 
       def after_login!(user, credentials = [])

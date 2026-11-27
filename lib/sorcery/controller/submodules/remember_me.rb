@@ -46,7 +46,10 @@ module Sorcery
 
           # Override.
           # logins a user instance, and optionally remembers him.
+          # Rejected accounts get neither a session nor a remember-me cookie.
           def auto_login(user, should_remember = false)
+            return unless user_approved?(user)
+
             session[:user_id] = user.id.to_s
             @current_user = user
             remember_me! if should_remember
@@ -59,14 +62,20 @@ module Sorcery
           # Runs as a login source. See 'current_user' method for how it is used.
           def login_from_cookie
             user = cookies.signed[:remember_me_token] && user_class.sorcery_adapter.find_by_remember_me_token(cookies.signed[:remember_me_token]) if defined? cookies
-            if user&.has_remember_me_token?
+            if user&.has_remember_me_token? && user_approved?(user)
               set_remember_me_cookie!(user)
               session[:user_id] = user.id.to_s
               after_remember_me!(user)
               @current_user = user
             else
+              # A pending account presenting an old cookie must not keep a remembered login.
+              forget_me_without_user if user&.has_remember_me_token?
               @current_user = false
             end
+          end
+
+          def forget_me_without_user
+            cookies.delete(:remember_me_token, domain: Config.cookie_domain)
           end
 
           def set_remember_me_cookie!(user)

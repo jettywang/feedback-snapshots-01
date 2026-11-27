@@ -377,6 +377,8 @@ Rails.application.config.sorcery.configure do |config|
     # user.activation_success_email_method_name =
 
     # Do you want to prevent users who did not activate by email from logging in?
+    # External (OAuth) accounts are created pending and stay gated until approved with
+    # `user.activate!`. External logins always require that approval.
     # Default: `true`
     #
     # user.prevent_non_active_users_to_login =
