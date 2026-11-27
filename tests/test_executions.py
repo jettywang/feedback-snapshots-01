@@ -2,12 +2,13 @@ from time import sleep
 from unittest.mock import patch
 
 from rq.executions import Execution, ExecutionRegistry
-from rq.job import Job
+from rq.job import Job, JobStatus
 from rq.queue import Queue
+from rq.registry import StartedJobRegistry
 from rq.utils import as_text, current_timestamp, now
 from rq.worker import SimpleWorker, Worker
 from tests import RQTestCase
-from tests.fixtures import long_running_job, say_hello, start_worker_process
+from tests.fixtures import FakeClock, long_running_job, say_hello, start_worker_process
 
 
 class TestRegistry(RQTestCase):
@@ -382,3 +383,86 @@ class TestRegistry(RQTestCase):
 
         self.assertEqual(worker.get_current_job_id(), None)
         self.assertIsNone(worker.execution)
+
+    def test_late_heartbeat_does_not_resurrect_removed_execution(self):
+        """A heartbeat from an execution already removed from its ExecutionRegistry only
+        recreates its own hash; it cannot re-add the attempt to the shared registries."""
+        worker = Worker([self.queue], connection=self.connection)
+        job = self.queue.enqueue(say_hello)
+        started_registry = job.started_job_registry
+        execution = worker.prepare_execution(job)
+
+        # Another process ends this attempt: both shared registry members are removed.
+        with self.connection.pipeline() as pipeline:
+            execution.delete(job=job, pipeline=pipeline)
+            pipeline.execute()
+        self.assertNotIn(execution.composite_key, self.connection.zrange(started_registry.key, 0, -1))
+        self.assertEqual(self.connection.zcard(job.execution_registry.key), 0)
+
+        with self.connection.pipeline() as pipeline:
+            execution.heartbeat(started_registry, 200, pipeline)
+            pipeline.execute()
+
+        # The late heartbeat may recreate the execution's own hash...
+        self.assertTrue(self.connection.exists(execution.key))
+        # ...but it must not re-register the attempt in either shared registry.
+        self.assertNotIn(
+            execution.composite_key,
+            [as_text(member) for member in self.connection.zrange(started_registry.key, 0, -1)],
+        )
+        self.assertEqual(self.connection.zcard(job.execution_registry.key), 0)
+
+    def test_live_heartbeat_still_refreshes_registered_execution(self):
+        """The boundary guard must not interfere with heartbeats of a running execution."""
+        worker = Worker([self.queue], connection=self.connection)
+        job = self.queue.enqueue(say_hello)
+        started_registry = job.started_job_registry
+        execution = worker.prepare_execution(job)
+
+        with self.connection.pipeline() as pipeline:
+            execution.heartbeat(started_registry, 200, pipeline)
+            pipeline.execute()
+
+        self.assertIn(
+            execution.composite_key,
+            [as_text(member) for member in self.connection.zrange(started_registry.key, 0, -1)],
+        )
+        self.assertIn(execution.id, job.execution_registry.get_execution_ids())
+        self.assertTrue(0 < self.connection.ttl(execution.key) <= 200)
+
+    def test_late_heartbeat_under_fake_clock_keeps_new_attempt_alone(self):
+        """On a controllable clock, a late old-attempt heartbeat leaves the new attempt as
+        the sole registered execution and never overwrites its registry membership."""
+        clock = FakeClock()
+        worker = Worker([self.queue], connection=self.connection)
+        job = self.queue.enqueue(say_hello)
+        started_registry = StartedJobRegistry(connection=self.connection)
+
+        with clock.patched():
+            old_execution = worker.prepare_execution(job)
+            worker.prepare_job_execution(job)
+
+            # Old attempt ends (worker crash cleanup removes its registries).
+            with self.connection.pipeline() as pipeline:
+                old_execution.delete(job=job, pipeline=pipeline)
+                pipeline.execute()
+
+            # A new attempt starts and heartbeats normally.
+            job.set_status(JobStatus.QUEUED)
+            new_execution = worker.prepare_execution(job)
+            worker.prepare_job_execution(job)
+            clock.advance(10)
+            worker.maintain_heartbeats(job, new_execution)
+
+            # Late heartbeat from the dead old attempt, even further in the future.
+            clock.advance(10)
+            with self.connection.pipeline() as pipeline:
+                old_execution.heartbeat(started_registry, 100, pipeline)
+                pipeline.execute()
+
+            self.assertEqual(
+                [as_text(member) for member in self.connection.zrange(started_registry.key, 0, -1)],
+                [new_execution.composite_key],
+            )
+            self.assertEqual(job.execution_registry.get_execution_ids(), [new_execution.id])
+

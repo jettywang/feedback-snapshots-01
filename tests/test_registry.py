@@ -7,8 +7,8 @@ import pytest
 
 from rq.defaults import DEFAULT_FAILURE_TTL
 from rq.exceptions import AbandonedJobError, InvalidJobOperation
-from rq.executions import Execution
-from rq.job import Dependency, Job, JobStatus, requeue_job
+from rq.executions import Execution, ExecutionRegistry
+from rq.job import Dependency, Job, JobStatus, Retry, requeue_job
 from rq.queue import Queue
 from rq.registry import (
     BaseRegistry,
@@ -20,11 +20,12 @@ from rq.registry import (
     StartedJobRegistry,
     clean_registries,
 )
+from rq.results import Result
 from rq.serializers import JSONSerializer
 from rq.utils import as_text, current_timestamp, now
 from rq.worker import Worker
 from tests import RQTestCase
-from tests.fixtures import div_by_zero, say_hello
+from tests.fixtures import FakeClock, div_by_zero, say_hello
 
 
 class CustomJob(Job):
@@ -981,3 +982,167 @@ class TestStartedJobRegistry(RQTestCase):
 
         with pytest.raises(NotImplementedError):
             self.registry.remove('job_id')
+
+    def test_cleanup_keeps_entry_whose_execution_is_still_registered(self):
+        """An expired WIP entry is not abandoned while its execution still has a live
+        ExecutionRegistry member: another process is still heartbeating it."""
+        worker = Worker([self.queue], connection=self.connection)
+        job = self.queue.enqueue(say_hello)
+        execution = worker.prepare_execution(job)
+        worker.prepare_job_execution(job)
+
+        # Force the WIP entry past the cutoff while keeping the execution itself alive.
+        self.connection.zadd(self.registry.key, {execution.composite_key: 1})
+        self.registry.cleanup()
+
+        # The active attempt survives: job stays STARTED and registered, not failed.
+        self.assertIn((job.id, execution.id), self.registry.get_job_and_execution_ids(cleanup=False))
+        self.assertEqual(Job.fetch(job.id, connection=self.connection).get_status(), JobStatus.STARTED)
+        self.assertNotIn(job.id, FailedJobRegistry(connection=self.connection))
+
+    def test_cleanup_recovers_only_the_dead_execution(self):
+        """After an abandoned attempt is retried and a new attempt is running, a later
+        cleanup leaves the live attempt untouched even if the old WIP entry still lingers."""
+        worker = Worker([self.queue], connection=self.connection)
+        job = self.queue.enqueue(say_hello, retry=Retry(max=1))
+
+        old_execution = worker.prepare_execution(job)
+        worker.prepare_job_execution(job)
+        # Old worker dies: its execution record is gone but its WIP entry lingers.
+        self.connection.delete(old_execution.key)
+        self.connection.zrem(job.execution_registry.key, old_execution.id)
+        self.connection.zadd(self.registry.key, {old_execution.composite_key: 1})
+
+        # First cleanup recovers the abandoned attempt by requeuing it per the retry rule.
+        with mock.patch('rq.registry.execute_failure_callback'):
+            self.registry.cleanup()
+        refreshed = Job.fetch(job.id, connection=self.connection)
+        self.assertEqual(refreshed.get_status(), JobStatus.QUEUED)
+        self.assertEqual(refreshed.retries_left, 0)
+
+        # A new attempt picks the retried job up and starts heartbeating. The old WIP
+        # entry is still present (its removal raced with the retry).
+        refreshed.set_status(JobStatus.STARTED)
+        new_execution = worker.prepare_execution(refreshed)
+        worker.prepare_job_execution(refreshed)
+        self.connection.zadd(self.registry.key, {old_execution.composite_key: 1})
+
+        # A later cleanup must not fail the job: the new execution is still alive.
+        with mock.patch('rq.registry.execute_failure_callback') as mocked_callback:
+            self.registry.cleanup()
+        mocked_callback.assert_not_called()
+
+        entries = dict(self.registry.get_job_and_execution_ids(cleanup=False))
+        self.assertEqual(entries.get(job.id), new_execution.id)
+        self.assertEqual(Job.fetch(job.id, connection=self.connection).get_status(), JobStatus.STARTED)
+        self.assertNotIn(job.id, FailedJobRegistry(connection=self.connection))
+
+    def test_cleanup_dedupes_multiple_dead_entries_for_one_job(self):
+        """Two dead execution entries of the same STARTED job recover it exactly once."""
+        failed_job_registry = FailedJobRegistry(connection=self.connection)
+        job = self.queue.enqueue(say_hello)
+        job.set_status(JobStatus.STARTED)
+
+        self.connection.zadd(self.registry.key, {f'{job.id}:dead-exec-1': 1, f'{job.id}:dead-exec-2': 2})
+
+        with mock.patch('rq.registry.execute_failure_callback'):
+            self.registry.cleanup()
+
+        self.assertNotIn(job.id, self.registry.get_job_ids(cleanup=False))
+        self.assertIn(job.id, failed_job_registry)
+        # Exactly one failure Result even though two entries expired.
+        self.assertEqual(Result.count(Job.fetch(job.id, connection=self.connection)), 1)
+
+    def test_cleanup_failure_result_identifies_the_ended_execution(self):
+        """The failure Result recorded for an abandoned attempt names that execution."""
+        job = self.queue.enqueue(say_hello)
+        job.set_status(JobStatus.STARTED)
+        execution_id = 'abandoned-execution'
+        self.connection.zadd(self.registry.key, {f'{job.id}:{execution_id}': 1})
+
+        with mock.patch('rq.registry.execute_failure_callback'):
+            self.registry.cleanup()
+
+        latest = Job.fetch(job.id, connection=self.connection).latest_result()
+        self.assertIsNotNone(latest)
+        self.assertEqual(latest.type, Result.Type.FAILED)
+        self.assertEqual(latest.execution_id, execution_id)
+        self.assertIn(execution_id, latest.exc_string)
+
+    def test_cleanup_retries_abandoned_execution_under_existing_rules(self):
+        """An abandoned execution with retries left is requeued once and keeps its retry budget."""
+        job = self.queue.enqueue(say_hello, retry=Retry(max=2))
+        self.assertEqual(job.retries_left, 2)
+        job.set_status(JobStatus.STARTED)
+        execution_id = 'abandoned-execution'
+        self.connection.zadd(self.registry.key, {f'{job.id}:{execution_id}': 1})
+
+        with mock.patch('rq.registry.execute_failure_callback'):
+            self.registry.cleanup()
+
+        refreshed = Job.fetch(job.id, connection=self.connection)
+        self.assertEqual(refreshed.get_status(), JobStatus.QUEUED)
+        self.assertEqual(refreshed.retries_left, 1)
+        self.assertNotIn(job.id, FailedJobRegistry(connection=self.connection))
+        self.assertNotIn(job.id, self.registry.get_job_ids(cleanup=False))
+
+    def test_cleanup_with_fake_clock_heartbeat_and_late_update_interleave(self):
+        """Reorder heartbeat, cleanup and a late update on a controllable clock.
+
+        The old attempt times out and is recovered; a new attempt stays alive and records
+        only its own result; a late heartbeat from the old attempt cannot resurrect it.
+        """
+        clock = FakeClock()
+        worker = Worker([self.queue], connection=self.connection, job_monitoring_interval=30)
+        job = self.queue.enqueue(say_hello, retry=Retry(max=1))
+
+        with clock.patched():
+            old_execution = worker.prepare_execution(job)
+            worker.prepare_job_execution(job)
+
+            # The old worker freezes (no more heartbeats). After its heartbeat window
+            # passes, its execution hash and per-job registry member expire in Redis.
+            clock.advance(worker.job_monitoring_interval + 61)
+            self.connection.delete(old_execution.key)
+            self.connection.zrem(ExecutionRegistry(job.id, connection=self.connection).key, old_execution.id)
+            # Its WIP entry is now expired relative to the current clock.
+            self.connection.zadd(self.registry.key, {old_execution.composite_key: clock.timestamp() - 1})
+
+            # A maintenance worker in another process runs cleanup at the advanced time.
+            with mock.patch('rq.registry.execute_failure_callback'):
+                self.registry.cleanup(clock.timestamp())
+
+            # The abandoned attempt is retried per the existing retry rule.
+            refreshed = Job.fetch(job.id, connection=self.connection)
+            self.assertEqual(refreshed.get_status(), JobStatus.QUEUED)
+            self.assertEqual(refreshed.retries_left, 0)
+            self.assertNotIn(
+                old_execution.composite_key,
+                [f'{j}:{e}' for j, e in self.registry.get_job_and_execution_ids(cleanup=False)],
+            )
+
+            # A new attempt picks the retried job up and starts heartbeating.
+            refreshed.set_status(JobStatus.STARTED)
+            new_execution = worker.prepare_execution(refreshed)
+            worker.prepare_job_execution(refreshed)
+            clock.advance(5)
+            worker.maintain_heartbeats(refreshed, new_execution)
+
+            # A late heartbeat from the dead old attempt arrives even later.
+            clock.advance(5)
+            with self.connection.pipeline() as pipeline:
+                old_execution.heartbeat(self.registry, worker.get_heartbeat_ttl(refreshed), pipeline)
+                pipeline.execute()
+
+            # The new attempt is the only live one; the old attempt was not resurrected.
+            entries = dict(self.registry.get_job_and_execution_ids(cleanup=False))
+            self.assertEqual(entries.get(job.id), new_execution.id)
+            execution_ids = ExecutionRegistry(job.id, connection=self.connection).get_execution_ids()
+            self.assertEqual(execution_ids, [new_execution.id])
+            self.assertEqual(Job.fetch(job.id, connection=self.connection).get_status(), JobStatus.STARTED)
+
+            # The old attempt still has a queryable end reason naming its own execution.
+            results = Result.all(Job.fetch(job.id, connection=self.connection))
+            self.assertTrue(any(r.execution_id == old_execution.id for r in results))
+
+

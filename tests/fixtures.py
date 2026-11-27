@@ -6,12 +6,16 @@ fixtures has a slightly different characteristics.
 from __future__ import annotations
 
 import asyncio
+import calendar
 import os
 import signal
 import subprocess
 import sys
 import time
+from contextlib import contextmanager
+from datetime import datetime, timedelta, timezone
 from multiprocessing import Process
+from unittest.mock import patch
 
 from redis import Redis
 
@@ -23,6 +27,67 @@ from rq.job import Job
 from rq.suspension import resume
 from rq.timeouts import UnixSignalDeathPenalty
 from rq.worker import HerokuWorker, SpawnWorker, Worker
+
+
+class FakeClock:
+    """A controllable clock for deterministic time-based tests.
+
+    RQ reads the time exclusively through ``rq.utils.now()`` (and
+    ``current_timestamp()``, which is derived from it). Patching that one
+    function therefore drives execution heartbeats, registry scores and
+    cleanup cutoffs together, letting a test reorder them precisely.
+
+    Time only moves when a test explicitly calls :meth:`advance` (or
+    :meth:`set`); reads never advance it, so interleaving steps stays exact.
+    Use :meth:`patched` as a context manager to install the clock::
+
+        clock = FakeClock()
+        with clock.patched():
+            ...  # rq.utils.now() returns clock.now() while inside
+    """
+
+    def __init__(self, start: datetime | None = None):
+        self._current = start if start is not None else datetime(2026, 1, 1, tzinfo=timezone.utc)
+
+    def now(self) -> datetime:
+        return self._current
+
+    def advance(self, seconds: float) -> datetime:
+        self._current = self._current + timedelta(seconds=seconds)
+        return self._current
+
+    def set(self, value: datetime) -> datetime:
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=timezone.utc)
+        self._current = value
+        return self._current
+
+    def timestamp(self) -> int:
+        return calendar.timegm(self._current.utctimetuple())
+
+    @contextmanager
+    def patched(self):
+        """Install the clock across RQ.
+
+        Modules do ``from rq.utils import now``, which binds ``now`` in their own
+        namespace, so patching only ``rq.utils.now`` would leave them reading real
+        time. Patch every already-imported submodule that exposes an ``rq.utils.now``
+        binding, plus ``rq.utils`` itself.
+        """
+        import sys
+
+        patches = [patch('rq.utils.now', new=self.now)]
+        for module_name, module in list(sys.modules.items()):
+            if module_name.startswith('rq.') and getattr(module, 'now', None) is not None:
+                patches.append(patch(f'{module_name}.now', new=self.now))
+        for active in patches:
+            active.start()
+        try:
+            yield self
+        finally:
+            for active in reversed(patches):
+                active.stop()
+
 
 
 def say_pid():

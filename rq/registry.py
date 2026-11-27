@@ -16,7 +16,7 @@ from .connections import get_connection_kwargs
 from .defaults import DEFAULT_FAILURE_TTL, FORMAT_KEY_PREFIX
 from .exceptions import AbandonedJobError, InvalidJobOperation, NoSuchJobError
 from .job import Job, JobStatus
-from .job_lifecycle import call_exception_handlers, record_job_failure
+from .job_lifecycle import call_exception_handlers
 from .queue import Queue
 from .rate_limit import RateLimitRegistry, release_slot
 from .timeouts import BaseDeathPenalty, UnixSignalDeathPenalty
@@ -272,27 +272,58 @@ class StartedJobRegistry(BaseRegistry):
     key_template = FORMAT_KEY_PREFIX + ':wip:{0}'
 
     def cleanup(self, timestamp: float | None = None, exception_handlers: list | None = None):
-        """Handles abandoned jobs whose execution expired before `timestamp`.
+        """Handles abandoned executions whose registry entry expired before `timestamp`.
 
-        Each one is retried if it has retries left, otherwise moved to the FailedJobRegistry.
-        Its rate limit slot is freed unless the job was requeued.
+        Cleanup is bounded to the execution instance behind each expired
+        ``{job_id}:{execution_id}`` entry, while never disturbing a still-running attempt:
+
+        - A job that still has any live execution in its per-job
+          :class:`ExecutionRegistry` is being heartbeaten by a worker in another process
+          (e.g. a retry already running under a newer execution). Its expired entries are
+          dropped as leftovers, but the job is never re-enqueued or failed.
+        - When none of the job's executions are live, the expired entries mean the worker
+          died mid-request. The job is retried if it has retries left, otherwise moved to
+          the FailedJobRegistry. Its rate limit slot is freed unless it was requeued.
+        - Several expired entries can carry the same job id (a stale entry from a previous
+          attempt next to the abandoned one). Each job is recovered at most once, and the
+          failure Result names the specific execution whose worker died.
 
         Args:
             timestamp (float, optional): Unix timestamp to use as the cutoff. Defaults to now.
             exception_handlers (list, optional): Handlers to call for each abandoned job.
         """
         score = timestamp if timestamp is not None else current_timestamp()
-        job_ids = self.get_expired_job_ids(score)
+        expired_entries = self.connection.zrangebyscore(self.key, 0, score)
 
-        if not job_ids:
+        if not expired_entries:
             return
+
+        from .executions import ExecutionRegistry
 
         queue = self.get_queue()
         processed_jobs = []
         failed_jobs = []
+        # Entries that must stay in the WIP registry: they belong to a job with a live attempt.
+        entries_to_keep: set[str] = set()
+        # Group the expired entries per job so each job is evaluated and recovered once.
+        entries_by_job: dict[str, list[tuple[str, str]]] = {}
+        for raw_entry in expired_entries:
+            entry = raw_entry if isinstance(raw_entry, str) else as_text(raw_entry)
+            job_id, execution_id = parse_composite_key(entry)
+            entries_by_job.setdefault(job_id, []).append((entry, execution_id))
 
         with self.connection.pipeline() as pipeline:
-            for job_id in job_ids:
+            for job_id, entries in entries_by_job.items():
+                execution_registry = ExecutionRegistry(job_id, connection=self.connection)
+
+                # The per-job ExecutionRegistry is authoritative for liveness: a running
+                # worker keeps its members refreshed, while cleanup/delete removes them.
+                # Any live member means an attempt of this job is still running, so the
+                # expired WIP entries are leftovers rather than an abandoned job.
+                if execution_registry.get_execution_ids():
+                    entries_to_keep.update(entry for entry, _execution_id in entries)
+                    continue
+
                 try:
                     job = self.job_class.fetch(job_id, connection=self.connection, serializer=self.serializer)
                 except NoSuchJobError:
@@ -305,6 +336,7 @@ class StartedJobRegistry(BaseRegistry):
 
                 # The work-horse died in another process, so there is no traceback to pass.
                 # A raising callback must not abort the batch, so log and swallow it.
+                abandoned_execution_id = entries[0][1]
                 try:
                     execute_failure_callback(
                         job, self.death_penalty_class, AbandonedJobError, AbandonedJobError(), None
@@ -318,20 +350,29 @@ class StartedJobRegistry(BaseRegistry):
                 retry = job.retries_left and job.retries_left > 0
 
                 if retry:
+                    self._record_abandoned_retry(job, abandoned_execution_id, pipeline)
                     job.retry(queue, pipeline)
                 else:
                     exc_string = (
-                        f'Moved to {FailedJobRegistry.__name__}, due to {AbandonedJobError.__name__}, at {now()}'
+                        f'Moved to {FailedJobRegistry.__name__}, due to {AbandonedJobError.__name__} '
+                        f'for execution {abandoned_execution_id}, at {now()}'
                     )
                     logger.warning('%s cleanup: %s %s', self.__class__.__name__, job.id, exc_string)
-                    record_job_failure(job, exc_string, pipeline)
+                    self._record_abandoned_failure(job, abandoned_execution_id, exc_string, pipeline)
                     # Use the cached status: FAILED is still buffered in the pipeline.
                     queue.enqueue_dependents(job, refresh_job_status=False)
                     failed_jobs.append((job, exc_string))
 
                 processed_jobs.append(job)
 
-            pipeline.zremrangebyscore(self.key, 0, score)
+            # Remove only the expired entries that are not backed by a still-live attempt.
+            removable = [
+                (raw if isinstance(raw, str) else as_text(raw))
+                for raw in expired_entries
+                if (raw if isinstance(raw, str) else as_text(raw)) not in entries_to_keep
+            ]
+            if removable:
+                pipeline.zrem(self.key, *removable)
             pipeline.execute()
 
         # Fire failed webhooks only after the terminal failures are persisted.
@@ -341,6 +382,52 @@ class StartedJobRegistry(BaseRegistry):
         # Release only after the commit, so promotion sees each job's persisted status.
         for job in processed_jobs:
             release_slot(job)
+
+    def _record_abandoned_failure(self, job: Job, execution_id: str, exc_string: str, pipeline: Pipeline) -> None:
+        """Persist an abandoned-execution failure and attribute the Result to that execution.
+
+        The failure Result records the execution that actually ended, so the stream keeps
+        a queryable end reason per attempt instead of an unattributed failure.
+
+        Args:
+            job (Job): The abandoned job.
+            execution_id (str): The execution whose worker died.
+            exc_string (str): The abandonment explanation.
+            pipeline (Pipeline): The pipeline the failure is written through.
+        """
+        job.set_status(JobStatus.FAILED, pipeline=pipeline)
+        job._handle_failure(
+            exc_string,
+            pipeline=pipeline,
+            execution_id=execution_id,
+        )
+
+    def _record_abandoned_retry(self, job: Job, execution_id: str, pipeline: Pipeline) -> None:
+        """Record that an abandoned execution ended so the job can be retried.
+
+        Unlike the in-worker retry path there is no live execution hash to read, so the
+        Result only carries the id of the execution whose worker died. It gives the ended
+        attempt a queryable reason while leaving the retry itself to ``Job.retry()``.
+
+        Args:
+            job (Job): The abandoned job that still has retries left.
+            execution_id (str): The execution whose worker died.
+            pipeline (Pipeline): The pipeline the result is written through.
+        """
+        from .results import Result
+
+        Result.create_retried(
+            job,
+            job.failure_ttl,
+            return_value=AbandonedJobError(
+                f'{AbandonedJobError.__name__}: execution {execution_id} was abandoned and will be retried'
+            ),
+            worker_name='',
+            execution_id=execution_id,
+            execution_started_at=job.started_at,
+            execution_ended_at=now(),
+            pipeline=pipeline,
+        )
 
     def add_execution(self, execution: Execution, pipeline: Pipeline, ttl: int = 0, xx: bool = False) -> int:
         """Adds an execution to a registry with expiry time of now + ttl, unless it's -1 which is set to +inf

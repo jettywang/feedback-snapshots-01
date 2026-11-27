@@ -125,6 +125,14 @@ damage. Just sayin'.
 If the worker gets killed while a job is running, it will eventually end up in
 `FailedJobRegistry` because a cleanup task will raise an `AbandonedJobError`.
 
+Cleanup is bounded to the execution instance that stopped heartbeating. A job that
+still has a live execution (for example a retry already running under a newer attempt)
+is never re-enqueued or failed by cleanup, and a heartbeat that arrives after an
+attempt was cleaned up cannot resurrect it. When an abandoned attempt is recovered,
+its result records the id of the execution that actually ended, so each attempt keeps
+a queryable end reason; an attempt with retries left is requeued under the normal
+retry rules instead of being failed.
+
 
 ## Dealing with Job Timeouts
 

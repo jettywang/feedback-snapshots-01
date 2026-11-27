@@ -129,17 +129,30 @@ class Execution:
         }
 
     def heartbeat(self, started_job_registry: StartedJobRegistry, ttl: int, pipeline: Pipeline):
-        """Update execution heartbeat."""
+        """Update this execution's heartbeat.
+
+        The write is bounded to the execution instance: the shared StartedJobRegistry and
+        the per-job ExecutionRegistry are only refreshed while this execution is still a
+        member of its ExecutionRegistry. A heartbeat arriving after another process cleaned
+        up this attempt (a "late" heartbeat) therefore recreates only this execution's own
+        hash — it cannot re-register the attempt or disturb a newer attempt running the job.
+        """
         # TODO: worker heartbeat should be tied to execution heartbeat
         self.last_heartbeat = now()
         # Write every field, not only last_heartbeat. If the hash expired while the execution is
         # still running, this recreates a complete record that Execution.fetch() can read.
         pipeline.hset(self.key, mapping=self.serialize())
         pipeline.expire(self.key, ttl)
+
+        # A member removed from the per-job ExecutionRegistry means this attempt already
+        # ended (cleanup or deletion). Do not let a late heartbeat resurrect it in either
+        # shared registry; the xx=True updates would no-op anyway, but skip them explicitly.
+        execution_registry = ExecutionRegistry(job_id=self.job_id, connection=self.connection)
+        if self.connection.zscore(execution_registry.key, self.id) is None:
+            return
+
         started_job_registry.add_execution(self, ttl=ttl, pipeline=pipeline, xx=True)
-        ExecutionRegistry(job_id=self.job_id, connection=pipeline).add(
-            execution=self, ttl=ttl, pipeline=pipeline, xx=True
-        )
+        execution_registry.add(execution=self, ttl=ttl, pipeline=pipeline, xx=True)
 
 
 class ExecutionRegistry(BaseRegistry):
