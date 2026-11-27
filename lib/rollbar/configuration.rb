@@ -8,6 +8,7 @@ module Rollbar
                   :anonymize_user_ip,
                   :async_handler,
                   :async_json_payload,
+                  :async_shutdown_timeout,
                   :async_skip_report_handler,
                   :backtrace_cleaner,
                   :branch,
@@ -68,6 +69,7 @@ module Rollbar
                   :user_ip_obfuscator_secret,
                   :user_ip_rack_env_key,
                   :scrub_headers,
+                  :shutdown_handler,
                   :sidekiq_threshold,
                   :sidekiq_use_scoped_block,
                   :use_async,
@@ -93,6 +95,7 @@ module Rollbar
     def initialize
       @access_token = nil
       @async_handler = nil
+      @shutdown_handler = nil
       @before_process = []
       @branch = nil
       @capture_uncaught = nil
@@ -158,6 +161,7 @@ module Rollbar
       @transform = []
       @use_async = false
       @async_json_payload = false
+      @async_shutdown_timeout = nil
       @use_eventmachine = false
       @verify_ssl_peer = true
       @web_base = DEFAULT_WEB_BASE
@@ -227,6 +231,7 @@ module Rollbar
 
     def use_active_job(options = {})
       require 'rollbar/delay/active_job'
+      @shutdown_handler = nil
 
       Rollbar::Delay::ActiveJob.queue_as(options[:queue] ||
       Rollbar::Delay::ActiveJob.default_queue_name)
@@ -237,6 +242,7 @@ module Rollbar
 
     def use_delayed_job(options = {})
       require 'rollbar/delay/delayed_job'
+      @shutdown_handler = nil
 
       Rollbar::Delay::DelayedJob.queue = options[:queue] if options[:queue]
 
@@ -246,12 +252,14 @@ module Rollbar
 
     def use_sidekiq(options = {})
       require 'rollbar/delay/sidekiq' if defined?(Sidekiq)
+      @shutdown_handler = nil
       @use_async      = true
       @async_handler  = Rollbar::Delay::Sidekiq.new(options)
     end
 
     def use_resque(options = {})
       require 'rollbar/delay/resque' if defined?(Resque)
+      @shutdown_handler = nil
 
       Rollbar::Delay::Resque::Job.queue = options[:queue] if options[:queue]
 
@@ -261,6 +269,7 @@ module Rollbar
 
     def use_shoryuken(options = {})
       require 'rollbar/delay/shoryuken' if defined?(Shoryuken)
+      @shutdown_handler = nil
 
       Rollbar::Delay::Shoryuken.queue = options[:queue] if options[:queue]
 
@@ -283,12 +292,16 @@ module Rollbar
     def use_thread(options = {})
       require 'rollbar/delay/thread'
       @use_async = true
+      @async_shutdown_timeout = options[:shutdown_timeout] if
+        options.key?(:shutdown_timeout)
       Rollbar::Delay::Thread.options = options
       @async_handler = Rollbar::Delay::Thread
+      @shutdown_handler = Rollbar::Delay::Thread
     end
 
     def use_sucker_punch
       require 'rollbar/delay/sucker_punch' if defined?(SuckerPunch)
+      @shutdown_handler = nil
       @use_async      = true
       @async_handler  = Rollbar::Delay::SuckerPunch
     end

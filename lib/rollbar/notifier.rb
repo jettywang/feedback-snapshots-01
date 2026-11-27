@@ -223,6 +223,38 @@ module Rollbar
       raise e unless via_failsafe?(item)
 
       log_error('[Rollbar] Item has already failed. Not re-raising')
+      false
+    end
+
+    # Closes the async thread handler, if it is the active handler, and
+    # returns its shutdown receipt. Without an active thread handler this
+    # returns a complete, empty receipt so callers always get an answer.
+    def shutdown(options = {})
+      handler = shutdown_handler
+
+      # Only the built-in thread handler owns a lifecycle to close. Queue
+      # backed handlers (Sidekiq, Active Job, etc.) are drained by their
+      # queue, so they return an empty receipt rather than pretending to
+      # know what is still pending.
+      return Rollbar::Delay::Thread::ShutdownReceipt.new([], nil, false) unless
+        handler && handler.respond_to?(:shutdown)
+
+      options = {} unless options.is_a?(Hash)
+      if options[:timeout].nil? && configuration.async_shutdown_timeout
+        options = options.merge(:timeout => configuration.async_shutdown_timeout)
+      end
+
+      handler.shutdown(options)
+    end
+
+    def shutdown_handler
+      handler = configuration.shutdown_handler
+      return handler if handler
+
+      async_handler = configuration.async_handler
+      return async_handler if async_handler.respond_to?(:shutdown)
+
+      default_async_handler if configuration.use_async && async_handler.nil?
     end
 
     # We will reraise exceptions in this method so async queues
@@ -659,11 +691,11 @@ module Rollbar
       log_debug '[Rollbar] Sending item'
 
       body = item.dump
-      return unless body
+      return false unless body
 
       if configuration.use_eventmachine
         send_using_eventmachine(body)
-        return
+        return true
       end
 
       send_body(body)
@@ -781,12 +813,14 @@ module Rollbar
     def handle_response(response)
       if response.code == '200'
         log_debug '[Rollbar] Success'
+        true
       else
         log_warning(
           "[Rollbar] Got unexpected status code from Rollbar api: #{response.code}, " \
             "response: #{response.body}"
         )
         configuration.execute_hook(:on_error_response, response)
+        false
       end
     end
 
@@ -814,8 +848,10 @@ module Rollbar
         update_file(@file, file_name)
 
         log_debug '[Rollbar] Success'
+        true
       rescue IOError => e
         log_error "[Rollbar] Error opening/writing to file: #{e}"
+        false
       end
     end
 

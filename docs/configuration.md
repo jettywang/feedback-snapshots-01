@@ -25,6 +25,40 @@ Not needed if using one of the built in async reporters:
  * Resque
  * threading
 
+### async_shutdown_timeout
+
+**Default** `nil` (uses `Rollbar::Delay::Thread::DEFAULT_SHUTDOWN_TIMEOUT`)
+
+The deadline, in seconds, given to reports already accepted by the built-in
+thread async handler when `Rollbar.shutdown` or the automatic `at_exit`
+drain runs. Reports still in flight when the deadline expires are returned
+in the receipt as `:unfinished` and need follow-up. A raised delivery error
+is returned as `:failed`. Only the thread handler reads this setting.
+
+```ruby
+Rollbar.configure do |config|
+  config.use_thread(:shutdown_timeout => 6)
+  # or, equivalently:
+  # config.async_shutdown_timeout = 6
+end
+
+# At worker teardown:
+receipt = Rollbar.shutdown
+receipt.processed_uuids   # delivered successfully
+receipt.failed_uuids      # delivery raised; needs review
+receipt.unfinished_uuids  # still in flight at the cutoff
+receipt.to_h              # JSON-friendly summary for logs
+```
+
+Reports accepted after a shutdown call begins belong to a new generation, so
+the receipt never judges them by the previous cutoff. A later shutdown waits
+for reports that were still in flight at the earlier deadline instead of
+trusting the old result. Concurrent shutdown calls share one receipt, and the
+automatic `at_exit` drain prints leftover UUIDs to `stderr` without changing
+the process exit status. Receipts expose `:generation`, `:accepted`,
+`:processed`, `:failed`, `:unfinished`, `:counts`, `:deliveries`,
+`:complete` and `:timed_out`.
+
 ### branch
 
 Name of the checked-out source control branch.
