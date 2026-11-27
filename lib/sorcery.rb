@@ -29,6 +29,8 @@ module Sorcery
     end
   end
 
+  require 'sorcery/recent_authentication_store'
+
   require 'sorcery/controller'
 
   module Controller
@@ -40,6 +42,7 @@ module Sorcery
       require 'sorcery/controller/submodules/http_basic_auth'
       require 'sorcery/controller/submodules/activity_logging'
       require 'sorcery/controller/submodules/external'
+      require 'sorcery/controller/submodules/recent_authentication'
     end
   end
 
@@ -75,6 +78,7 @@ module Sorcery
   require 'sorcery/adapters/base_adapter'
 
   if defined?(ActiveRecord::Base)
+    require 'sorcery/recent_authentication'
     require 'sorcery/adapters/active_record_adapter'
     ActiveRecord::Base.extend Sorcery::Model
 

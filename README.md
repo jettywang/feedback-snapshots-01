@@ -107,6 +107,16 @@ User.load_from_reset_password_token(token)
 invalidate_active_sessions! #Invalidate all sessions with a login_time or last_action_time before the current time. Must Opt-in
 ```
 
+### Recent Authentication
+
+```ruby
+confirm_recent_authentication!(:approve_transfer) # Record a step-up confirmation for one or more operations in this session
+recent_authentication_valid_for?(:approve_transfer) # True only while that confirmation is fresh and bound to this session
+recent_authentication_expires_at(:approve_transfer) # Expiry of the active confirmation, or nil
+require_recent_authentication(:approve_transfer) # before_action for sensitive endpoints
+revoke_recent_authentication!(:session) # Drop confirmations for this session, or :user for all terminals
+```
+
 ### User Activation
 
 ```ruby
@@ -152,6 +162,11 @@ Run the following command to generate only the migration files for the specified
 
     $ rails generate sorcery:install http_basic_auth external remember_me --only-submodules
 
+Recent authentication needs its own table. Add the submodule and generate the
+migration with:
+
+    $ rails generate sorcery:install recent_authentication --only-submodules
+
 Inside the initializer, the comments will tell you what each setting does.
 
 ## Full Features List by Module
@@ -189,6 +204,12 @@ Inside the initializer, the comments will tell you what each setting does.
 - Configurable session timeout
 - Optionally session timeout will be calculated from last user action
 - Optionally enable a method to clear all active sessions, expects an `invalidate_sessions_before` datetime attribute.
+
+**Recent Authentication** (see [lib/sorcery/controller/submodules/recent_authentication.rb](https://github.com/Sorcery/sorcery/blob/main/lib/sorcery/controller/submodules/recent_authentication.rb)):
+
+- Server-side step-up confirmation with its own expiry, operation scope and session binding
+- Restoring a session (including from a remember-me cookie) never grants a confirmation
+- Configurable revocation of confirmations on logout and ordinary session timeout
 
 **Brute Force Protection** (see [lib/sorcery/model/submodules/brute_force_protection.rb](https://github.com/Sorcery/sorcery/blob/main/lib/sorcery/model/submodules/brute_force_protection.rb)):
 

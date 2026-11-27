@@ -22,6 +22,9 @@ AppRoot::Application.routes.draw do
     get :test_logout_with_force_forget_me
     get :test_invalidate_active_session
     get :test_should_be_logged_in
+    get :test_recent_authentication_confirm
+    get :test_recent_authentication_sensitive
+    get :test_recent_authentication_state
     get :test_create_from_provider
     get :test_add_second_provider
     get :test_return_to_with_external

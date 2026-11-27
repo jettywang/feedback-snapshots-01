@@ -12,7 +12,9 @@ class SorceryController < ApplicationController
     test_logout_with_force_forget_me
     test_should_be_logged_in
     some_action
+    test_recent_authentication_confirm
   ]
+  before_action :require_recent_authentication_for_test, only: %i[test_recent_authentication_sensitive]
 
   def index; end
 
@@ -134,8 +136,29 @@ class SorceryController < ApplicationController
     head :ok
   end
 
+  def test_recent_authentication_confirm
+    confirm_recent_authentication!(params[:operation].presence || :sensitive)
+    head :ok
+  end
+
+  def test_recent_authentication_sensitive
+    head :ok
+  end
+
+  def test_recent_authentication_state
+    render json: {
+      logged_in: logged_in?,
+      recent: recent_authentication_valid_for?(params[:operation].presence || :sensitive),
+      expires_at: recent_authentication_expires_at(params[:operation].presence || :sensitive)
+    }
+  end
+
   def test_http_basic_auth
     head :ok
+  end
+
+  def require_recent_authentication_for_test
+    require_recent_authentication(params[:operation].presence || :sensitive)
   end
 
   def login_at_test_twitter

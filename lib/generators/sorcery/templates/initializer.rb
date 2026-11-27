@@ -3,7 +3,7 @@
 #
 # Available submodules are: :user_activation, :http_basic_auth, :remember_me,
 # :reset_password, :session_timeout, :brute_force_protection, :activity_logging,
-# :magic_login, :external
+# :magic_login, :recent_authentication, :external
 Rails.application.config.sorcery.submodules = []
 
 # Here you can configure each submodule's features.
@@ -55,6 +55,36 @@ Rails.application.config.sorcery.configure do |config|
   # Default: `false`
   #
   # config.session_timeout_invalidate_active_sessions_enabled =
+
+  # -- recent authentication --
+  # How long in seconds a step-up confirmation stays valid. This is independent
+  # from `session_timeout`: restoring a session (including from a remember-me
+  # cookie) never satisfies a recent-authentication requirement.
+  # Default: `900` (15 minutes)
+  #
+  # config.recent_authentication_timeout =
+
+  # Where recent-authentication proofs are stored. The default uses the
+  # `sorcery_recent_authentications` table created by the
+  # `sorcery:install recent_authentication` migration. Provide an object with
+  # `create`, `active`, `expires_at`, `revoke_session` and `revoke_user` to use
+  # another persistence layer.
+  # Default: `Sorcery::RecentAuthenticationStore::ActiveRecordStore.new`
+  #
+  # config.recent_authentication_store =
+
+  # What to invalidate when the user logs out: `:session` (default), `:user`,
+  # or `nil` to keep the proofs. Use `:user` to end step-up confirmations on
+  # every terminal.
+  # Default: `:session`
+  #
+  # config.recent_authentication_revocation_on_logout =
+
+  # What to invalidate when the ordinary session times out: `:session`
+  # (default), `:user`, or `nil`.
+  # Default: `:session`
+  #
+  # config.recent_authentication_revocation_on_timeout =
 
   # -- http_basic_auth --
   # What realm to display for which controller name. For example {"My App" => "Application"}
