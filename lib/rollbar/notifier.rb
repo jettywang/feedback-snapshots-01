@@ -516,7 +516,13 @@ module Rollbar
 
       return 'ignored' if item.ignored?
 
-      schedule_item(item) if configuration.transmit
+      if configuration.transmit
+        schedule_item(item)
+      end
+
+      # Destinations carry their own senders and are delivered independently
+      # of the default Rollbar HTTP transmission controlled by #transmit.
+      schedule_destinations(item)
 
       log_and_return_item_data(item)
     end
@@ -622,6 +628,31 @@ module Rollbar
     end
 
     ## Delivery functions
+
+    def schedule_destinations(item)
+      configuration.destinations.each do |destination|
+        process_destination_item(item, destination)
+      rescue StandardError => e
+        log_error "[Rollbar] Error processing destination " \
+          "#{destination.name.inspect}: #{e.class}, #{e.message}"
+      end
+    end
+
+    # Builds an independent view of the same event for one destination. The
+    # canonical item is deep copied first, so the destination-specific scope
+    # and transforms can never alter the payload another egress receives. The
+    # uuid is generated while the canonical item is built and is carried by
+    # every copy, which lets each receipt be correlated back to one event.
+    def process_destination_item(item, destination)
+      destination_item = build_item_with_payload(
+        Rollbar::Util.deep_copy(item.payload)
+      )
+
+      destination_item.enforce_data_scope(destination_item.payload, destination)
+      destination_item.apply_transforms(destination.transform,
+                                        destination_item.payload)
+      destination.deliver(destination_item.payload)
+    end
 
     def send_using_eventmachine(body)
       uri = URI.parse(configuration.endpoint)

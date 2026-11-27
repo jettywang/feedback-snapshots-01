@@ -193,6 +193,60 @@ module Rollbar
       payload
     end
 
+    def enforce_valid_utf8
+      Util.enforce_valid_utf8(payload)
+    end
+
+    # Runs a list of transform handlers against an arbitrary payload view.
+    # The canonical build uses it for the global configuration.transform, and
+    # Rollbar::Notifier reuses it for each destination's own transforms so a
+    # destination handler receives exactly the same options shape as a global
+    # one. Every view passed in is an independent deep copy, so handlers can
+    # freely mutate their payload without touching another egress.
+    def apply_transforms(handlers, target_payload)
+      handlers.each do |handler|
+        begin
+          handler.call(transform_options(target_payload))
+        rescue StandardError => e
+          logger.error("[Rollbar] Error calling the `transform` hook: #{e}")
+
+          break
+        end
+      end
+    end
+
+    # Removes the sections a destination is not permitted to receive. It
+    # mutates the destination's own payload copy only, and walks every place a
+    # section can appear (top-level data, the message body and each trace in a
+    # trace chain), so denied data can never reach that egress.
+    def enforce_data_scope(target_payload, destination)
+      data = target_payload['data']
+      return target_payload unless data.is_a?(Hash)
+
+      strip_section(data, :request) unless destination.permits?(:request)
+      strip_section(data, :person) unless destination.permits?(:person)
+      strip_section(data, :custom) unless destination.permits?(:custom)
+
+      strip_body_sections(data) unless destination.permits?(:extra)
+
+      target_payload
+    end
+
+    def transform
+      apply_transforms(configuration.transform, payload)
+    end
+
+    def transform_options(target_payload = payload)
+      {
+        :level => level,
+        :scope => scope,
+        :exception => exception,
+        :message => message,
+        :extra => extra,
+        :payload => target_payload
+      }
+    end
+
     private
 
     def build_environment
@@ -288,33 +342,32 @@ module Rollbar
       data
     end
 
-    def enforce_valid_utf8
-      Util.enforce_valid_utf8(payload)
+    private
+
+    def strip_section(data, section)
+      data.delete(section)
     end
 
-    def transform
-      handlers = configuration.transform
+    def strip_body_sections(data)
+      body = data[:body]
+      return unless body.is_a?(Hash)
 
-      handlers.each do |handler|
-        begin
-          handler.call(transform_options)
-        rescue StandardError => e
-          logger.error("[Rollbar] Error calling the `transform` hook: #{e}")
+      strip_message_extra(body[:message]) if body[:message]
+      strip_trace_extra(body[:trace]) if body[:trace]
 
-          break
-        end
-      end
+      Array(body[:trace_chain]).each { |trace| strip_trace_extra(trace) }
     end
 
-    def transform_options
-      {
-        :level => level,
-        :scope => scope,
-        :exception => exception,
-        :message => message,
-        :extra => extra,
-        :payload => payload
-      }
+    def strip_message_extra(message)
+      return unless message.is_a?(Hash)
+
+      message.delete(:extra)
+    end
+
+    def strip_trace_extra(trace)
+      return unless trace.is_a?(Hash)
+
+      trace.delete(:extra)
     end
   end
 end

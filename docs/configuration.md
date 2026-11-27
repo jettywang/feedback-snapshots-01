@@ -361,3 +361,49 @@ enterprise customer this should never change.
 
 If `true` writes all errors to a log file which can be sent with
 `rollbar-agent`.
+
+## Destinations (multiple egresses)
+
+A destination is an independent egress for every reported error. Use it when
+the same error must reach more than one system, for example the external
+Rollbar API and an internal on-call desk. The canonical payload is still built
+once, so the existing filters, scrubbers, `before_process` and global
+`transform` hooks continue to run a single time, and every destination receipt
+carries the same `uuid`, which lets you correlate the two receipts back to one
+event.
+
+Each destination defines:
+
+* a **sender**: any object responding to `#call(payload, destination)` that
+  performs the delivery (an HTTP client for the internal desk, an in-memory
+  collector in tests, ...).
+* a **data scope**: the payload sections this destination is allowed to
+  receive. Supported sections are `:request`, `:person`, `:extra` and
+  `:custom`. Sections outside the scope are removed from that destination's
+  own copy before its transforms run, so data that is not permitted can never
+  reach that egress. The default is `:all`.
+* its own **transforms**: handlers applied only to this destination's view.
+  Every destination works on an independent deep copy, so mutating one view
+  never changes the representation another destination is sending.
+
+```ruby
+Rollbar.configure do |config|
+  config.access_token = '...'
+
+  # Everything goes to the external Rollbar project.
+  config.add_destination(:rollbar, RollbarSender.new, permitted_sections: :all)
+
+  # The internal desk needs request context and extra attributes, but must not
+  # receive the identified person. Fabricated internal data is added only here.
+  config.add_destination(:oncall, OnCallSender.new,
+                         permitted_sections: %i[request extra]) do |dest|
+    dest.add_transform do |options|
+      options[:payload]['data'][:routing_key] = 'ops-oncall'
+    end
+  end
+end
+```
+
+Destinations are delivered independently of `config.transmit`, which only
+controls the default Rollbar HTTP transmission. A failing destination is
+rescued and logged so it can never block the other egresses.

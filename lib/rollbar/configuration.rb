@@ -1,4 +1,5 @@
 require 'logger'
+require 'rollbar/destination'
 
 module Rollbar
   class Configuration
@@ -18,6 +19,7 @@ module Rollbar
                   :custom_data_method,
                   :default_logger,
                   :delayed_job_enabled,
+                  :destinations,
                   :disable_action_mailer_monkey_patch,
                   :disable_core_monkey_patch,
                   :disable_monkey_patch,
@@ -119,6 +121,7 @@ module Rollbar
         'ActionController::RoutingError' => 'warning'
       }
       @failover_handlers = []
+      @destinations = []
       @framework = 'Plain'
       @ignore_internal_errors = [
         'Net::ReadTimeout',
@@ -327,6 +330,27 @@ module Rollbar
 
     def transform=(*handler)
       @transform = Array(handler)
+    end
+
+    # Registers an independent egress for every report. The canonical payload
+    # is still built once (so filtering, scrubbing and the event uuid are
+    # shared), then each destination receives its own deep-copied view scoped
+    # by its data permissions.
+    #
+    # @example
+    #   config.add_destination(:oncall, InternalSender.new,
+    #                          permitted_sections: %i[request extra]) do |dest|
+    #     dest.add_transform { |options| options[:payload][:routing_key] = 'ops' }
+    #   end
+    def add_destination(name = nil, sender = nil, options = nil)
+      options ||= {}
+      destination = Destination.new(name, sender, options[:permitted_sections])
+
+      yield(destination) if block_given?
+
+      @destinations << destination
+
+      destination
     end
 
     def send_extra_frame_data=(value)
