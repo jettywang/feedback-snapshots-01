@@ -107,6 +107,21 @@ instead of `bin`.
       `pyspdxtools -i tests/spdx/data/SPDXJSONExample-v2.3.spdx.json --graph -o SPDXJSONExample-v2.3.spdx.png` to generate
       a png with an overview of the structure of the example file.
 
+4. **SHARING ANNOTATIONS SAFELY** (controlled annotation export)
+
+    - SPDX annotations can hold investigation notes that must not leave the organization. Use
+      `--annotation-policy <policy.json>` to declare which annotations are restricted and which fields may be
+      shared. Restricted annotations keep their target `SPDXID`, so the investigation pointer stays intact, but
+      only the approved fields are exported and a stable audit reference is embedded in the comment. Public
+      annotations are copied unchanged.
+    - Use `--annotation-audit-out <audit.json>` to write the internal-only mapping from stable references back to
+      the original records. Keep this file internal. It stores the stable reference and locating metadata, not the
+      restricted comment text; the full record is resolved from the retained original document.
+    - Example:
+      `pyspdxtools -i internal.spdx.json -o shared.spdx.json --annotation-policy policy.json --annotation-audit-out audit.json`
+    - `--annotation-redact-all` treats every annotation as restricted. This is only needed when no public
+      annotation may be shared at all.
+
 ### Library usage
 
 1. **DATA MODEL**
@@ -138,6 +153,49 @@ instead of `bin`.
     The serialization format is determined from the filename ending.
     - Validation is performed per default prior to the writing process, which is cancelled if the document is invalid. You can skip the validation via `write_file(document, file_name, validate=False)`.
     Caution: Only valid documents can be serialized reliably; serialization of invalid documents is not supported.
+
+5. **SHARING ANNOTATIONS SAFELY**
+
+    - Use `export_annotations_for_sharing(document, policy)` from the `annotation_export.py` module to get a
+      shareable copy of a document. The input document is never modified. Public annotations are copied verbatim;
+      restricted annotations keep their target `spdx_id` but only the fields approved by
+      `AnnotationExportPolicy.allowed_fields` are exported. Every restricted annotation carries a deterministic
+      stable identifier (`ann-...`) in its comment.
+    - Write the returned `audit_entries` to an internal-only file with `write_annotation_audit_file(entries, path)`.
+      Internal audit can then use `find_original_annotations(original_document, stable_id)` or
+      `find_original_with_audit_file(shared_document, original_document, audit_file)` to resolve a shared
+      annotation back to the full original record, including the removed comment. An optional policy `salt`
+      makes the stable identifiers harder to guess offline; the same salt is required for lookup.
+    - The exported document is a normal SPDX document and can be converted between all supported formats. Try it:
+      `examples/spdx2_export_annotations.py`
+
+### Annotation sharing policy format
+
+The file passed to `--annotation-policy` is a JSON object. A policy must select at least one annotation (or set
+`restrict_all` to `true`), otherwise it is rejected to avoid accidentally exporting everything unchanged.
+
+```json
+{
+  "restricted": {
+    "annotator_names": ["Incident Team"],
+    "annotation_types": ["REVIEW"],
+    "spdx_ids": ["SPDXRef-Package"],
+    "stable_ids": ["ann-..."],
+    "comment_substrings": ["tenant id"]
+  },
+  "restrict_all": false,
+  "allowed_fields": ["annotation_type", "annotator", "annotation_date"],
+  "comment_template": "[restricted annotation] audit reference: {stable_id}",
+  "salt": "optional-policy-salt",
+  "redacted_annotator": {"actor_type": "TOOL", "name": "SPDX-ANNOTATION-REDACTED"},
+  "redacted_annotation_type": "OTHER",
+  "redacted_annotation_date": "1970-01-01T00:00:00Z"
+}
+```
+
+The selector lists are optional and OR-combined. `allowed_fields` may contain `annotation_type`, `annotator`,
+`annotation_date` and `comment`. The annotated `spdx_id` is always kept. `comment_template` must contain
+`{stable_id}`. If `salt` is set, the same salt is required when an internal reviewer resolves the stable references.
 
 ### Example
 

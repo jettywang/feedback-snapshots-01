@@ -22,6 +22,12 @@ import click
 from beartype.typing import List
 from yaml.scanner import ScannerError
 
+from spdx_tools.spdx.annotation_export import (
+    AnnotationExportPolicy,
+    export_annotations_for_sharing,
+    load_annotation_export_policy,
+    write_annotation_audit_file,
+)
 from spdx_tools.spdx.graph_generation import export_graph_from_document
 from spdx_tools.spdx.model import Document
 from spdx_tools.spdx.parser.error import SPDXParsingError
@@ -55,7 +61,37 @@ from spdx_tools.spdx.writer.write_anything import write_file
     "The generated graph is saved to the file specified with --outfile. "
     "Note: You need to install the optional dependencies 'networkx' and 'pygraphviz' for this feature.",
 )
-def main(infile: str, outfile: str, version: str, novalidation: bool, graph: bool):
+@click.option(
+    "--annotation-policy",
+    "annotation_policy_file",
+    default=None,
+    help="JSON file describing which annotations are restricted and which fields may be exported. "
+    "Restricted annotations keep their target SPDXID and are replaced by a stable audit reference.",
+)
+@click.option(
+    "--annotation-audit-out",
+    "annotation_audit_file",
+    default=None,
+    help="Write the internal-only mapping from stable annotation references back to the original "
+    "records to this JSON file. This file must not be shared with the exported document.",
+)
+@click.option(
+    "--annotation-redact-all",
+    is_flag=True,
+    default=False,
+    help="Treat every annotation as restricted when exporting. Requires --annotation-policy for field selection "
+    "or uses the default approved fields (annotation type, annotator and date).",
+)
+def main(
+    infile: str,
+    outfile: str,
+    version: str,
+    novalidation: bool,
+    graph: bool,
+    annotation_policy_file: str,
+    annotation_audit_file: str,
+    annotation_redact_all: bool,
+):
     """
     CLI-tool for validating SPDX documents and converting between RDF, TAG-VALUE, JSON, YAML and XML formats.
     Formats are determined by the file endings.
@@ -83,6 +119,54 @@ def main(infile: str, outfile: str, version: str, novalidation: bool, graph: boo
             else:
                 logging.info("The document is valid.")
 
+        export_result = None
+        if annotation_policy_file or annotation_redact_all or annotation_audit_file:
+            if annotation_audit_file and not (annotation_policy_file or annotation_redact_all):
+                logging.error("--annotation-audit-out requires --annotation-policy or --annotation-redact-all")
+                sys.exit(1)
+            if not outfile or outfile == "-":
+                logging.error(
+                    "--annotation-policy, --annotation-redact-all and --annotation-audit-out require --outfile "
+                    "with a file name (not stdout)"
+                )
+                sys.exit(1)
+            if graph:
+                logging.error("annotation export options cannot be combined with --graph")
+                sys.exit(1)
+
+        if annotation_policy_file or annotation_redact_all:
+            try:
+                policy = (
+                    load_annotation_export_policy(annotation_policy_file, require_selectors=not annotation_redact_all)
+                    if annotation_policy_file
+                    else AnnotationExportPolicy()
+                )
+            except ValueError as err:
+                logging.error(f"Invalid annotation export policy: {err}")
+                sys.exit(1)
+
+            if annotation_redact_all:
+                policy = AnnotationExportPolicy.restrict_all(
+                    allowed_fields=policy.allowed_fields,
+                    comment_template=policy.comment_template,
+                    salt=policy.salt,
+                    redacted_annotator=policy.redacted_annotator,
+                    redacted_annotation_type=policy.redacted_annotation_type,
+                    redacted_annotation_date=policy.redacted_annotation_date,
+                )
+            export_result = export_annotations_for_sharing(document, policy)
+            document = export_result.document
+
+            if not novalidation:
+                validation_messages = validate_full_spdx_document(document, document.creation_info.spdx_version)
+                if validation_messages:
+                    log_string = "\n".join(
+                        ["The exported document is invalid. The following issues have been found:"]
+                        + [message.validation_message for message in validation_messages]
+                    )
+                    logging.error(log_string)
+                    sys.exit(1)
+
         if outfile == "-":
             tagvalue_writer.write_document(document, sys.stdout)
 
@@ -98,6 +182,8 @@ def main(infile: str, outfile: str, version: str, novalidation: bool, graph: boo
 
         elif outfile:
             write_file(document, outfile, validate=False)
+            if export_result is not None and annotation_audit_file:
+                write_annotation_audit_file(export_result.audit_entries, annotation_audit_file)
 
     except NotImplementedError as err:
         logging.error(
