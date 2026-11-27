@@ -82,6 +82,29 @@ create_from(provider) # Create the user in the local app database
 build_from(provider) # Build user instance using user_info_mappings
 ```
 
+When a provider notifies you that an external account is suspended, mark that single
+association unavailable without removing the binding record or touching the user's other
+logins. A disabled association can no longer sign the user in, duplicate notifications are
+idempotent, and ordinary logins never re-enable it. Recovery must go through your approved
+application flow.
+
+```ruby
+# Application-confirmed suspension notification from a provider (idempotent).
+User.disable_provider('github', uid)
+# Or scope the change to a specific account, leaving its other providers untouched.
+@user.disable_external_authentication('github', uid)
+
+# The suspended external login is blocked while other providers and password login keep working.
+User.load_from_provider('github', uid) # => nil
+
+# Approved recovery flow; the only way to restore the suspended login.
+User.reactivate_provider('github', uid)
+@user.reactivate_external_authentication('github', uid)
+```
+
+The state is stored in a nullable `disabled_at` timestamp on the authentications table
+(configurable via `config.authentication_disabled_at_attribute_name`).
+
 ### Remember Me
 
 ```ruby

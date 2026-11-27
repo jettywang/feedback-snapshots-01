@@ -20,4 +20,22 @@ ActiveRecord::Schema.define(version: 20_101_224_223_620) do
     t.datetime 'created_at'
     t.datetime 'updated_at'
   end
+
+  create_table 'authentications', force: true do |t|
+    t.integer  'user_id', null: false
+    t.string   'provider'
+    t.string   'uid'
+    t.datetime 'disabled_at'
+    t.datetime 'created_at', null: false
+    t.datetime 'updated_at', null: false
+  end
+
+  create_table 'user_providers', force: true do |t|
+    t.integer  'user_id', null: false
+    t.string   'provider'
+    t.string   'uid'
+    t.datetime 'disabled_at'
+    t.datetime 'created_at', null: false
+    t.datetime 'updated_at', null: false
+  end
 end

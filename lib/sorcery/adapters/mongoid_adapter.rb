@@ -59,7 +59,10 @@ module Sorcery
 
         def find_by_oauth_credentials(provider, uid)
           @user_config ||= ::Sorcery::Controller::Config.user_class.to_s.constantize.sorcery_config
-          @klass.where(@user_config.provider_attribute_name => provider, @user_config.provider_uid_attribute_name => uid).first
+          disabled_at = @user_config.authentication_disabled_at_attribute_name
+          @klass.where(@user_config.provider_attribute_name => provider,
+                       @user_config.provider_uid_attribute_name => uid,
+                       disabled_at => nil).first
         end
 
         def find_by_activation_token(token)

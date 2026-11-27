@@ -28,7 +28,8 @@ module Sorcery
           @user_config.provider_attribute_name => provider
         }
 
-        @model.public_send(relation_name).where(conditions).first
+        disabled_at = @user_config.authentication_disabled_at_attribute_name
+        @model.public_send(relation_name).where(conditions).where(disabled_at => nil).first
       end
 
       class << self
@@ -47,7 +48,8 @@ module Sorcery
             @user_config.provider_attribute_name => provider
           }
 
-          @klass.where(conditions).first
+          disabled_at = @user_config.authentication_disabled_at_attribute_name
+          @klass.where(conditions).where(disabled_at => nil).first
         end
 
         def find_by_remember_me_token(token)
