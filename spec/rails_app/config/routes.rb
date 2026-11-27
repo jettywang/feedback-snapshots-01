@@ -82,5 +82,11 @@ AppRoot::Application.routes.draw do
     get :test_create_from_provider_with_block
     get :login_at_test_with_state
     post :test_csrf_protected_action
+    get :login_at_test_legacy_twitter
+    get :login_at_test_twitter_oauth2
+    get :test_login_from_legacy_twitter
+    get :test_login_from_twitter_oauth2
+    get :test_create_from_twitter_oauth2
+    get :test_migration_user_hash
   end
 end

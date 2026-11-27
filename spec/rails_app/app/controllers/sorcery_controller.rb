@@ -509,4 +509,44 @@ class SorceryController < ApplicationController
   def test_csrf_protected_action
     head :ok
   end
+
+  # --- OAuth 1 -> OAuth 2 external provider migration harness ---
+  def login_at_test_legacy_twitter
+    login_at(:legacy_twitter)
+  end
+
+  def login_at_test_twitter_oauth2
+    login_at(:twitter_oauth2)
+  end
+
+  def test_login_from_legacy_twitter
+    if (@user = login_from(:legacy_twitter))
+      redirect_to 'bla', notice: 'Success!'
+    else
+      redirect_to 'blu', alert: 'Failed!'
+    end
+  end
+
+  def test_login_from_twitter_oauth2
+    if (@user = login_from(:twitter_oauth2))
+      redirect_to 'bla', notice: 'Success!'
+    else
+      redirect_to 'blu', alert: 'Failed!'
+    end
+  end
+
+  def test_create_from_twitter_oauth2
+    provider = :twitter_oauth2
+    login_from(provider)
+    if (@user = create_from(provider))
+      redirect_to 'bla', notice: 'Success!'
+    else
+      redirect_to 'blu', alert: 'Failed!'
+    end
+  end
+
+  def test_migration_user_hash
+    sorcery_fetch_user_hash(params[:provider].to_sym)
+    render plain: @user_hash.to_json
+  end
 end
