@@ -3,7 +3,7 @@ from threading import Lock
 from typing import Callable, List
 import warnings
 
-from .mmap_dict import mmap_key, MmapedDict
+from .mmap_dict import mmap_key, MmapedDict, new_session_id
 
 _multi_process_cleanups: List[Callable[[], None]] = []
 
@@ -45,17 +45,25 @@ class MutexValue:
             return self._exemplar
 
 
-def MultiProcessValue(process_identifier=os.getpid):
+def MultiProcessValue(process_identifier=os.getpid, session_id=None):
     """Returns a MmapedValue class based on a process_identifier function.
 
     The 'process_identifier' function MUST comply with this simple rule:
     when called in simultaneously running processes it MUST return distinct values.
 
     Using a different function than the default 'os.getpid' is at your own risk.
+
+    ``session_id`` is an optional token identifying this write session. Files
+    opened by this class are stamped with it so that ``mark_process_dead`` can
+    tell a restart of a reused process identifier from the process it replaces.
+    When omitted, a token is minted on first write.
     """
     files = {}
     values = []
     pid = {'value': process_identifier()}
+    # One token covers every file written by this incarnation. A fork rotates
+    # it, so a child's files never inherit the parent's session.
+    wanted_session = {'value': session_id if session_id is not None else new_session_id()}
     # Use a single global lock when in multi-processing mode
     # as we presume this means there is no threading going on.
     # This avoids the need to also have mutexes in __MmapDict.
@@ -95,7 +103,7 @@ def MultiProcessValue(process_identifier=os.getpid):
                     os.environ.get('PROMETHEUS_MULTIPROC_DIR'),
                     '{}_{}.db'.format(file_prefix, pid['value']))
 
-                files[file_prefix] = MmapedDict(filename)
+                files[file_prefix] = MmapedDict(filename, session_id=wanted_session['value'])
             self._file = files[file_prefix]
             self._key = mmap_key(metric_name, name, labelnames, labelvalues, help_text)
             self._value, self._timestamp = self._file.read_value(self._key)
@@ -104,6 +112,7 @@ def MultiProcessValue(process_identifier=os.getpid):
             actual_pid = process_identifier()
             if pid['value'] != actual_pid:
                 pid['value'] = actual_pid
+                wanted_session['value'] = new_session_id()
                 # There has been a fork(), reset all the values.
                 for f in files.values():
                     f.close()

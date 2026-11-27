@@ -3,12 +3,14 @@ import math
 import os
 import shutil
 import struct
+import subprocess
+import sys
 import tempfile
 import unittest
 from unittest import mock
 import warnings
 
-from prometheus_client import mmap_dict, values
+from prometheus_client import mmap_dict, multiprocess, values
 from prometheus_client.core import (
     CollectorRegistry, Counter, Gauge, Histogram, Sample, Summary,
 )
@@ -669,6 +671,227 @@ class TestMultiProcess(unittest.TestCase):
         self.assertEqual(child.context['namespace'], 'prod')
         self.assertEqual(child.context['subsystem'], 'api')
         self.assertEqual(child.context['unit'], 'seconds')
+
+
+class TestSessionAwareCleanup(unittest.TestCase):
+    """Reclamation of live gauges must follow the write session, not just the pid."""
+
+    def setUp(self):
+        self.tempdir = tempfile.mkdtemp()
+        os.environ['PROMETHEUS_MULTIPROC_DIR'] = self.tempdir
+        self.registry = CollectorRegistry(support_collectors_without_names=True)
+        self.collector = MultiProcessCollector(self.registry)
+
+    def tearDown(self):
+        os.environ.pop('PROMETHEUS_MULTIPROC_DIR', None)
+        values.close_all_multiprocess_files()
+        values.ValueClass = MutexValue
+        shutil.rmtree(self.tempdir)
+
+    def _files(self):
+        return sorted(os.listdir(self.tempdir))
+
+    def _start_session(self, pid, session_id, gauge_value, mode='liveall'):
+        values.ValueClass = MultiProcessValue(lambda: pid, session_id=session_id)
+        gauge = Gauge('g', 'help', registry=None, multiprocess_mode=mode)
+        gauge.set(gauge_value)
+        return gauge
+
+    def test_two_sessions_reusing_pid_and_late_exit(self):
+        self._start_session(4242, 111, 10)
+        counter = Counter('c', 'help', registry=None)
+        counter.inc(5)
+        values.close_all_multiprocess_files()
+        self.assertEqual(10, self.registry.get_sample_value('g', {'pid': '4242'}))
+        self.assertEqual(5, self.registry.get_sample_value('c_total'))
+
+        # A restart reuses the pid with a new session and a new live gauge.
+        self._start_session(4242, 222, 20)
+        Counter('c', 'help', registry=None).inc(2)
+        self.assertEqual(20, self.registry.get_sample_value('g', {'pid': '4242'}))
+        self.assertEqual(7, self.registry.get_sample_value('c_total'))
+        self.assertEqual(
+            {'counter_4242.db': 222, 'gauge_liveall_4242.db': 222},
+            multiprocess.sessions_in(self.tempdir))
+
+        # The old session's exit notice arrives while session 2 is still live.
+        late = mark_process_dead(4242, session_id=111)
+        self.assertEqual(['held'], [f.status for f in late.files])
+        self.assertEqual([], late.reclaimed)
+        self.assertEqual(20, self.registry.get_sample_value('g', {'pid': '4242'}))
+        self.assertEqual(7, self.registry.get_sample_value('c_total'))
+
+        # After the new writer is gone the same stale notice stays inert.
+        values.close_all_multiprocess_files()
+        stale = mark_process_dead(4242, session_id=111)
+        self.assertEqual(['session_changed'], [f.status for f in stale.files])
+        self.assertEqual([], stale.reclaimed)
+        self.assertEqual(20, self.registry.get_sample_value('g', {'pid': '4242'}))
+
+        # Its own notice reclaims the file.
+        current = mark_process_dead(4242, session_id=222)
+        self.assertEqual(1, len(current.reclaimed))
+        self.assertIsNone(self.registry.get_sample_value('g', {'pid': '4242'}))
+        # The counter keeps its value until the directory is wiped.
+        self.assertEqual(7, self.registry.get_sample_value('c_total'))
+        self.assertEqual(
+            [os.path.join(self.tempdir, 'counter_4242.db')], current.retained)
+        self.assertEqual(['counter_4242.db'], self._files())
+
+    def test_live_writer_in_another_process_is_protected(self):
+        # A real second process holds its write session open; cleanup in this
+        # process must see the lock, report HELD, and leave the file alone.
+        script = (
+            'import os, sys, time\n'
+            'from prometheus_client import values\n'
+            'from prometheus_client.core import Gauge\n'
+            'from prometheus_client.values import MultiProcessValue\n'
+            'os.environ["PROMETHEUS_MULTIPROC_DIR"] = sys.argv[1]\n'
+            'values.ValueClass = MultiProcessValue(lambda: 13131)\n'
+            'g = Gauge("g", "help", registry=None, multiprocess_mode="liveall")\n'
+            'g.set(7)\n'
+            'print(g._value._file.session_id, flush=True)\n'
+            'time.sleep(10)\n'
+        )
+        proc = subprocess.Popen(
+            [sys.executable, '-c', script, self.tempdir], stdout=subprocess.PIPE, text=True)
+        try:
+            session = int(proc.stdout.readline())
+            result = mark_process_dead(13131, session_id=session)
+            self.assertEqual(['held'], [f.status for f in result.files])
+            self.assertEqual([], result.reclaimed)
+            self.assertEqual(
+                {os.path.join(self.tempdir, 'gauge_liveall_13131.db'): session},
+                result.active_sessions)
+            self.assertEqual(7, self.registry.get_sample_value('g', {'pid': '13131'}))
+        finally:
+            proc.kill()
+            proc.wait()
+        # With the writer gone its own session reclaims the file.
+        result = mark_process_dead(13131, session_id=session)
+        self.assertEqual(['reclaimed'], [f.status for f in result.files])
+
+    def test_session_mismatch_after_writer_gone(self):
+        # Write the file for session 111, then let a *different* dead session's
+        # notice arrive after the writer is gone. The file must be left alone.
+        self._start_session(5151, 111, 10)
+        values.close_all_multiprocess_files()
+        result = mark_process_dead(5151, session_id=222)
+        self.assertEqual(['session_changed'], [f.status for f in result.files])
+        self.assertEqual([], result.reclaimed)
+        self.assertEqual(10, self.registry.get_sample_value('g', {'pid': '5151'}))
+
+    def test_live_writer_is_protected_and_reported(self):
+        # A writer that is still open must not be reclaimed, even with a
+        # matching session: it is still providing samples.
+        gauge = self._start_session(6161, 111, 10)
+        session = gauge._value._file.session_id
+        result = mark_process_dead(6161, session_id=session)
+        self.assertEqual(['held'], [f.status for f in result.files])
+        self.assertEqual(
+            {os.path.join(self.tempdir, 'gauge_liveall_6161.db'): session},
+            result.active_sessions)
+        self.assertEqual(10, self.registry.get_sample_value('g', {'pid': '6161'}))
+        self.assertIn('held', result.report())
+
+    def test_unknown_session_policy(self):
+        # Simulate a file from a client that predates session tokens.
+        self._start_session(7171, 111, 10)
+        values.close_all_multiprocess_files()
+        filename = os.path.join(self.tempdir, 'gauge_liveall_7171.db')
+        with open(filename, 'r+b') as fp:
+            fp.seek(mmap_dict._SESSION_OFFSET)
+            fp.write(b'\x00\x00\x00\x00')
+        self.assertIsNone(multiprocess.session_of(filename))
+
+        kept = mark_process_dead(7171, allow_unknown=False)
+        self.assertEqual(['unknown_session'], [f.status for f in kept.files])
+        self.assertTrue(os.path.exists(filename))
+
+        reclaimed = mark_process_dead(7171)
+        self.assertEqual(['reclaimed'], [f.status for f in reclaimed.files])
+        self.assertFalse(os.path.exists(filename))
+
+    def test_dry_run_does_not_remove(self):
+        self._start_session(8181, 111, 10)
+        values.close_all_multiprocess_files()
+        result = mark_process_dead(8181, dry_run=True)
+        self.assertEqual(['reclaimed'], [f.status for f in result.files])
+        self.assertTrue(os.path.exists(
+            os.path.join(self.tempdir, 'gauge_liveall_8181.db')))
+
+    def test_non_live_modes_are_retained(self):
+        self._start_session(9191, 111, 10, mode='all')
+        self._start_session(9191, 111, 3, mode='livesum')
+        values.close_all_multiprocess_files()
+        result = mark_process_dead(9191)
+        self.assertEqual(
+            [os.path.join(self.tempdir, 'gauge_livesum_9191.db')],
+            result.reclaimed)
+        self.assertEqual(
+            [os.path.join(self.tempdir, 'gauge_all_9191.db')], result.retained)
+        self.assertTrue(os.path.exists(
+            os.path.join(self.tempdir, 'gauge_all_9191.db')))
+        self.assertEqual(10, self.registry.get_sample_value('g', {'pid': '9191'}))
+
+    def test_session_is_kept_for_explicit_token(self):
+        # A writer that names its session keeps it across reopen, so cleanup
+        # can still match the token it was told to expect.
+        filename = os.path.join(self.tempdir, 'probe.db')
+        first = mmap_dict.MmapedDict(filename, session_id=1234)
+        self.assertEqual(1234, first.session_id)
+        first.close()
+        second = mmap_dict.MmapedDict(filename, session_id=1234)
+        self.assertEqual(1234, second.session_id)
+        second.close()
+
+    def test_reopen_without_token_mints_new_session(self):
+        # A plain reopen is a new incarnation: its token must differ so a late
+        # notice aimed at the previous writer cannot match it.
+        filename = os.path.join(self.tempdir, 'probe.db')
+        first = mmap_dict.MmapedDict(filename)
+        token = first.session_id
+        self.assertIsNotNone(token)
+        first.close()
+        second = mmap_dict.MmapedDict(filename)
+        self.assertNotEqual(token, second.session_id)
+        second.close()
+
+    def test_stale_session_is_replaced_by_restart(self):
+        filename = os.path.join(self.tempdir, 'probe.db')
+        first = mmap_dict.MmapedDict(filename, session_id=111)
+        first.close()
+        second = mmap_dict.MmapedDict(filename, session_id=222)
+        self.assertEqual(222, second.session_id)
+        second.close()
+
+    def test_fork_rotates_session(self):
+        pid = 100
+        values.ValueClass = MultiProcessValue(lambda: pid)
+        gauge = Gauge('g', 'help', registry=None, multiprocess_mode='liveall')
+        gauge.set(1)
+        parent_session = gauge._value._file.session_id
+        pid = 200
+        gauge.set(2)
+        child_session = gauge._value._file.session_id
+        self.assertNotEqual(parent_session, child_session)
+        self.assertEqual(
+            {'gauge_liveall_100.db': parent_session,
+             'gauge_liveall_200.db': child_session},
+            multiprocess.sessions_in(self.tempdir))
+
+    def test_writer_notices_file_reclaimed_under_growth(self):
+        # If cleanup unlinks the file a writer is still holding, the writer
+        # must stop writing into the detached file instead of resurrecting it.
+        filename = os.path.join(self.tempdir, 'probe.db')
+        writer = mmap_dict.MmapedDict(filename, session_id=111)
+        os.remove(filename)
+        # Recreate the path with a different session, as cleanup would allow.
+        other = mmap_dict.MmapedDict(filename, session_id=222)
+        other.close()
+        with self.assertRaises(FileNotFoundError):
+            writer.write_value('key' * mmap_dict._INITIAL_MMAP_SIZE, 1.0, 0.0)
+        writer.close()
 
 
 class TestMmapedDict(unittest.TestCase):

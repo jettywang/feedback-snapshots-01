@@ -131,24 +131,64 @@ To use a custom path instead of the environment variable:
 collector = multiprocess.MultiProcessCollector(registry, path='/var/run/prom')
 ```
 
-### `mark_process_dead(pid, path=None)`
+### `mark_process_dead(pid, path=None, session_id=None, allow_unknown=True, dry_run=False)`
 
-Removes the per-process metric files for a dead process. Call this from your process manager
+Reclaims the live gauge files for a process that has exited. Call this from your process manager
 when a worker exits to prevent stale `live*` gauge values from accumulating.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `pid` | `int` | required | PID of the process that has exited. |
 | `path` | `Optional[str]` | `None` | Path to the multiprocess directory. Defaults to the `PROMETHEUS_MULTIPROC_DIR` environment variable. |
+| `session_id` | `Optional[int]` | `None` | Write session of the exiting process. When set, files now owned by a different session are left alone. |
+| `allow_unknown` | `bool` | `True` | Whether files written before write sessions existed (no recorded session) may be reclaimed. Set to `False` to leave them in place and report `UNKNOWN_SESSION`. |
+| `dry_run` | `bool` | `False` | Inspect and report without removing anything. |
 
-Returns `None`. Only removes files for `live*` gauge modes (e.g. `livesum`, `liveall`); files
-for non-live modes are left in place so their last values remain visible until the directory is
-wiped on restart.
+Returns a `ReclaimResult`. Only `live*` gauge files are reclaimable (e.g. `livesum`, `liveall`),
+matching their lifetime: a dead process stops contributing samples. Counters and gauges in
+non-live modes keep their last values until the directory is wiped on restart, so they are never
+removed here; the result lists them under `retained`.
+
+#### Write sessions and late exit notices
+
+A restart can reuse a process id, and the exit notice for the old process can arrive after the new
+one has already written its live gauges. To keep the cleanup from wiping those new values, every
+writer stamps its files with a write-session token. `mark_process_dead` compares the token before
+removing a file:
+
+```python
+# Gunicorn config
+from prometheus_client import multiprocess
+
+# Filled in when each worker starts, e.g. from the worker's first write.
+worker_session = {}
+
+def child_exit(server, worker):
+    multiprocess.mark_process_dead(
+        worker.pid, session_id=worker_session.get(worker.pid))
+```
+
+Passing the session the worker recorded protects any newer writer that reused the pid. If the
+worker never recorded one, read it from its files before they are reclaimed, or pass `None` and
+accept the legacy per-pid behavior.
+
+Files are inspected and removed while holding the writer's file lock, so cleanup is safe to run
+alongside live writers. A file whose writer is still active is reported as `HELD` and left
+untouched, even if the session matches; a stale notice for a replaced session reports
+`SESSION_CHANGED`; and a notice that races with a leftover file from an older client reports
+`UNKNOWN_SESSION` when `allow_unknown=False`.
+
+`ReclaimResult.statuses` maps each considered file to its outcome, `reclaimed` lists the removed
+paths, `active_sessions` lists the sessions still providing samples, and `report()` renders a short
+summary. `session_of(filename)` and `sessions_in(path)` expose the recorded session of existing
+files for diagnostics.
 
 ```python
 # Gunicorn config
 from prometheus_client import multiprocess
 
 def child_exit(server, worker):
-    multiprocess.mark_process_dead(worker.pid)
+    result = multiprocess.mark_process_dead(worker.pid)
+    if result.reclaimed:
+        print(result.report())
 ```
