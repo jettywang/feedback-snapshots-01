@@ -115,6 +115,30 @@ It is left open to the implementer which of this information to use in the follo
 Every validation function returns a list of `ValidationMessage` objects, which are gradually concatenated until the final list is returned.
 That is, if an empty list is returned, the document is valid.
 
+### `snippet_verification`
+
+The `snippet_verification` package performs offline, forensic verification of SPDX snippet ranges against the actual
+source files on disk. It works on a parsed SPDX 2.x `Document` and never accesses the network.
+
+SPDX snippet ranges are 1-based and inclusive on both ends. The two range units are kept strictly separate:
+
+- byte ranges count raw octets, so multi-byte encodings such as UTF-8 are handled without decoding;
+- line ranges count logical lines, where `\r\n` and `\n` each terminate a single line (a CRLF file and an LF file with
+  the same visible text therefore have the same line count).
+
+The entrypoint is `verify_document_snippets(document, base_dir, path_overrides)` in the `verifier` module. It resolves
+each snippet's `file_spdx_id` to a `File`, loads the referenced bytes, and slices both ranges independently. A snippet
+is `verified` only when every declared range is in bounds and the independently extracted slices are byte-identical;
+well-formed ranges that extract different content are reported as `mismatch`, ranges past the end of the file as
+`out_of_bounds`, unreadable files as `source_missing`, and unknown file references as `unresolved`. Declared file
+checksums are recomputed and compared independently, so a file with fitting ranges but changed content is still
+flagged. The `report` module renders the result as reproducible plain text or JSON, including each file's size, line
+count, newline style, SHA256 and the SHA256 of the extracted slice.
+
+The accompanying CLI lives in `clitools/snippet_verify.py` (entry point `pyspdxtools-snippet-verify`). Its
+`--via-spdx3` flag runs the in-tree SPDX 2 -> SPDX 3 bump first and compares the resulting ranges with the originals,
+which demonstrates that a snippet remains locatable after the document is upgraded.
+
 ## `spdx3`
 
 This package is still a work in progress.

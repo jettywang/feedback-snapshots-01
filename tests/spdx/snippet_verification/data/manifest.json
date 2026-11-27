@@ -1,0 +1,34 @@
+{
+  "suspicious_lf.py": {
+    "sha256": "cce7675086ac3dc709cd94582c806b3ef2a094827661db7632e2d2b21ade4027",
+    "bytes": 397,
+    "newline": "LF",
+    "line_range": [
+      2,
+      6
+    ],
+    "byte_range": [
+      68,
+      302
+    ]
+  },
+  "suspicious_crlf.py": {
+    "sha256": "43f6dbf677cab5f48f7f906878eb5ff537c2fc072fa884dfe9184a15bbab45de",
+    "bytes": 407,
+    "newline": "CRLF",
+    "line_range": [
+      2,
+      6
+    ],
+    "byte_range": [
+      69,
+      308
+    ]
+  },
+  "control_lf.py": {
+    "sha256": "67b1ce4593f46390be7f0232611c434861463d8354100d2c6fc3d93a5e4a8a14",
+    "bytes": 391,
+    "newline": "LF",
+    "note": "same line layout as suspicious_lf.py, different content"
+  }
+}

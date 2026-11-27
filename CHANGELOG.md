@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### New features and changes
+
+* add offline SPDX snippet verification: re-extract declared byte/line ranges from local source files, handling
+  byte ranges in octets and line ranges in logical lines (CRLF/LF), and flag content or checksum mismatches even
+  when the ranges stay well-formed
+* add the `pyspdxtools-snippet-verify` CLI with control-file overrides, JSON reporting and an SPDX 2 -> SPDX 3
+  upgrade check that fails if a snippet range is lost or altered
+
 ## v0.8.5 (2026-03-13)
 
 ### New features and changes

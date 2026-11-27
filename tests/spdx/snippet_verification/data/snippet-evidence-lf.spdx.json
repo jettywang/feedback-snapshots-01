@@ -1,0 +1,67 @@
+{
+  "spdxVersion": "SPDX-2.3",
+  "dataLicense": "CC0-1.0",
+  "SPDXID": "SPDXRef-DOCUMENT",
+  "name": "snippet-evidence-lf",
+  "documentNamespace": "https://example.com/spdxdocs/snippet-evidence-lf",
+  "creationInfo": {
+    "created": "2026-11-28T00:00:00Z",
+    "creators": [
+      "Tool: pyspdxtools-snippet-fixture-builder"
+    ]
+  },
+  "files": [
+    {
+      "SPDXID": "SPDXRef-SuspiciousSource",
+      "fileName": "suspicious_lf.py",
+      "checksums": [
+        {
+          "algorithm": "SHA256",
+          "checksumValue": "cce7675086ac3dc709cd94582c806b3ef2a094827661db7632e2d2b21ade4027"
+        },
+        {
+          "algorithm": "SHA1",
+          "checksumValue": "aba6c7ac93785211befd4a3efaf1302b31a52271"
+        }
+      ]
+    }
+  ],
+  "snippets": [
+    {
+      "SPDXID": "SPDXRef-Snippet-Evidence",
+      "snippetFromFile": "SPDXRef-SuspiciousSource",
+      "name": "backdoor evidence",
+      "ranges": [
+        {
+          "startPointer": {
+            "offset": 68,
+            "reference": "SPDXRef-SuspiciousSource"
+          },
+          "endPointer": {
+            "offset": 302,
+            "reference": "SPDXRef-SuspiciousSource"
+          }
+        },
+        {
+          "startPointer": {
+            "lineNumber": 2,
+            "reference": "SPDXRef-SuspiciousSource"
+          },
+          "endPointer": {
+            "lineNumber": 6,
+            "reference": "SPDXRef-SuspiciousSource"
+          }
+        }
+      ],
+      "licenseConcluded": "NOASSERTION",
+      "copyrightText": "NOASSERTION"
+    }
+  ],
+  "relationships": [
+    {
+      "spdxElementId": "SPDXRef-DOCUMENT",
+      "relationshipType": "DESCRIBES",
+      "relatedSpdxElement": "SPDXRef-SuspiciousSource"
+    }
+  ]
+}

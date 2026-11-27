@@ -107,6 +107,26 @@ instead of `bin`.
       `pyspdxtools -i tests/spdx/data/SPDXJSONExample-v2.3.spdx.json --graph -o SPDXJSONExample-v2.3.spdx.png` to generate
       a png with an overview of the structure of the example file.
 
+4. **OFFLINE SNIPPET VERIFICATION** (forensic re-check of snippet ranges against real source files):
+
+    - Use `pyspdxtools-snippet-verify -i <spdx_document>` to re-extract every declared snippet from the local file it
+      references. Byte ranges are sliced in raw octets and line ranges in logical lines independently, so multi-byte
+      text and CRLF/LF line endings are handled correctly. The tool prints a reviewable summary (file size, line count,
+      newline style, SHA256, declared-vs-actual checksums, each range, and the SHA256 of the extracted slice), exits `0`
+      when every snippet still holds, and `1` when a range is out of bounds, the extracted content disagrees, or a
+      checksum differs. No network access is performed.
+
+    - To verify a "control" copy instead of the declared file (for example a hardened version of a suspicious
+      dependency), pass `--file SPDXRef-Source=./control/source.py`. A range that is still well-formed but points at
+      different content is explicitly reported as `content_mismatch` / `mismatch`.
+
+    - Add `--via-spdx3` to first re-derive the ranges through the SPDX 2 -> SPDX 3 upgrade; the command fails if the
+      upgrade loses or alters any range, proving the same snippet stays locatable after the document is upgraded.
+      Add `--json` for a machine-readable report.
+
+    - If you are using a source distribution, try running:
+      `pyspdxtools-snippet-verify -i tests/spdx/snippet_verification/data/snippet-evidence-lf.spdx.json`
+
 ### Library usage
 
 1. **DATA MODEL**
