@@ -2,6 +2,11 @@ class NoSuchJobError(Exception):
     """Raised when a job cannot be found in Redis, e.g. by ``Job.fetch()`` for an unknown or expired job ID."""
 
 
+class CapabilityDenied(Exception):
+    """Raised by a capability checker when a job may not start because its required
+    capability is not covered by the caller-approved proof attached to the job."""
+
+
 class NoSuchGroupError(Exception):
     """Raised by ``Group.fetch()`` when no group with the given name exists in Redis."""
 

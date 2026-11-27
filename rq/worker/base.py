@@ -30,6 +30,7 @@ import redis.exceptions
 
 from .. import worker_registration
 from ..callbacks import execute_failure_callback, execute_success_callback
+from ..capability import CapabilityChecker, record_denial
 from ..command import PUBSUB_CHANNEL_TEMPLATE, handle_command, parse_payload
 from ..defaults import (
     DEFAULT_JOB_MONITORING_INTERVAL,
@@ -40,7 +41,7 @@ from ..defaults import (
     DEFAULT_WORKER_TTL,
     RQ_KEY_PREFIX,
 )
-from ..exceptions import DequeueTimeout, DeserializationError, StopRequested
+from ..exceptions import CapabilityDenied, DequeueTimeout, DeserializationError, StopRequested
 from ..executions import WORKER_EXECUTIONS_KEY_TEMPLATE, Execution, cleanup_execution, prepare_execution
 from ..group import Group
 from ..job import Job, JobStatus, Retry
@@ -149,8 +150,10 @@ class BaseWorker:
         prepare_for_work: bool = True,
         serializer: Serializer | str | None = None,
         work_horse_killed_handler: Callable[[Job, int, int, struct_rusage], None] | None = None,
+        capability_checker: CapabilityChecker | Callable[[Job], None] | None = None,
     ):  # noqa
         self.default_result_ttl = default_result_ttl
+        self.capability_checker = capability_checker
 
         if worker_ttl:
             self.worker_ttl = worker_ttl
@@ -1653,6 +1656,25 @@ class BaseWorker:
             execution=execution,
         )
 
+    def _check_capability(self, job: Job) -> None:
+        """Runs the configured capability checker for a job about to start.
+
+        Raises:
+            CapabilityDenied: If the job's required capability is not covered by the
+                caller-approved proof attached to the job.
+        """
+        checker = self.capability_checker
+        if checker is None:
+            return
+        if isinstance(checker, CapabilityChecker):
+            checker.check(job, self.connection, worker_name=self.name)
+            return
+        try:
+            checker(job)
+        except CapabilityDenied as exc:
+            record_denial(self.connection, job, str(exc), worker_name=self.name)
+            raise
+
     def perform_job(self, job: Job, queue: Queue, execution: Execution) -> bool:
         """Performs the actual work of a job.  Will/should only be called
         inside the work horse's process.
@@ -1669,6 +1691,11 @@ class BaseWorker:
             remove_from_intermediate_queue = len(self.queues) == 1
             self.prepare_job_execution(job, remove_from_intermediate_queue)
 
+            # The capability check runs here, at actual start time, so scheduled,
+            # retried and dependency-deferred jobs are all verified against the
+            # caller-approved scope before their function is invoked.
+            self._check_capability(job)
+
             job.started_at = now()
             timeout = job.timeout or self.queue_class.DEFAULT_TIMEOUT
             with self.death_penalty_class(timeout, JobTimeoutException, job_id=job.id):
@@ -1677,6 +1704,12 @@ class BaseWorker:
                 self.log.debug('Worker %s: finished performing job %s', self.name, job.id)
 
             self._finalize_success(job, queue, execution, return_value)
+        except CapabilityDenied:
+            # A policy denial is not a job error: never retry it, just fail the job.
+            job.retries_left = 0
+            self.log.warning('Worker %s: job %s denied by capability check', self.name, job.id)
+            self._finalize_failure(job, queue, execution, sys.exc_info())
+            return False
         except:  # NOQA
             self._finalize_failure(job, queue, execution, sys.exc_info())
             return False

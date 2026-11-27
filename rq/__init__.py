@@ -1,5 +1,6 @@
 # ruff: noqa: F401
 from .callbacks import Callback
+from .capability import CapabilityChecker, CapabilityReceipt, ScopeCapabilityChecker
 from .job import Retry, cancel_job, get_current_job, requeue_job
 from .queue import Queue
 from .rate_limit import RateLimit
@@ -10,7 +11,10 @@ from .worker import SimpleWorker, SpawnWorker, Worker
 
 __all__ = [
     'Callback',
+    'CapabilityChecker',
+    'CapabilityReceipt',
     'Retry',
+    'ScopeCapabilityChecker',
     'cancel_job',
     'get_current_job',
     'requeue_job',

@@ -423,3 +423,47 @@ rq requeue --queue myqueue -u redis://localhost:6379 foo_job_id bar_job_id
 # This command will requeue all jobs in myqueue's failed job registry
 rq requeue --queue myqueue -u redis://localhost:6379 --all
 ```
+
+
+## Restricted Jobs and Capability Checks
+
+Backends that let employees enqueue restricted actions can attach a *capability*
+and a caller-approved *proof* to a job. The proof is persisted with the job, so it
+survives scheduling, automatic retries and dependency deferral, and is verified by
+the worker right before the job function runs:
+
+```python
+# Caller was approved for the "reports:read reports:generate" scope
+job = queue.enqueue(
+    generate_report,
+    capability='reports:generate',
+    capability_proof='reports:read reports:generate',
+)
+```
+
+Workers enforce the approved scope via a capability checker:
+
+```python
+from rq import ScopeCapabilityChecker, Worker
+
+worker = Worker([queue], capability_checker=ScopeCapabilityChecker())
+```
+
+`ScopeCapabilityChecker` treats the proof as a space-separated scope string and
+denies any job whose `capability` is not part of it. A denied job is never
+executed, is not retried, lands in the `FailedJobRegistry`, and a denial receipt
+is persisted at `rq:capability:receipt:<job_id>` (with all denied job IDs listed
+in `rq:capability:denials`) for auditing.
+
+Jobs enqueued without capability data (e.g. jobs created before this mechanism
+existed) are legacy jobs. Their handling is configurable:
+
+```python
+ScopeCapabilityChecker(legacy_policy='allow')  # default: run them
+ScopeCapabilityChecker(legacy_policy='deny')   # reject them with a denial receipt
+```
+
+You can also pass any callable accepting the job and raising
+`rq.exceptions.CapabilityDenied` as `capability_checker`, or subclass
+`CapabilityChecker` to implement custom approval logic. Workers created without
+a `capability_checker` run all jobs, preserving the previous behavior.

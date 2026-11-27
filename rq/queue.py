@@ -100,6 +100,8 @@ class EnqueueArgs(NamedTuple):
     args: tuple | list | None
     kwargs: dict | None
     webhooks: Sequence[Webhook] | None
+    capability: str | None
+    capability_proof: str | None
 
 
 @total_ordering
@@ -578,6 +580,8 @@ class Queue:
         webhooks: Sequence[Webhook] | None = None,
         group_id: str | None = None,
         rate_limit: RateLimit | None = None,
+        capability: str | None = None,
+        capability_proof: str | None = None,
     ) -> Job:
         """Creates a job based on parameters given
 
@@ -605,6 +609,10 @@ class Queue:
             webhooks (Optional[Sequence[Webhook]], optional): Webhooks to send on matching terminal job statuses.
                 Defaults to None.
             group_id (Optional[str], optional): A group ID that the job is being added to. Defaults to None.
+            capability (Optional[str], optional): The restricted-action capability the job requires.
+                Verified by the worker's capability checker before the job runs. Defaults to None.
+            capability_proof (Optional[str], optional): The caller-approved proof (e.g. a scope string)
+                authorizing the capability. Persisted with the job. Defaults to None.
 
         Raises:
             ValueError: If the timeout is 0
@@ -648,6 +656,8 @@ class Queue:
             on_stopped=on_stopped,
             webhooks=webhooks,
             group_id=group_id,
+            capability=capability,
+            capability_proof=capability_proof,
         )
 
         if retry:
@@ -752,6 +762,8 @@ class Queue:
         pipeline: Pipeline | None = None,
         unique: bool = False,
         webhooks: Sequence[Webhook] | None = None,
+        capability: str | None = None,
+        capability_proof: str | None = None,
     ) -> Job:
         """Creates a job to represent the delayed function call and enqueues it.
 
@@ -784,6 +796,10 @@ class Queue:
                 Defaults to False.
             webhooks (Optional[Sequence[Webhook]], optional): Webhooks to send on matching terminal job statuses.
                 Defaults to None.
+            capability (Optional[str], optional): The restricted-action capability the job requires.
+                Verified by the worker's capability checker before the job runs. Defaults to None.
+            capability_proof (Optional[str], optional): The caller-approved proof (e.g. a scope string)
+                authorizing the capability. Persisted with the job. Defaults to None.
 
         Returns:
             Job: The enqueued Job
@@ -811,6 +827,8 @@ class Queue:
             on_stopped=on_stopped,
             rate_limit=rate_limit,
             webhooks=webhooks,
+            capability=capability,
+            capability_proof=capability_proof,
         )
         return self.enqueue_job(job, pipeline=pipeline, at_front=at_front, unique=unique)
 
@@ -1050,6 +1068,8 @@ class Queue:
         webhooks = kwargs.pop('webhooks', None)
         pipeline = kwargs.pop('pipeline', None)
         unique = kwargs.pop('unique', False)
+        capability = kwargs.pop('capability', None)
+        capability_proof = kwargs.pop('capability_proof', None)
 
         if 'args' in kwargs or 'kwargs' in kwargs:
             assert args == (), 'Extra positional arguments cannot be used when using explicit args and kwargs'  # noqa
@@ -1078,6 +1098,8 @@ class Queue:
             args,
             kwargs,
             webhooks,
+            capability,
+            capability_proof,
         )
 
     def enqueue(self, f: FunctionReferenceType, *args, **kwargs) -> Job:
@@ -1114,6 +1136,8 @@ class Queue:
             args,
             kwargs,
             webhooks,
+            capability,
+            capability_proof,
         ) = Queue.parse_args(f, *args, **kwargs)
 
         return self.enqueue_call(
@@ -1138,6 +1162,8 @@ class Queue:
             webhooks=webhooks,
             pipeline=pipeline,
             unique=unique,
+            capability=capability,
+            capability_proof=capability_proof,
         )
 
     def enqueue_at(self, datetime: datetime, f, *args, **kwargs):
@@ -1172,6 +1198,8 @@ class Queue:
             args,
             kwargs,
             webhooks,
+            capability,
+            capability_proof,
         ) = Queue.parse_args(f, *args, **kwargs)
         job = self.create_job(
             f,
@@ -1193,6 +1221,8 @@ class Queue:
             on_stopped=on_stopped,
             rate_limit=rate_limit,
             webhooks=webhooks,
+            capability=capability,
+            capability_proof=capability_proof,
         )
         if at_front:
             job.enqueue_at_front = True

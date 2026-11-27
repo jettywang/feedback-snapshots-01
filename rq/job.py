@@ -240,6 +240,12 @@ class Job:
         self.rate_limit_key: str | None = None
         self.rate_limit_concurrency: int | None = None
 
+        # Restricted-action capability required by this job, and the caller-approved
+        # proof (e.g. a scope string) attached at enqueue time. Verified by the worker's
+        # capability checker right before the job function runs.
+        self.capability: str | None = None
+        self.capability_proof: str | None = None
+
         self._cached_result: Result | None = None
         self.log = logger
 
@@ -268,6 +274,8 @@ class Job:
         on_failure: Callback | Callable[..., Any] | None = None,  # Callable is deprecated
         on_stopped: Callback | Callable[..., Any] | None = None,  # Callable is deprecated
         webhooks: Sequence[Webhook] | None = None,
+        capability: str | None = None,
+        capability_proof: str | None = None,
     ) -> Job:
         """Creates a new Job instance for the given function, arguments, and
         keyword arguments.
@@ -309,6 +317,10 @@ class Job:
             webhooks (Optional[Sequence[Webhook]], optional): Webhooks to send when the job reaches a matching
                 terminal state (`finished` or `failed`). Defaults to None.
             group_id (Optional[str], optional): A group ID that the job is being added to. Defaults to None.
+            capability (Optional[str], optional): The restricted-action capability this job requires.
+                Checked by the worker's capability checker before the job runs. Defaults to None.
+            capability_proof (Optional[str], optional): The caller-approved proof (e.g. a scope string)
+                authorizing the capability. Persisted with the job. Defaults to None.
 
         Raises:
             TypeError: If `args` is not a tuple/list
@@ -382,6 +394,8 @@ class Job:
         job.timeout = parse_timeout(timeout)
         job.meta = meta or {}
         job.group_id = group_id
+        job.capability = capability
+        job.capability_proof = capability_proof
 
         if retry is not None:
             job.retries_left = retry.max
@@ -1064,6 +1078,9 @@ class Job:
         self.rate_limit_key = as_text(obj['rate_limit_key']) if obj.get('rate_limit_key') else None
         self.rate_limit_concurrency = int(obj['rate_limit_concurrency']) if obj.get('rate_limit_concurrency') else None
 
+        self.capability = as_text(obj['capability']) if obj.get('capability') else None
+        self.capability_proof = as_text(obj['capability_proof']) if obj.get('capability_proof') else None
+
         raw_exc_info = obj.get('exc_info')
         if raw_exc_info:
             try:
@@ -1135,6 +1152,11 @@ class Job:
             obj['rate_limit_key'] = self.rate_limit_key
         if self.rate_limit_concurrency:
             obj['rate_limit_concurrency'] = self.rate_limit_concurrency
+
+        if self.capability is not None:
+            obj['capability'] = self.capability
+        if self.capability_proof is not None:
+            obj['capability_proof'] = self.capability_proof
 
         if self._result is not None and include_result:
             try:
