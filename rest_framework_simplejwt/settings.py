@@ -52,6 +52,19 @@ DEFAULTS = {
     "CHECK_REVOKE_TOKEN": False,
     "REVOKE_TOKEN_CLAIM": "hash_password",
     "CHECK_USER_IS_ACTIVE": True,
+    # Optional step-up (second factor) verification. Disabled by default so
+    # the ordinary login/token behavior is unchanged unless opted into.
+    "STEP_UP_ENABLED": False,
+    # Claim holding the epoch timestamp until which step-up proof is valid.
+    "STEP_UP_CLAIM": "step_up_exp",
+    # How long a successful step-up verification remains valid. Independent
+    # of ACCESS_TOKEN_LIFETIME: refreshing a token never extends this window.
+    "STEP_UP_LIFETIME": timedelta(minutes=5),
+    # Import path to the server-registered verifier. Only this source may mint
+    # a step-up claim; it is expected to be a callable and defaults to None so
+    # that an unconfigured deployment fails closed.
+    "STEP_UP_VERIFIER": None,
+    "TOKEN_STEP_UP_SERIALIZER": "rest_framework_simplejwt.serializers.TokenStepUpSerializer",
 }
 
 IMPORT_STRINGS = (
@@ -61,6 +74,7 @@ IMPORT_STRINGS = (
     "USER_AUTHENTICATION_RULE",
     "ON_LOGIN_SUCCESS",
     "ON_LOGIN_FAILED",
+    "STEP_UP_VERIFIER",
 )
 
 REMOVED_SETTINGS = (

@@ -1,12 +1,12 @@
 from typing import Optional
 
 from django.utils.module_loading import import_string
-from rest_framework import generics, status
+from rest_framework import generics, permissions, status
 from rest_framework.request import Request
 from rest_framework.response import Response
 from rest_framework.serializers import BaseSerializer
 
-from .authentication import AUTH_HEADER_TYPES
+from .authentication import AUTH_HEADER_TYPES, JWTAuthentication
 from .exceptions import InvalidToken, TokenError
 from .settings import api_settings
 
@@ -84,6 +84,21 @@ class TokenObtainSlidingView(TokenViewBase):
 
 
 token_obtain_sliding = TokenObtainSlidingView.as_view()
+
+
+class TokenStepUpView(TokenViewBase):
+    """
+    Takes an optional confirmation value from an already authenticated user,
+    runs the server-registered step-up verifier, and returns a token pair
+    carrying a short-lived step-up claim when the verification succeeds.
+    """
+
+    permission_classes = (permissions.IsAuthenticated,)
+    authentication_classes = (JWTAuthentication,)
+    _serializer_class = api_settings.TOKEN_STEP_UP_SERIALIZER
+
+
+token_step_up = TokenStepUpView.as_view()
 
 
 class TokenRefreshSlidingView(TokenViewBase):

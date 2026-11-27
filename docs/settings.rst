@@ -57,6 +57,12 @@ Some of Simple JWT's behavior can be customized through settings variables in
       "CHECK_REVOKE_TOKEN": False,
       "REVOKE_TOKEN_CLAIM": "hash_password",
       "CHECK_USER_IS_ACTIVE": True,
+
+      "STEP_UP_ENABLED": False,
+      "STEP_UP_CLAIM": "step_up_exp",
+      "STEP_UP_LIFETIME": timedelta(minutes=5),
+      "STEP_UP_VERIFIER": None,
+      "TOKEN_STEP_UP_SERIALIZER": "rest_framework_simplejwt.serializers.TokenStepUpSerializer",
   }
 
 Above, the default values for these settings are shown.
@@ -362,3 +368,39 @@ For use with sliding tokens feature.
 
 A dot path to the serializer class used by ``TokenRefreshSlidingView``.
 For use with sliding tokens feature.
+
+``STEP_UP_ENABLED``
+-------------------
+
+When ``True``, enables optional step-up (second factor) verification. Defaults
+to ``False`` so ordinary login, issuance and refresh behavior is unchanged.
+See :doc:`/step_up_authentication` for the full workflow.
+
+``STEP_UP_CLAIM``
+-----------------
+
+The name of the JWT claim that stores the epoch timestamp until which a
+step-up verification remains valid. Defaults to ``"step_up_exp"``.
+
+``STEP_UP_LIFETIME``
+--------------------
+
+A ``datetime.timedelta`` bounding how long a successful step-up verification
+stays valid. This is independent of ``ACCESS_TOKEN_LIFETIME``: it only
+governs the step-up proof and never changes the token's own ``exp`` claim.
+Refreshing a token does not extend this window.
+
+``STEP_UP_VERIFIER``
+--------------------
+
+A dotted import path to a callable ``verifier(user, evidence, request)`` that
+validates the second factor. It is the only source trusted to mint a step-up
+claim. Defaults to ``None``; when step-up is enabled without a verifier the
+step-up endpoint fails closed with ``403`` rather than issuing a proof.
+
+``TOKEN_STEP_UP_SERIALIZER``
+----------------------------
+
+A dot path to the serializer class used by ``TokenStepUpView``. Customize it
+to change how a step-up verification is performed or how the resulting tokens
+are built.

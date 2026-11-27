@@ -205,6 +205,41 @@ class Token:
         if claim_time <= current_time - leeway:
             raise TokenError(format_lazy(_("Token '{}' claim has expired"), claim))
 
+    def set_step_up(self, at_time: datetime | None = None) -> None:
+        """
+        Records a server-issued step-up (second factor) verification on this
+        token. The configured ``STEP_UP_LIFETIME`` bounds the proof only; it
+        does not change the token's own ``exp`` claim.
+        """
+        if not api_settings.STEP_UP_ENABLED:
+            return
+
+        if at_time is None:
+            at_time = self.current_time
+
+        self.payload[api_settings.STEP_UP_CLAIM] = datetime_to_epoch(
+            at_time + api_settings.STEP_UP_LIFETIME
+        )
+
+    def has_valid_step_up(self, current_time: datetime | None = None) -> bool:
+        """
+        Returns whether this token carries an unexpired step-up verification.
+        Issuance, refresh and sensitive endpoints all rely on this single
+        check so that the decision stays consistent. A missing or lapsed claim
+        simply returns ``False``; it never raises.
+        """
+        if not api_settings.STEP_UP_ENABLED:
+            return False
+
+        if current_time is None:
+            current_time = self.current_time
+
+        claim_value = self.payload.get(api_settings.STEP_UP_CLAIM)
+        if claim_value is None:
+            return False
+
+        return datetime_from_epoch(claim_value) > current_time
+
     def outstand(self) -> OutstandingToken | None:
         """
         Ensures this token is included in the outstanding token list and

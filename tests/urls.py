@@ -15,7 +15,11 @@ urlpatterns = [
         jwt_views.token_refresh_sliding,
         name="token_refresh_sliding",
     ),
+    re_path(r"^token/step-up/$", jwt_views.token_step_up, name="token_step_up"),
     re_path(r"^token/verify/$", jwt_views.token_verify, name="token_verify"),
     re_path(r"^token/blacklist/$", jwt_views.token_blacklist, name="token_blacklist"),
     re_path(r"^test-view/$", views.test_view, name="test_view"),
+    re_path(
+        r"^sensitive-view/$", views.sensitive_view, name="sensitive_view"
+    ),
 ]

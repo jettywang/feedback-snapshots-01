@@ -5,7 +5,7 @@ from django.contrib.auth import _clean_credentials, authenticate, get_user_model
 from django.contrib.auth.models import AbstractBaseUser, update_last_login
 from django.utils.translation import gettext_lazy as _
 from rest_framework import exceptions, serializers
-from rest_framework.exceptions import AuthenticationFailed, ValidationError
+from rest_framework.exceptions import AuthenticationFailed, PermissionDenied, ValidationError
 from rest_framework.request import Request
 
 from .models import TokenUser
@@ -102,6 +102,56 @@ class TokenObtainSlidingSerializer(TokenObtainSerializer):
             api_settings.ON_LOGIN_SUCCESS(self.user, self.context.get("request"))
 
         return data
+
+
+class TokenStepUpSerializer(serializers.Serializer):
+    """
+    Performs a step-up (second factor) verification for an already
+    authenticated user and returns a token pair carrying a short-lived
+    step-up claim. The verifier is the only trusted source of the proof: it
+    is resolved from the server-side ``STEP_UP_VERIFIER`` setting and the
+    claim is only stamped when it accepts the supplied evidence.
+    """
+
+    token_class = RefreshToken
+
+    default_error_messages = {
+        "verifier_not_configured": _(
+            "Step-up verification is enabled but no verifier is configured."
+        ),
+        "step_up_failed": _("Step-up verification failed."),
+    }
+
+    confirmation = serializers.CharField(
+        required=False, allow_blank=True, write_only=True
+    )
+
+    def validate(self, attrs: dict[str, Any]) -> dict[str, str]:
+        request = self.context.get("request")
+        user = getattr(request, "user", None)
+
+        if user is None or not user.is_authenticated:
+            raise exceptions.NotAuthenticated()
+
+        verifier = api_settings.STEP_UP_VERIFIER
+        if verifier is None:
+            # Fail closed: never mint a step-up claim without a registered
+            # server-side verifier.
+            raise PermissionDenied(
+                self.error_messages["verifier_not_configured"],
+                code="step_up_verifier_not_configured",
+            )
+
+        evidence = attrs.get("confirmation", "")
+        if not verifier(user, evidence, request):
+            raise PermissionDenied(
+                self.error_messages["step_up_failed"], code="step_up_failed"
+            )
+
+        refresh = self.token_class.for_user(user)
+        refresh.set_step_up()
+
+        return {"refresh": str(refresh), "access": str(refresh.access_token)}
 
 
 class TokenRefreshSerializer(serializers.Serializer):
