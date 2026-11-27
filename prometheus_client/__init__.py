@@ -7,8 +7,8 @@ from . import (
 from .exposition import (
     CONTENT_TYPE_LATEST, CONTENT_TYPE_PLAIN_0_0_4, CONTENT_TYPE_PLAIN_1_0_0,
     delete_from_gateway, generate_latest, instance_ip_grouping_key,
-    make_asgi_app, make_wsgi_app, MetricsHandler, push_to_gateway,
-    pushadd_to_gateway, start_http_server, start_wsgi_server,
+    make_asgi_app, make_wsgi_app, MetricsHandler, PushReceipt, push_to_gateway,
+    pushadd_to_gateway, ReceiptBook, start_http_server, start_wsgi_server,
     write_to_textfile,
 )
 from .gc_collector import GC_COLLECTOR, GCCollector
@@ -47,6 +47,8 @@ __all__ = (
     'pushadd_to_gateway',
     'delete_from_gateway',
     'instance_ip_grouping_key',
+    'PushReceipt',
+    'ReceiptBook',
     'ProcessCollector',
     'PROCESS_COLLECTOR',
     'PlatformCollector',

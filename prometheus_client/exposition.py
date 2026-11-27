@@ -9,6 +9,7 @@ from socketserver import ThreadingMixIn
 import ssl
 import sys
 import threading
+import time
 from typing import (
     Any, Callable, Dict, List, Literal, Optional, Sequence, Tuple, Union,
 )
@@ -21,6 +22,10 @@ from urllib.request import (
 from wsgiref.simple_server import make_server, WSGIRequestHandler, WSGIServer
 
 from .openmetrics import exposition as openmetrics
+from .receipts import (
+    current_receipt_id, PHASE_ATTEMPTED, PHASE_CONSTRUCTED, PushReceipt,
+    ReceiptBook,
+)
 from .registry import Collector, REGISTRY
 from .utils import floatToGoString, parse_version
 
@@ -41,8 +46,10 @@ __all__ = (
     'make_asgi_app',
     'make_wsgi_app',
     'MetricsHandler',
+    'PushReceipt',
     'push_to_gateway',
     'pushadd_to_gateway',
+    'ReceiptBook',
     'start_http_server',
     'start_wsgi_server',
     'write_to_textfile',
@@ -531,7 +538,7 @@ def _make_handler(
         data: bytes,
         base_handler: Union[BaseHandler, type],
 ) -> Callable[[], None]:
-    def handle() -> None:
+    def handle() -> Any:
         request = Request(url, data=data)
         request.get_method = lambda: method  # type: ignore
         for k, v in headers:
@@ -539,6 +546,7 @@ def _make_handler(
         resp = build_opener(base_handler).open(request, timeout=timeout)
         if resp.code >= 400:
             raise OSError(f"error talking to pushgateway: {resp.code} {resp.msg}")
+        return resp
 
     return handle
 
@@ -599,7 +607,7 @@ def basic_auth_handler(
             auth_token = base64.b64encode(auth_value)
             auth_header = b'Basic ' + auth_token
             headers.append(('Authorization', auth_header))
-        default_handler(url, method, timeout, headers, data)()
+        return default_handler(url, method, timeout, headers, data)()
 
     return handle
 
@@ -646,7 +654,8 @@ def push_to_gateway(
         timeout: Optional[float] = 30,
         handler: Callable = default_handler,
         compression: CompressionType = None,
-) -> None:
+        receipt_book: Optional[ReceiptBook] = None,
+) -> Optional[PushReceipt]:
     """Push metrics to the given pushgateway.
 
     `gateway` the url for your push gateway. Either of the form
@@ -686,8 +695,11 @@ def push_to_gateway(
                   and 'snappy'. Defaults to None (no compression).
 
     This overwrites all metrics with the same job and grouping_key.
-    This uses the PUT HTTP method."""
-    _use_gateway('PUT', gateway, job, registry, grouping_key, timeout, handler, compression)
+    This uses the PUT HTTP method.
+
+    If `receipt_book` is given, a redactable :class:`PushReceipt` is issued,
+    stored in the book and returned; otherwise ``None`` is returned."""
+    return _use_gateway('PUT', gateway, job, registry, grouping_key, timeout, handler, compression, receipt_book)
 
 
 def pushadd_to_gateway(
@@ -698,7 +710,8 @@ def pushadd_to_gateway(
         timeout: Optional[float] = 30,
         handler: Callable = default_handler,
         compression: CompressionType = None,
-) -> None:
+        receipt_book: Optional[ReceiptBook] = None,
+) -> Optional[PushReceipt]:
     """PushAdd metrics to the given pushgateway.
 
     `gateway` the url for your push gateway. Either of the form
@@ -720,8 +733,11 @@ def pushadd_to_gateway(
                   and 'snappy'. Defaults to None (no compression).
 
     This replaces metrics with the same name, job and grouping_key.
-    This uses the POST HTTP method."""
-    _use_gateway('POST', gateway, job, registry, grouping_key, timeout, handler, compression)
+    This uses the POST HTTP method.
+
+    If `receipt_book` is given, a redactable :class:`PushReceipt` is issued,
+    stored in the book and returned; otherwise ``None`` is returned."""
+    return _use_gateway('POST', gateway, job, registry, grouping_key, timeout, handler, compression, receipt_book)
 
 
 def delete_from_gateway(
@@ -730,7 +746,8 @@ def delete_from_gateway(
         grouping_key: Optional[Dict[str, Any]] = None,
         timeout: Optional[float] = 30,
         handler: Callable = default_handler,
-) -> None:
+        receipt_book: Optional[ReceiptBook] = None,
+) -> Optional[PushReceipt]:
     """Delete metrics from the given pushgateway.
 
     `gateway` the url for your push gateway. Either of the form
@@ -749,8 +766,11 @@ def delete_from_gateway(
               for implementation requirements.
 
     This deletes metrics with the given job and grouping_key.
-    This uses the DELETE HTTP method."""
-    _use_gateway('DELETE', gateway, job, None, grouping_key, timeout, handler)
+    This uses the DELETE HTTP method.
+
+    If `receipt_book` is given, a redactable :class:`PushReceipt` is issued,
+    stored in the book and returned; otherwise ``None`` is returned."""
+    return _use_gateway('DELETE', gateway, job, None, grouping_key, timeout, handler, None, receipt_book)
 
 
 def _use_gateway(
@@ -762,7 +782,14 @@ def _use_gateway(
         timeout: Optional[float],
         handler: Callable,
         compression: CompressionType = None,
-) -> None:
+        receipt_book: Optional[ReceiptBook] = None,
+) -> Optional[PushReceipt]:
+    operation = {
+        'PUT': 'push',
+        'POST': 'pushadd',
+        'DELETE': 'delete',
+    }.get(method, method.lower())
+
     gateway_url = urlparse(gateway)
     # See https://bugs.python.org/issue27657 for details on urlparse in py>=3.7.6.
     if not gateway_url.scheme or gateway_url.scheme not in ['http', 'https']:
@@ -777,23 +804,69 @@ def _use_gateway(
         '/{}/{}'.format(*_escape_grouping_key(str(k), str(v)))
         for k, v in sorted(grouping_key.items()))
 
-    data = b''
-    headers: List[Tuple[str, str]] = []
-    if method != 'DELETE':
-        if registry is None:
-            registry = REGISTRY
-        data = generate_latest(registry)
-        data, headers = _compress_payload(data, compression)
-    else:
-        # DELETE requests still need Content-Type header per test expectations
-        headers = [('Content-Type', CONTENT_TYPE_PLAIN_0_0_4)]
-        if compression is not None:
-            raise ValueError('Compression is not supported for DELETE requests.')
+    receipt: Optional[PushReceipt] = None
+    if receipt_book is not None:
+        receipt = PushReceipt(
+            operation=operation,
+            method=method,
+            gateway=gateway,
+            url=url,
+            grouping_key=grouping_key,
+            timeout=timeout,
+        )
+        receipt_book.issue(receipt)
+        receipt.mark_constructed(time.time())
 
-    handler(
-        url=url, method=method, timeout=timeout,
-        headers=headers, data=data,
-    )()
+    try:
+        data = b''
+        headers: List[Tuple[str, str]] = []
+        if method != 'DELETE':
+            if registry is None:
+                registry = REGISTRY
+            data = generate_latest(registry)
+            data, headers = _compress_payload(data, compression)
+        else:
+            # DELETE requests still need Content-Type header per test expectations
+            headers = [('Content-Type', CONTENT_TYPE_PLAIN_0_0_4)]
+            if compression is not None:
+                raise ValueError('Compression is not supported for DELETE requests.')
+    except Exception as error:
+        if receipt is not None:
+            receipt.record_construction_error(error, time.time())
+        raise
+
+    if receipt is not None:
+        receipt.bind_request(headers, data)
+        token = current_receipt_id.set(receipt.receipt_id)
+    else:
+        token = None
+
+    try:
+        try:
+            sender = handler(
+                url=url, method=method, timeout=timeout,
+                headers=headers, data=data,
+            )
+        except Exception as error:
+            if receipt is not None:
+                receipt.record_construction_error(error, time.time())
+            raise
+
+        if receipt is None:
+            sender()
+            return None
+
+        receipt.mark_attempted(time.time(), headers)
+        try:
+            result = sender()
+        except Exception as error:
+            receipt.record_error(error, time.time())
+            raise
+        receipt.record_result(result, time.time())
+        return receipt
+    finally:
+        if token is not None:
+            current_receipt_id.reset(token)
 
 
 def _compress_payload(data: bytes, compression: CompressionType) -> Tuple[bytes, List[Tuple[str, str]]]:
