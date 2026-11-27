@@ -8,6 +8,7 @@ from rest_framework import exceptions, serializers
 from rest_framework.exceptions import AuthenticationFailed, ValidationError
 from rest_framework.request import Request
 
+from .app_scope import get_user_lookup
 from .models import TokenUser
 from .settings import api_settings
 from .tokens import RefreshToken, SlidingToken, Token, UntypedToken
@@ -119,11 +120,12 @@ class TokenRefreshSerializer(serializers.Serializer):
 
         user_id = refresh.payload.get(api_settings.USER_ID_CLAIM, None)
         if user_id:
+            user_source, user_id_field = get_user_lookup(
+                refresh, request=self.context.get("request")
+            )
             try:
-                user = get_user_model().objects.get(
-                    **{api_settings.USER_ID_FIELD: user_id}
-                )
-            except get_user_model().DoesNotExist:
+                user = user_source.get(**{user_id_field: user_id})
+            except user_source.model.DoesNotExist:
                 # This handles the case where the user has been deleted.
                 raise AuthenticationFailed(
                     self.error_messages["no_active_account"], "no_active_account"
@@ -188,11 +190,12 @@ class TokenRefreshSlidingSerializer(serializers.Serializer):
         token = self.token_class(attrs["token"])
         user_id = token.payload.get(api_settings.USER_ID_CLAIM, None)
         if user_id:
+            user_source, user_id_field = get_user_lookup(
+                token, request=self.context.get("request")
+            )
             try:
-                user = get_user_model().objects.get(
-                    **{api_settings.USER_ID_FIELD: user_id}
-                )
-            except get_user_model().DoesNotExist:
+                user = user_source.get(**{user_id_field: user_id})
+            except user_source.model.DoesNotExist:
                 # This handles the case where the user has been deleted.
                 raise AuthenticationFailed(
                     self.error_messages["no_active_account"], "no_active_account"

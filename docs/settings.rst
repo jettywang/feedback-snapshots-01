@@ -57,6 +57,11 @@ Some of Simple JWT's behavior can be customized through settings variables in
       "CHECK_REVOKE_TOKEN": False,
       "REVOKE_TOKEN_CLAIM": "hash_password",
       "CHECK_USER_IS_ACTIVE": True,
+
+      "APP_SCOPE_CLAIM": "app_scope",
+      "APP_SCOPE_RESOLVER": None,
+      "APP_SCOPE_LEGACY_POLICY": "reject",
+      "APP_SCOPE_REQUIRED": False,
   }
 
 Above, the default values for these settings are shown.
@@ -362,3 +367,32 @@ For use with sliding tokens feature.
 
 A dot path to the serializer class used by ``TokenRefreshSlidingView``.
 For use with sliding tokens feature.
+
+``APP_SCOPE_CLAIM``
+-------------------
+
+The claim name used to store an application scope in generated tokens.  When
+set to ``None`` no scope claim is written.  See :doc:`/app_scope`.
+
+``APP_SCOPE_RESOLVER``
+----------------------
+
+A callable, mapping, or dotted path used to resolve an application scope to an
+``AppScopeBinding``.  When ``None`` (the default) application scope checking is
+disabled and all behavior is unchanged.  See :doc:`/app_scope`.
+
+``APP_SCOPE_LEGACY_POLICY``
+---------------------------
+
+How tokens without an application scope claim participate once
+``APP_SCOPE_RESOLVER`` is configured.  ``"reject"`` (the default) rejects them;
+``"allow_unscoped"`` allows them only on routes that do not require a scope; a
+callable may return ``True`` or the name of an approved scope.  See
+:doc:`/app_scope`.
+
+``APP_SCOPE_REQUIRED``
+----------------------
+
+When ``True``, every authenticated request must carry an approved application
+scope unless the view sets its own ``required_app_scope``.  Defaults to
+``False``.  See :doc:`/app_scope`.

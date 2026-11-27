@@ -34,6 +34,13 @@ class TokenUser:
         return f"TokenUser {self.id}"
 
     @cached_property
+    def app_scope(self) -> str | None:
+        claim = api_settings.APP_SCOPE_CLAIM
+        if claim is None:
+            return None
+        return self.token.get(claim)
+
+    @cached_property
     def id(self) -> str:
         return self.token[api_settings.USER_ID_CLAIM]
 

@@ -52,6 +52,10 @@ DEFAULTS = {
     "CHECK_REVOKE_TOKEN": False,
     "REVOKE_TOKEN_CLAIM": "hash_password",
     "CHECK_USER_IS_ACTIVE": True,
+    "APP_SCOPE_CLAIM": "app_scope",
+    "APP_SCOPE_RESOLVER": None,
+    "APP_SCOPE_LEGACY_POLICY": "reject",
+    "APP_SCOPE_REQUIRED": False,
 }
 
 IMPORT_STRINGS = (

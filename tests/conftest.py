@@ -37,6 +37,8 @@ def pytest_configure():
             "rest_framework_simplejwt",
             "rest_framework_simplejwt.token_blacklist",
             "tests",
+            "tests.app_a",
+            "tests.app_b",
         ),
         PASSWORD_HASHERS=("django.contrib.auth.hashers.MD5PasswordHasher",),
         SIMPLE_JWT={

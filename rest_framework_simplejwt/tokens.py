@@ -213,7 +213,7 @@ class Token:
         return None
 
     @classmethod
-    def for_user(cls: type[T], user: AuthUser) -> T:
+    def for_user(cls: type[T], user: AuthUser, app_scope: str | None = None) -> T:
         """
         Returns an authorization token for the given user that will be provided
         after authenticating the user's credentials.
@@ -229,6 +229,11 @@ class Token:
 
         token = cls()
         token[api_settings.USER_ID_CLAIM] = user_id
+
+        if app_scope is not None:
+            if api_settings.APP_SCOPE_CLAIM is None:
+                raise TokenError(_("Application scope claim is not configured"))
+            token[api_settings.APP_SCOPE_CLAIM] = str(app_scope)
 
         if api_settings.CHECK_REVOKE_TOKEN:
             token[api_settings.REVOKE_TOKEN_CLAIM] = get_md5_hash_password(
@@ -279,6 +284,25 @@ class BlacklistMixin(Generic[T]):
             if BlacklistedToken.objects.filter(token__jti=jti).exists():
                 raise TokenError(_("Token is blacklisted"))
 
+        def _outstanding_user(self):
+            # The outstanding token table can only reference AUTH_USER_MODEL.
+            # A scoped token's numeric ID belongs to the application's own user
+            # source, so attaching a same-numbered default-model user would
+            # misattribute the token.  Projects that need per-scope attribution
+            # can extend this model; until then the association stays empty.
+            if (
+                api_settings.APP_SCOPE_CLAIM is not None
+                and api_settings.APP_SCOPE_CLAIM in self.payload
+            ):
+                return None
+
+            user_id = self.payload.get(api_settings.USER_ID_CLAIM)
+            User = get_user_model()
+            try:
+                return User.objects.get(**{api_settings.USER_ID_FIELD: user_id})
+            except User.DoesNotExist:
+                return None
+
         def blacklist(self) -> BlacklistedToken:
             """
             Ensures this token is included in the outstanding token list and
@@ -286,12 +310,7 @@ class BlacklistMixin(Generic[T]):
             """
             jti = self.payload[api_settings.JTI_CLAIM]
             exp = self.payload["exp"]
-            user_id = self.payload.get(api_settings.USER_ID_CLAIM)
-            User = get_user_model()
-            try:
-                user = User.objects.get(**{api_settings.USER_ID_FIELD: user_id})
-            except User.DoesNotExist:
-                user = None
+            user = self._outstanding_user()
 
             # Ensure outstanding token exists with given jti
             token, _ = OutstandingToken.objects.get_or_create(
@@ -313,12 +332,7 @@ class BlacklistMixin(Generic[T]):
             """
             jti = self.payload[api_settings.JTI_CLAIM]
             exp = self.payload["exp"]
-            user_id = self.payload.get(api_settings.USER_ID_CLAIM)
-            User = get_user_model()
-            try:
-                user = User.objects.get(**{api_settings.USER_ID_FIELD: user_id})
-            except User.DoesNotExist:
-                user = None
+            user = self._outstanding_user()
 
             # Ensure outstanding token exists with given jti
             return OutstandingToken.objects.get_or_create(
@@ -332,17 +346,26 @@ class BlacklistMixin(Generic[T]):
             )
 
         @classmethod
-        def for_user(cls: type[T], user: AuthUser) -> T:
+        def for_user(  # type: ignore[override]
+            cls: type[T], user: AuthUser, app_scope: str | None = None
+        ) -> T:
             """
             Adds this token to the outstanding token list.
             """
-            token = super().for_user(user)  # type: ignore
+            token = super().for_user(user, app_scope=app_scope)  # type: ignore
 
             jti = token[api_settings.JTI_CLAIM]
             exp = token["exp"]
 
+            # Preserve the caller's user when the token is unscoped.  A scoped
+            # token may belong to a different model, so it records no default
+            # user association rather than a same-numbered one.
+            outstanding_user = (
+                user if token._outstanding_user() is not None else None
+            )
+
             OutstandingToken.objects.create(
-                user=user,
+                user=outstanding_user,
                 jti=jti,
                 token=str(token),
                 created_at=token.current_time,

@@ -7,6 +7,9 @@
   - Follows RFC 7235, where authentication failures should return 401.
   - Clearer for clients: signals an auth issue instead of suggesting the endpoint is missing.
 
+### Added
+- Optional application-scoped tokens. Configure `APP_SCOPE_RESOLVER` to bind a token's `app_scope` claim to the user source that owns that scope. `JWTAuthentication` and `JWTStatelessUserAuthentication` share the same scope resolution, so a token for one application cannot read a same-numbered user in another. `Token.for_user(..., app_scope=...)` issues scoped tokens; unscoped legacy tokens are rejected unless `APP_SCOPE_LEGACY_POLICY` explicitly allows them, and views can set `required_app_scope`. See `docs/app_scope.rst`.
+
 ### Fixed
 - `JWTAuthentication.get_raw_token()` now matches the `Authorization` scheme prefix case-insensitively, per RFC 7235 §2.1. The module-level `AUTH_HEADER_TYPE_BYTES` constant is unchanged for back-compat. Closes #908.
 

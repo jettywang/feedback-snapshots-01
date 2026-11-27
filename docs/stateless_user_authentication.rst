@@ -29,4 +29,10 @@ Framework's ``DEFAULT_AUTHENTICATION_CLASSES`` config setting:
   }
   
 v5.1.0 has renamed ``JWTTokenUserAuthentication`` to ``JWTStatelessUserAuthentication``, 
-but both names are supported for backwards compatibility
+but both names are supported for backwards compatibility.
+
+When several applications share a token secret but not a user table, enable
+:doc:`/app_scope`.  The stateless backend resolves the token's application scope
+exactly like ``JWTAuthentication`` does, so a token issued for one application
+cannot authorize a same-numbered user in another.  ``TokenUser.app_scope``
+reports the approved scope without hiding any custom claims on the token.
