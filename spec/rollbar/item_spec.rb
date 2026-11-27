@@ -659,6 +659,128 @@ describe Rollbar::Item do
       end
     end
 
+    context 'with scoped transform handlers in configuration' do
+      let(:scope) { Rollbar::LazyStore.new({ :bar => :foo }) }
+      let(:message) { 'message' }
+      let(:exception) { Exception.new }
+      let(:extra) { { :foo => :bar } }
+      let(:level) { 'error' }
+
+      context 'with a handler adjusting the payload' do
+        let(:handler) do
+          proc do |options|
+            options[:payload]['data'][:custom] = { :adjusted => true }
+          end
+        end
+
+        before do
+          configuration.scoped_transform = handler
+        end
+
+        it 'calls the handler with the correct options' do
+          options = {
+            :level => level,
+            :scope => Rollbar::LazyStore.new(scope),
+            :exception => exception,
+            :message => message,
+            :extra => extra,
+            :payload => kind_of(Hash)
+          }
+
+          expect(handler).to receive(:call).with(options).and_call_original
+
+          subject.build
+        end
+
+        it 'applies the changes to the built payload' do
+          expect(payload['data'][:custom]).to be_eql(:adjusted => true)
+        end
+      end
+
+      context 'with a handler introducing invalid utf8' do
+        let(:invalid_string) { "bad \xFF utf8".dup.force_encoding('UTF-8') }
+        let(:handler) do
+          proc do |options|
+            options[:payload]['data'][:custom] = invalid_string
+          end
+        end
+
+        before do
+          configuration.scoped_transform = handler
+        end
+
+        it 'enforces the utf8 field policy on the result' do
+          expect(payload['data'][:custom].valid_encoding?).to be(true)
+        end
+      end
+
+      context 'with a handler failing midway' do
+        let(:exception) { StandardError.new('foo') }
+        let(:failing_handler) do
+          proc do |options|
+            options[:payload]['data'][:dirty] = 'partial-change'
+            raise exception
+          end
+        end
+        let(:adjusting_handler) do
+          proc do |options|
+            options[:payload]['data'][:custom] = 'adjusted'
+          end
+        end
+
+        before do
+          configuration.scoped_transform << adjusting_handler
+          configuration.scoped_transform << failing_handler
+        end
+
+        it 'logs the error and keeps no partial changes in the payload' do
+          message = "[Rollbar] Error calling the `scoped_transform` hook: #{exception}"
+          expect(logger).to receive(:error).with(message)
+
+          expect(payload['data'][:custom]).to be_eql('adjusted')
+          expect(payload['data']).not_to have_key(:dirty)
+        end
+
+        it 'does not affect a payload built afterwards' do
+          allow(logger).to receive(:error)
+
+          subject.build
+          next_payload = described_class.new(options).build
+
+          expect(next_payload['data'][:custom]).to be_eql('adjusted')
+          expect(next_payload['data']).not_to have_key(:dirty)
+        end
+      end
+
+      context 'with a failing handler before an adjusting one' do
+        let(:exception) { StandardError.new('foo') }
+        let(:failing_handler) do
+          proc do |options|
+            options[:payload]['data'][:dirty] = 'partial-change'
+            raise exception
+          end
+        end
+        let(:adjusting_handler) do
+          proc do |options|
+            options[:payload]['data'][:custom] = 'adjusted'
+          end
+        end
+
+        before do
+          configuration.scoped_transform << failing_handler
+          configuration.scoped_transform << adjusting_handler
+        end
+
+        it 'still calls the next handler and logs the error' do
+          message = "[Rollbar] Error calling the `scoped_transform` hook: #{exception}"
+          expect(logger).to receive(:error).with(message)
+
+          expect(payload['data'][:custom]).to be_eql('adjusted')
+          expect(payload['data']).not_to have_key(:dirty)
+        end
+      end
+    end
+
     describe '#custom_data' do
       before do
         configuration.custom_data_method = proc { raise 'this-will-raise' }

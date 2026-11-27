@@ -80,6 +80,7 @@ module Rollbar
                 :enable_rails_error_subscriber,
                 :logger_level,
                 :project_gem_paths,
+                :scoped_transform,
                 :send_extra_frame_data,
                 :transform,
                 :use_eventmachine
@@ -156,6 +157,7 @@ module Rollbar
       @sidekiq_use_scoped_block = false
       @safely = false
       @transform = []
+      @scoped_transform = []
       @use_async = false
       @async_json_payload = false
       @use_eventmachine = false
@@ -327,6 +329,10 @@ module Rollbar
 
     def transform=(*handler)
       @transform = Array(handler)
+    end
+
+    def scoped_transform=(*handler)
+      @scoped_transform = Array(handler)
     end
 
     def send_extra_frame_data=(value)

@@ -304,6 +304,33 @@ module Rollbar
           break
         end
       end
+
+      scoped_transform
+    end
+
+    # Scoped handlers receive a deep copy of the payload, so a handler that
+    # fails midway cannot leave partial changes in the payload to be sent.
+    # On success the copy becomes the payload and is passed again through
+    # the same field policy applied to the originally built payload.
+    def scoped_transform
+      handlers = configuration.scoped_transform
+
+      handlers.each do |handler|
+        begin
+          apply_scoped_transform(handler)
+        rescue StandardError => e
+          logger.error("[Rollbar] Error calling the `scoped_transform` hook: #{e}")
+        end
+      end
+    end
+
+    def apply_scoped_transform(handler)
+      scoped_payload = Util.deep_copy(payload)
+
+      handler.call(transform_options.merge(:payload => scoped_payload))
+
+      self.payload = scoped_payload
+      enforce_valid_utf8
     end
 
     def transform_options
