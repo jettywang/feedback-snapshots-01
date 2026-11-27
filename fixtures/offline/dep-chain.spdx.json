@@ -1,0 +1,38 @@
+{
+    "SPDXID": "SPDXRef-DOCUMENT",
+    "creationInfo": {
+        "created": "2026-11-28T00:00:00Z",
+        "creators": [
+            "Tool: offline-evidence-fixture-builder"
+        ]
+    },
+    "dataLicense": "CC0-1.0",
+    "externalDocumentRefs": [
+        {
+            "externalDocumentId": "DocumentRef-libbeta",
+            "spdxDocument": "component-b.spdx.json",
+            "checksum": {
+                "algorithm": "SHA1",
+                "checksumValue": "124298826918ba108fa8b13a71695caae6e03cd2"
+            }
+        }
+    ],
+    "name": "dep-chain",
+    "spdxVersion": "SPDX-2.3",
+    "documentNamespace": "https://example.org/spdx/dep-chain",
+    "packages": [
+        {
+            "SPDXID": "SPDXRef-Package",
+            "downloadLocation": "NOASSERTION",
+            "filesAnalyzed": true,
+            "name": "dep-chain-described-package"
+        }
+    ],
+    "relationships": [
+        {
+            "spdxElementId": "SPDXRef-DOCUMENT",
+            "relatedSpdxElement": "SPDXRef-Package",
+            "relationshipType": "DESCRIBES"
+        }
+    ]
+}

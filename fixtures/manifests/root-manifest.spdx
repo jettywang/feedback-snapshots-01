@@ -1,0 +1,30 @@
+## Document Information
+SPDXVersion: SPDX-2.3
+DataLicense: CC0-1.0
+SPDXID: SPDXRef-DOCUMENT
+DocumentName: incident-root-manifest
+DocumentNamespace: https://example.org/spdx/incident-root
+
+## External Document References
+ExternalDocumentRef: DocumentRef-alpha component-a.spdx.json SHA1: 1ac560406b40d6343dda85447b71e775775711f3
+ExternalDocumentRef: DocumentRef-alpha-alias mirror/component-a.spdx.json SHA1: 1ac560406b40d6343dda85447b71e775775711f3
+ExternalDocumentRef: DocumentRef-collision other-vendor/component-a.spdx.json SHA1: e749a34a5386a59dfbfd556b7e63295464f11624
+ExternalDocumentRef: DocumentRef-gamma tampered-lib.spdx.json SHA1: 04330818ab9f64b0c01f539e4a1321db17fd8561
+ExternalDocumentRef: DocumentRef-delta gone-lib.spdx.json SHA1: f87e0e21526f437abae7a467bace2d6664749dce
+ExternalDocumentRef: DocumentRef-epsilon renamed/lib-expected.spdx.json SHA1: 4f034be031878fe3e05b9550b9b738ca44ba2fa7
+ExternalDocumentRef: DocumentRef-chain dep-chain.spdx.json SHA1: fe6a014a291b3f18db4f8c58782decfad34aab02
+ExternalDocumentRef: DocumentRef-zeta https://upstream.example/spdx/remote-lib.spdx.json SHA1: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+
+## Creation Information
+Creator: Tool: offline-evidence-fixture-builder
+Created: 2026-11-28T00:00:00Z
+
+## Package Information
+PackageName: incident-root-manifest-described-package
+SPDXID: SPDXRef-Package
+PackageDownloadLocation: NOASSERTION
+FilesAnalyzed: true
+
+## Relationships
+Relationship: SPDXRef-DOCUMENT DESCRIBES SPDXRef-Package
+

@@ -1,0 +1,313 @@
+{
+  "root": {
+    "path": "/Users/apple/Documents/用户反馈项目/batches/feedback-20261120-backend-security-280-jettywang/prepared/FB-20261120-SEC-JW-246/workspace/fixtures/manifests/root-manifest.spdx",
+    "rel_path": "root-manifest.spdx",
+    "format": "SPDX-TagValue",
+    "document_namespace": "https://example.org/spdx/incident-root",
+    "actual_sha256": "d3cef741ff5cfaca03712734e95ef8bbdd42be673eac47f049e6133691fb9a0a",
+    "sidecar_path": "/Users/apple/Documents/用户反馈项目/batches/feedback-20261120-backend-security-280-jettywang/prepared/FB-20261120-SEC-JW-246/workspace/fixtures/manifests/root-manifest.spdx.sha256",
+    "sidecar_status": "sidecar-match",
+    "external_ref_count": 8
+  },
+  "summary": {
+    "total_edges": 9,
+    "confirmed_edges": 6,
+    "unconfirmed_edges": 3,
+    "content_nodes": 5,
+    "parse_errors": 0
+  },
+  "edges": [
+    {
+      "edge_id": "E001",
+      "source_document": "root-manifest.spdx",
+      "document_ref_id": "DocumentRef-alpha",
+      "document_uri": "component-a.spdx.json",
+      "depth": 0,
+      "algorithm": "SHA1",
+      "claimed_digest": "1ac560406b40d6343dda85447b71e775775711f3",
+      "status": "verified",
+      "confirmed": true,
+      "resolution": "local-path",
+      "referenced_path": "/Users/apple/Documents/用户反馈项目/batches/feedback-20261120-backend-security-280-jettywang/prepared/FB-20261120-SEC-JW-246/workspace/fixtures/offline/component-a.spdx.json",
+      "candidates": [
+        {
+          "rel_path": "component-a.spdx.json",
+          "algorithm": "SHA1",
+          "expected_digest": "1ac560406b40d6343dda85447b71e775775711f3",
+          "actual_digest": "1ac560406b40d6343dda85447b71e775775711f3",
+          "matches": true,
+          "size": 762
+        }
+      ],
+      "matching_content_path": null,
+      "content_id": "sha256:3e15a666b6f5434850c690e239016043e40fa0d2d264ed8270b9c18618a3ff4f",
+      "note": null
+    },
+    {
+      "edge_id": "E002",
+      "source_document": "root-manifest.spdx",
+      "document_ref_id": "DocumentRef-alpha-alias",
+      "document_uri": "mirror/component-a.spdx.json",
+      "depth": 0,
+      "algorithm": "SHA1",
+      "claimed_digest": "1ac560406b40d6343dda85447b71e775775711f3",
+      "status": "verified",
+      "confirmed": true,
+      "resolution": "local-path",
+      "referenced_path": "/Users/apple/Documents/用户反馈项目/batches/feedback-20261120-backend-security-280-jettywang/prepared/FB-20261120-SEC-JW-246/workspace/fixtures/offline/mirror/component-a.spdx.json",
+      "candidates": [
+        {
+          "rel_path": "mirror/component-a.spdx.json",
+          "algorithm": "SHA1",
+          "expected_digest": "1ac560406b40d6343dda85447b71e775775711f3",
+          "actual_digest": "1ac560406b40d6343dda85447b71e775775711f3",
+          "matches": true,
+          "size": 762
+        }
+      ],
+      "matching_content_path": null,
+      "content_id": "sha256:3e15a666b6f5434850c690e239016043e40fa0d2d264ed8270b9c18618a3ff4f",
+      "note": null
+    },
+    {
+      "edge_id": "E003",
+      "source_document": "root-manifest.spdx",
+      "document_ref_id": "DocumentRef-collision",
+      "document_uri": "other-vendor/component-a.spdx.json",
+      "depth": 0,
+      "algorithm": "SHA1",
+      "claimed_digest": "e749a34a5386a59dfbfd556b7e63295464f11624",
+      "status": "verified",
+      "confirmed": true,
+      "resolution": "local-path",
+      "referenced_path": "/Users/apple/Documents/用户反馈项目/batches/feedback-20261120-backend-security-280-jettywang/prepared/FB-20261120-SEC-JW-246/workspace/fixtures/offline/other-vendor/component-a.spdx.json",
+      "candidates": [
+        {
+          "rel_path": "other-vendor/component-a.spdx.json",
+          "algorithm": "SHA1",
+          "expected_digest": "e749a34a5386a59dfbfd556b7e63295464f11624",
+          "actual_digest": "e749a34a5386a59dfbfd556b7e63295464f11624",
+          "matches": true,
+          "size": 778
+        }
+      ],
+      "matching_content_path": null,
+      "content_id": "sha256:1f678486bee4ed3722898bd585c1a7c38a68f0a85030d90fddca8120ab6e436f",
+      "note": null
+    },
+    {
+      "edge_id": "E004",
+      "source_document": "root-manifest.spdx",
+      "document_ref_id": "DocumentRef-gamma",
+      "document_uri": "tampered-lib.spdx.json",
+      "depth": 0,
+      "algorithm": "SHA1",
+      "claimed_digest": "04330818ab9f64b0c01f539e4a1321db17fd8561",
+      "status": "digest-mismatch",
+      "confirmed": false,
+      "resolution": "local-path",
+      "referenced_path": "/Users/apple/Documents/用户反馈项目/batches/feedback-20261120-backend-security-280-jettywang/prepared/FB-20261120-SEC-JW-246/workspace/fixtures/offline/tampered-lib.spdx.json",
+      "candidates": [
+        {
+          "rel_path": "tampered-lib.spdx.json",
+          "algorithm": "SHA1",
+          "expected_digest": "04330818ab9f64b0c01f539e4a1321db17fd8561",
+          "actual_digest": "21ec9674d6ff4a3b832bf2baa51b8ced0920b191",
+          "matches": false,
+          "size": 783
+        }
+      ],
+      "matching_content_path": null,
+      "content_id": null,
+      "note": null
+    },
+    {
+      "edge_id": "E005",
+      "source_document": "root-manifest.spdx",
+      "document_ref_id": "DocumentRef-delta",
+      "document_uri": "gone-lib.spdx.json",
+      "depth": 0,
+      "algorithm": "SHA1",
+      "claimed_digest": "f87e0e21526f437abae7a467bace2d6664749dce",
+      "status": "missing",
+      "confirmed": false,
+      "resolution": "local-path",
+      "referenced_path": "/Users/apple/Documents/用户反馈项目/batches/feedback-20261120-backend-security-280-jettywang/prepared/FB-20261120-SEC-JW-246/workspace/fixtures/offline/gone-lib.spdx.json",
+      "candidates": [],
+      "matching_content_path": null,
+      "content_id": null,
+      "note": "no file with this path or basename exists in the offline root"
+    },
+    {
+      "edge_id": "E006",
+      "source_document": "root-manifest.spdx",
+      "document_ref_id": "DocumentRef-epsilon",
+      "document_uri": "renamed/lib-expected.spdx.json",
+      "depth": 0,
+      "algorithm": "SHA1",
+      "claimed_digest": "4f034be031878fe3e05b9550b9b738ca44ba2fa7",
+      "status": "verified-digest",
+      "confirmed": true,
+      "resolution": "local-path",
+      "referenced_path": "/Users/apple/Documents/用户反馈项目/batches/feedback-20261120-backend-security-280-jettywang/prepared/FB-20261120-SEC-JW-246/workspace/fixtures/offline/renamed/lib-moved.spdx.json",
+      "candidates": [
+        {
+          "rel_path": "renamed/lib-moved.spdx.json",
+          "algorithm": "SHA1",
+          "expected_digest": "4f034be031878fe3e05b9550b9b738ca44ba2fa7",
+          "actual_digest": "4f034be031878fe3e05b9550b9b738ca44ba2fa7",
+          "matches": true,
+          "size": 762
+        }
+      ],
+      "matching_content_path": "renamed/lib-moved.spdx.json",
+      "content_id": "sha256:1f2261617de031266edc5b65e3a3c62cd1e72abaf7956a42d9ab903700e33ae8",
+      "note": "no file with this path or basename exists in the offline root"
+    },
+    {
+      "edge_id": "E007",
+      "source_document": "root-manifest.spdx",
+      "document_ref_id": "DocumentRef-chain",
+      "document_uri": "dep-chain.spdx.json",
+      "depth": 0,
+      "algorithm": "SHA1",
+      "claimed_digest": "fe6a014a291b3f18db4f8c58782decfad34aab02",
+      "status": "verified",
+      "confirmed": true,
+      "resolution": "local-path",
+      "referenced_path": "/Users/apple/Documents/用户反馈项目/batches/feedback-20261120-backend-security-280-jettywang/prepared/FB-20261120-SEC-JW-246/workspace/fixtures/offline/dep-chain.spdx.json",
+      "candidates": [
+        {
+          "rel_path": "dep-chain.spdx.json",
+          "algorithm": "SHA1",
+          "expected_digest": "fe6a014a291b3f18db4f8c58782decfad34aab02",
+          "actual_digest": "fe6a014a291b3f18db4f8c58782decfad34aab02",
+          "matches": true,
+          "size": 1076
+        }
+      ],
+      "matching_content_path": null,
+      "content_id": "sha256:2bb49368665077fc5d34306d192e0af374e57cfb1b1da50448b1b5cba6bd4eff",
+      "note": null
+    },
+    {
+      "edge_id": "E008",
+      "source_document": "root-manifest.spdx",
+      "document_ref_id": "DocumentRef-zeta",
+      "document_uri": "https://upstream.example/spdx/remote-lib.spdx.json",
+      "depth": 0,
+      "algorithm": "SHA1",
+      "claimed_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "status": "non-local-uri",
+      "confirmed": false,
+      "resolution": "non-local",
+      "referenced_path": null,
+      "candidates": [],
+      "matching_content_path": null,
+      "content_id": null,
+      "note": "URI scheme 'https' cannot be dereferenced offline"
+    },
+    {
+      "edge_id": "E009",
+      "source_document": "dep-chain.spdx.json",
+      "document_ref_id": "DocumentRef-libbeta",
+      "document_uri": "component-b.spdx.json",
+      "depth": 1,
+      "algorithm": "SHA1",
+      "claimed_digest": "124298826918ba108fa8b13a71695caae6e03cd2",
+      "status": "verified",
+      "confirmed": true,
+      "resolution": "local-path",
+      "referenced_path": "/Users/apple/Documents/用户反馈项目/batches/feedback-20261120-backend-security-280-jettywang/prepared/FB-20261120-SEC-JW-246/workspace/fixtures/offline/component-b.spdx.json",
+      "candidates": [
+        {
+          "rel_path": "component-b.spdx.json",
+          "algorithm": "SHA1",
+          "expected_digest": "124298826918ba108fa8b13a71695caae6e03cd2",
+          "actual_digest": "124298826918ba108fa8b13a71695caae6e03cd2",
+          "matches": true,
+          "size": 762
+        }
+      ],
+      "matching_content_path": null,
+      "content_id": "sha256:0ebe5b972c79bfc3e0ea6c22fcd1bbf41c25928f241b9d27581c15e99b066970",
+      "note": null
+    }
+  ],
+  "content_nodes": [
+    {
+      "content_id": "sha256:3e15a666b6f5434850c690e239016043e40fa0d2d264ed8270b9c18618a3ff4f",
+      "sha256": "3e15a666b6f5434850c690e239016043e40fa0d2d264ed8270b9c18618a3ff4f",
+      "aliases": [
+        "DocumentRef-alpha",
+        "DocumentRef-alpha-alias"
+      ],
+      "paths": [
+        "component-a.spdx.json",
+        "mirror/component-a.spdx.json"
+      ],
+      "edge_ids": [
+        "E001",
+        "E002"
+      ],
+      "document_namespace": "https://example.org/spdx/component-a"
+    },
+    {
+      "content_id": "sha256:1f678486bee4ed3722898bd585c1a7c38a68f0a85030d90fddca8120ab6e436f",
+      "sha256": "1f678486bee4ed3722898bd585c1a7c38a68f0a85030d90fddca8120ab6e436f",
+      "aliases": [
+        "DocumentRef-collision"
+      ],
+      "paths": [
+        "other-vendor/component-a.spdx.json"
+      ],
+      "edge_ids": [
+        "E003"
+      ],
+      "document_namespace": "https://other-vendor.example/component-a"
+    },
+    {
+      "content_id": "sha256:1f2261617de031266edc5b65e3a3c62cd1e72abaf7956a42d9ab903700e33ae8",
+      "sha256": "1f2261617de031266edc5b65e3a3c62cd1e72abaf7956a42d9ab903700e33ae8",
+      "aliases": [
+        "DocumentRef-epsilon"
+      ],
+      "paths": [
+        "renamed/lib-moved.spdx.json"
+      ],
+      "edge_ids": [
+        "E006"
+      ],
+      "document_namespace": "https://example.org/spdx/renamed-lib"
+    },
+    {
+      "content_id": "sha256:2bb49368665077fc5d34306d192e0af374e57cfb1b1da50448b1b5cba6bd4eff",
+      "sha256": "2bb49368665077fc5d34306d192e0af374e57cfb1b1da50448b1b5cba6bd4eff",
+      "aliases": [
+        "DocumentRef-chain"
+      ],
+      "paths": [
+        "dep-chain.spdx.json"
+      ],
+      "edge_ids": [
+        "E007"
+      ],
+      "document_namespace": "https://example.org/spdx/dep-chain"
+    },
+    {
+      "content_id": "sha256:0ebe5b972c79bfc3e0ea6c22fcd1bbf41c25928f241b9d27581c15e99b066970",
+      "sha256": "0ebe5b972c79bfc3e0ea6c22fcd1bbf41c25928f241b9d27581c15e99b066970",
+      "aliases": [
+        "DocumentRef-libbeta"
+      ],
+      "paths": [
+        "component-b.spdx.json"
+      ],
+      "edge_ids": [
+        "E009"
+      ],
+      "document_namespace": "https://example.org/spdx/component-b"
+    }
+  ],
+  "parse_errors": []
+}

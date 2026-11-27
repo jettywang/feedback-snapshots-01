@@ -1,0 +1,102 @@
+{
+    "SPDXID": "SPDXRef-DOCUMENT",
+    "creationInfo": {
+        "created": "2026-11-28T00:00:00Z",
+        "creators": [
+            "Tool: offline-evidence-fixture-builder"
+        ]
+    },
+    "dataLicense": "CC0-1.0",
+    "externalDocumentRefs": [
+        {
+            "externalDocumentId": "DocumentRef-alpha",
+            "spdxDocument": "component-a.spdx.json",
+            "checksum": {
+                "algorithm": "SHA1",
+                "checksumValue": "1ac560406b40d6343dda85447b71e775775711f3"
+            }
+        },
+        {
+            "externalDocumentId": "DocumentRef-alpha-alias",
+            "spdxDocument": "mirror/component-a.spdx.json",
+            "checksum": {
+                "algorithm": "SHA1",
+                "checksumValue": "1ac560406b40d6343dda85447b71e775775711f3"
+            }
+        },
+        {
+            "externalDocumentId": "DocumentRef-collision",
+            "spdxDocument": "other-vendor/component-a.spdx.json",
+            "checksum": {
+                "algorithm": "SHA1",
+                "checksumValue": "e749a34a5386a59dfbfd556b7e63295464f11624"
+            }
+        },
+        {
+            "externalDocumentId": "DocumentRef-gamma",
+            "spdxDocument": "tampered-lib.spdx.json",
+            "checksum": {
+                "algorithm": "SHA1",
+                "checksumValue": "04330818ab9f64b0c01f539e4a1321db17fd8561"
+            }
+        },
+        {
+            "externalDocumentId": "DocumentRef-delta",
+            "spdxDocument": "gone-lib.spdx.json",
+            "checksum": {
+                "algorithm": "SHA1",
+                "checksumValue": "f87e0e21526f437abae7a467bace2d6664749dce"
+            }
+        },
+        {
+            "externalDocumentId": "DocumentRef-epsilon",
+            "spdxDocument": "renamed/lib-expected.spdx.json",
+            "checksum": {
+                "algorithm": "SHA1",
+                "checksumValue": "4f034be031878fe3e05b9550b9b738ca44ba2fa7"
+            }
+        },
+        {
+            "externalDocumentId": "DocumentRef-chain",
+            "spdxDocument": "dep-chain.spdx.json",
+            "checksum": {
+                "algorithm": "SHA1",
+                "checksumValue": "fe6a014a291b3f18db4f8c58782decfad34aab02"
+            }
+        },
+        {
+            "externalDocumentId": "DocumentRef-zeta",
+            "spdxDocument": "https://upstream.example/spdx/remote-lib.spdx.json",
+            "checksum": {
+                "algorithm": "SHA1",
+                "checksumValue": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            }
+        },
+        {
+            "externalDocumentId": "DocumentRef-eta",
+            "spdxDocument": "renamed/lib-moved.spdx.json",
+            "checksum": {
+                "algorithm": "MD4",
+                "checksumValue": "00000000000000000000000000000000"
+            }
+        }
+    ],
+    "name": "incident-root-manifest",
+    "spdxVersion": "SPDX-2.3",
+    "documentNamespace": "https://example.org/spdx/incident-root",
+    "packages": [
+        {
+            "SPDXID": "SPDXRef-Package",
+            "downloadLocation": "NOASSERTION",
+            "filesAnalyzed": true,
+            "name": "incident-root-manifest-described-package"
+        }
+    ],
+    "relationships": [
+        {
+            "spdxElementId": "SPDXRef-DOCUMENT",
+            "relatedSpdxElement": "SPDXRef-Package",
+            "relationshipType": "DESCRIBES"
+        }
+    ]
+}

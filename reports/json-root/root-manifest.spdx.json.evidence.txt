@@ -1,0 +1,93 @@
+SPDX OFFLINE EXTERNAL-REFERENCE EVIDENCE REPORT
+============================================================
+Root document : root-manifest.spdx.json (SPDX-JSON)
+Namespace     : https://example.org/spdx/incident-root
+Root SHA-256  : ae046bdadddab40d8637169189f25bd558fba15786e187abddbfd111ed4dc7c4
+Root sidecar  : sidecar-match
+Sidecar file  : /Users/apple/Documents/用户反馈项目/batches/feedback-20261120-backend-security-280-jettywang/prepared/FB-20261120-SEC-JW-246/workspace/fixtures/manifests/root-manifest.spdx.json.sha256
+External refs : 9
+
+SUMMARY
+------------------------------------------------------------
+edges total=10 confirmed=6 unconfirmed=4 content_nodes=5
+
+ALIAS CONVERGENCE (one original byte-identity, several aliases)
+------------------------------------------------------------
+sha256:3e15a666b6f5434850c690e239016043e40fa0d2d264ed8270b9c18618a3ff4f
+  aliases : DocumentRef-alpha, DocumentRef-alpha-alias
+  paths   : component-a.spdx.json, mirror/component-a.spdx.json
+  edges   : E001, E002
+
+EDGES
+------------------------------------------------------------
+[OK]   E001 depth=0 DocumentRef-alpha -> verified
+      uri       : component-a.spdx.json
+      claimed   : SHA1:1ac560406b40d6343dda85447b71e775775711f3
+      resolve   : local-path (/Users/apple/Documents/用户反馈项目/batches/feedback-20261120-backend-security-280-jettywang/prepared/FB-20261120-SEC-JW-246/workspace/fixtures/offline/component-a.spdx.json)
+      candidate : component-a.spdx.json SHA1=1ac560406b40d6343dda85447b71e775775711f3 [MATCH]
+      content   : sha256:3e15a666b6f5434850c690e239016043e40fa0d2d264ed8270b9c18618a3ff4f
+[OK]   E002 depth=0 DocumentRef-alpha-alias -> verified
+      uri       : mirror/component-a.spdx.json
+      claimed   : SHA1:1ac560406b40d6343dda85447b71e775775711f3
+      resolve   : local-path (/Users/apple/Documents/用户反馈项目/batches/feedback-20261120-backend-security-280-jettywang/prepared/FB-20261120-SEC-JW-246/workspace/fixtures/offline/mirror/component-a.spdx.json)
+      candidate : mirror/component-a.spdx.json SHA1=1ac560406b40d6343dda85447b71e775775711f3 [MATCH]
+      content   : sha256:3e15a666b6f5434850c690e239016043e40fa0d2d264ed8270b9c18618a3ff4f
+[OK]   E003 depth=0 DocumentRef-collision -> verified
+      uri       : other-vendor/component-a.spdx.json
+      claimed   : SHA1:e749a34a5386a59dfbfd556b7e63295464f11624
+      resolve   : local-path (/Users/apple/Documents/用户反馈项目/batches/feedback-20261120-backend-security-280-jettywang/prepared/FB-20261120-SEC-JW-246/workspace/fixtures/offline/other-vendor/component-a.spdx.json)
+      candidate : other-vendor/component-a.spdx.json SHA1=e749a34a5386a59dfbfd556b7e63295464f11624 [MATCH]
+      content   : sha256:1f678486bee4ed3722898bd585c1a7c38a68f0a85030d90fddca8120ab6e436f
+[FAIL] E004 depth=0 DocumentRef-gamma -> digest-mismatch
+      uri       : tampered-lib.spdx.json
+      claimed   : SHA1:04330818ab9f64b0c01f539e4a1321db17fd8561
+      resolve   : local-path (/Users/apple/Documents/用户反馈项目/batches/feedback-20261120-backend-security-280-jettywang/prepared/FB-20261120-SEC-JW-246/workspace/fixtures/offline/tampered-lib.spdx.json)
+      candidate : tampered-lib.spdx.json SHA1=21ec9674d6ff4a3b832bf2baa51b8ced0920b191 [DIFFER]
+[MISS] E005 depth=0 DocumentRef-delta -> missing
+      uri       : gone-lib.spdx.json
+      claimed   : SHA1:f87e0e21526f437abae7a467bace2d6664749dce
+      resolve   : local-path (/Users/apple/Documents/用户反馈项目/batches/feedback-20261120-backend-security-280-jettywang/prepared/FB-20261120-SEC-JW-246/workspace/fixtures/offline/gone-lib.spdx.json)
+      note      : no file with this path or basename exists in the offline root
+[DIG]  E006 depth=0 DocumentRef-epsilon -> verified-digest
+      uri       : renamed/lib-expected.spdx.json
+      claimed   : SHA1:4f034be031878fe3e05b9550b9b738ca44ba2fa7
+      resolve   : local-path (/Users/apple/Documents/用户反馈项目/batches/feedback-20261120-backend-security-280-jettywang/prepared/FB-20261120-SEC-JW-246/workspace/fixtures/offline/renamed/lib-moved.spdx.json)
+      candidate : renamed/lib-moved.spdx.json SHA1=4f034be031878fe3e05b9550b9b738ca44ba2fa7 [MATCH]
+      recovered : renamed/lib-moved.spdx.json (digest-only match)
+      content   : sha256:1f2261617de031266edc5b65e3a3c62cd1e72abaf7956a42d9ab903700e33ae8
+      note      : no file with this path or basename exists in the offline root
+[OK]   E007 depth=0 DocumentRef-chain -> verified
+      uri       : dep-chain.spdx.json
+      claimed   : SHA1:fe6a014a291b3f18db4f8c58782decfad34aab02
+      resolve   : local-path (/Users/apple/Documents/用户反馈项目/batches/feedback-20261120-backend-security-280-jettywang/prepared/FB-20261120-SEC-JW-246/workspace/fixtures/offline/dep-chain.spdx.json)
+      candidate : dep-chain.spdx.json SHA1=fe6a014a291b3f18db4f8c58782decfad34aab02 [MATCH]
+      content   : sha256:2bb49368665077fc5d34306d192e0af374e57cfb1b1da50448b1b5cba6bd4eff
+[NET]  E008 depth=0 DocumentRef-zeta -> non-local-uri
+      uri       : https://upstream.example/spdx/remote-lib.spdx.json
+      claimed   : SHA1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+      resolve   : non-local
+      note      : URI scheme 'https' cannot be dereferenced offline
+[UNSP] E009 depth=0 DocumentRef-eta -> unsupported-algorithm
+      uri       : renamed/lib-moved.spdx.json
+      claimed   : MD4:00000000000000000000000000000000
+      resolve   : local-path (/Users/apple/Documents/用户反馈项目/batches/feedback-20261120-backend-security-280-jettywang/prepared/FB-20261120-SEC-JW-246/workspace/fixtures/offline/renamed/lib-moved.spdx.json)
+      note      : algorithm MD4 cannot be computed in this environment
+[OK]   E010 depth=1 DocumentRef-libbeta -> verified
+      uri       : component-b.spdx.json
+      claimed   : SHA1:124298826918ba108fa8b13a71695caae6e03cd2
+      resolve   : local-path (/Users/apple/Documents/用户反馈项目/batches/feedback-20261120-backend-security-280-jettywang/prepared/FB-20261120-SEC-JW-246/workspace/fixtures/offline/component-b.spdx.json)
+      candidate : component-b.spdx.json SHA1=124298826918ba108fa8b13a71695caae6e03cd2 [MATCH]
+      content   : sha256:0ebe5b972c79bfc3e0ea6c22fcd1bbf41c25928f241b9d27581c15e99b066970
+
+CONTENT NODES
+------------------------------------------------------------
+sha256:3e15a666b6f5434850c690e239016043e40fa0d2d264ed8270b9c18618a3ff4f
+  aliases=['DocumentRef-alpha', 'DocumentRef-alpha-alias'] paths=['component-a.spdx.json', 'mirror/component-a.spdx.json'] edges=['E001', 'E002']
+sha256:1f678486bee4ed3722898bd585c1a7c38a68f0a85030d90fddca8120ab6e436f
+  aliases=['DocumentRef-collision'] paths=['other-vendor/component-a.spdx.json'] edges=['E003']
+sha256:1f2261617de031266edc5b65e3a3c62cd1e72abaf7956a42d9ab903700e33ae8
+  aliases=['DocumentRef-epsilon'] paths=['renamed/lib-moved.spdx.json'] edges=['E006']
+sha256:2bb49368665077fc5d34306d192e0af374e57cfb1b1da50448b1b5cba6bd4eff
+  aliases=['DocumentRef-chain'] paths=['dep-chain.spdx.json'] edges=['E007']
+sha256:0ebe5b972c79bfc3e0ea6c22fcd1bbf41c25928f241b9d27581c15e99b066970
+  aliases=['DocumentRef-libbeta'] paths=['component-b.spdx.json'] edges=['E010']
