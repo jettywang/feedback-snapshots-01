@@ -430,6 +430,24 @@ Rails.application.config.sorcery.configure do |config|
     #
     # user.reset_password_page_access_count_attribute_name =
 
+    # Invalidate other sessions and persistent logins after a committed password change.
+    # Requires an `invalidate_sessions_before` datetime column on the user model
+    # (and the remember_me submodule to also rotate the persistent login token).
+    # A failed or rolled-back change leaves the previous credentials and sessions untouched.
+    # Default: `false`
+    #
+    # user.reset_password_invalidate_active_sessions_enabled =
+
+    # Attribute holding the session-invalidation cutoff.
+    # Default: `:invalidate_sessions_before`
+    #
+    # user.reset_password_invalidate_sessions_before_attribute_name =
+
+    # Keep the session that performed the committed change usable, so the user can finish the flow.
+    # Default: `true`
+    #
+    # user.reset_password_preserve_current_session =
+
     # -- magic_login --
     # Magic login code attribute name.
     # Default: `:magic_login_token`

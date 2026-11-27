@@ -99,7 +99,27 @@ User.load_from_reset_password_token(token)
 @user.deliver_reset_password_instructions! # Generates the token and sends the email
 @user.change_password(new_password)
 @user.change_password!(new_password) # Same as change_password but raises exception on save
+change_password(new_password) # Controller: also keeps the session that committed the change
 ```
+
+To terminate earlier persistent logins when a reset commits, enable the opt-in
+transition and make sure the model has an `invalidate_sessions_before` datetime
+column:
+
+```ruby
+# config/initializers/sorcery.rb
+user.reset_password_invalidate_active_sessions_enabled = true
+user.reset_password_preserve_current_session = true # default
+```
+
+A committed `change_password` then rotates the remember-me token and records
+the cutoff in the same save, so old sessions and old remember-me cookies stop
+working on their next request. The session that performed the change is
+re-stamped by the controller helper and can finish the flow; other requests are
+treated like a normal logout. A change that fails to save, or whose surrounding
+transaction is rolled back, leaves the previous password, token, cutoff and all
+existing logins untouched. With the option off, reset and logout behave exactly
+as before.
 
 ### Session Timeout
 
@@ -177,6 +197,7 @@ Inside the initializer, the comments will tell you what each setting does.
 - Configurable mailer, method name, and attribute name
 - Configurable temporary token expiration
 - Configurable time between emails (hammering protection)
+- Optionally terminate other sessions and persistent logins on a committed password change, keeping the session that performed it
 
 **Remember Me** (see [lib/sorcery/model/submodules/remember_me.rb](https://github.com/Sorcery/sorcery/blob/main/lib/sorcery/model/submodules/remember_me.rb)):
 

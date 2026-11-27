@@ -10,6 +10,7 @@ module Sorcery
           register_last_activity_time_to_db
           deny_banned_user
           validate_session
+          validate_password_change_session
         ].freeze
 
         def sorcery_reload!(submodules = [], options = {})

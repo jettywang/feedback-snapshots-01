@@ -108,6 +108,29 @@ class SorceryController < ApplicationController
     head :ok
   end
 
+  # Completes a password reset from a token, then keeps the session that
+  # committed the change usable.
+  def test_reset_password
+    @user = User.load_from_reset_password_token(params[:token])
+    return head :not_found unless @user
+
+    @result = change_password(params[:password], user: @user)
+    head(@result ? :ok : :unprocessable_entity)
+  end
+
+  # Rollback comparison: the change is written and then the surrounding
+  # transaction is rolled back, so nothing was actually committed.
+  def test_reset_password_rolled_back
+    @user = User.load_from_reset_password_token(params[:token])
+    return head :not_found unless @user
+
+    User.transaction do
+      @result = change_password(params[:password], user: @user)
+      raise ActiveRecord::Rollback
+    end
+    head(@result ? :ok : :unprocessable_entity)
+  end
+
   def test_login_with_remember
     @user = login(params[:email], params[:password])
     remember_me!

@@ -21,6 +21,8 @@ AppRoot::Application.routes.draw do
     get :test_logout_with_forget_me
     get :test_logout_with_force_forget_me
     get :test_invalidate_active_session
+    post :test_reset_password
+    post :test_reset_password_rolled_back
     get :test_should_be_logged_in
     get :test_create_from_provider
     get :test_add_second_provider

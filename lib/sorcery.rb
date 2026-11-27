@@ -36,6 +36,7 @@ module Sorcery
     module Submodules
       require 'sorcery/controller/submodules/remember_me'
       require 'sorcery/controller/submodules/session_timeout'
+      require 'sorcery/controller/submodules/reset_password'
       require 'sorcery/controller/submodules/brute_force_protection'
       require 'sorcery/controller/submodules/http_basic_auth'
       require 'sorcery/controller/submodules/activity_logging'
