@@ -69,3 +69,16 @@ class StopRequested(Exception):
     """Raised inside a worker to stop its work loop, e.g. after a stop signal or
     when the worker is suspended in burst mode.
     """
+
+
+class RecoveryError(Exception):
+    """Base class for errors raised by the quarantine/recovery entry point."""
+
+
+class RecoveryNotApprovedError(RecoveryError):
+    """Raised when a quarantined job is released or verified without an operator approval."""
+
+
+class RecoveryVerificationError(RecoveryError):
+    """Raised when local re-verification of a quarantined job fails, e.g. the job is no
+    longer readable, or its function/queue no longer matches the approved record."""
