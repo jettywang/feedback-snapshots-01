@@ -123,3 +123,21 @@ the `spdx3` package is planned to be structured similarly to the `spdx` package.
 
 Additionally, the `bump_from_spdx2` package takes care of converting SPDX-2 documents to SPDX-3.
 Guideline for this is the [migration guide](https://docs.google.com/document/d/1-olHRnX1CssUS67Psv_sAq9Vd-pc81HF8MM0hA7M0hg).
+
+### `vex`
+
+The `vex` package adds a local verification layer on top of the structured SPDX 3 VEX vulnerability
+assessment relationships. It does not change the imported statements; it decides which component
+branches can rely on them.
+
+- `verification.py` extracts VEX statements from a `Payload` and verifies each package branch.
+  Every verdict (`VerificationStatus.FIXED`, `UNDER_INVESTIGATION` or `NOT_AFFECTED`) keeps the
+  governing statement, its integrity evidence and any superseded statement as a `ConflictRecord`.
+  Statements are ordered newest-first and a statement only affects the component branch it targets.
+- `migration.py` builds a `MigrationManifest` for components converted from SPDX 2.x. Entries
+  without a version or without integrity evidence stay in a pending migration status instead of
+  being associated with VEX statements. The manifest serializes to and from YAML.
+- `statement_loader.py` ingests serialized statement records (YAML/JSON) in reverse order, so the
+  newest statement is materialized first, while each record only touches its own branch.
+
+See `examples/spdx3_vex_local_verification.py` for an end-to-end walkthrough.
