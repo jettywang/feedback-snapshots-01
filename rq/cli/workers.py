@@ -9,6 +9,7 @@ from redis.exceptions import ConnectionError
 
 from rq.cli.cli import main
 from rq.cli.helpers import (
+    get_admission_policy,
     import_attribute,
     pass_cli_config,
     read_config_file,
@@ -145,6 +146,7 @@ def worker(
             disable_default_exception_handler=disable_default_exception_handler,
             log_job_description=not disable_job_desc_logging,
             serializer=serializer,
+            admission_policy=get_admission_policy(cli_config.connection, settings),
         )
 
         # if --verbose or --quiet, use the appropriate logging level
@@ -229,5 +231,6 @@ def worker_pool(
         job_class=cli_config.job_class,
         queue_class=cli_config.queue_class,
         exception_handlers=exception_handlers or None,
+        admission_policy=get_admission_policy(cli_config.connection, settings),
     )
     pool.start(burst=burst, logging_level=logging_level)

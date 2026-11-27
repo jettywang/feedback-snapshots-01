@@ -69,3 +69,7 @@ class StopRequested(Exception):
     """Raised inside a worker to stop its work loop, e.g. after a stop signal or
     when the worker is suspended in burst mode.
     """
+
+
+class AdmissionRuleConflict(Exception):
+    """Raised when an admission rule update expects a revision that is no longer current."""

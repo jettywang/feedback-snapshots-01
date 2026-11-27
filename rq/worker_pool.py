@@ -17,6 +17,7 @@ from redis import ConnectionPool, Redis
 
 from rq.serializers import DefaultSerializer
 
+from .admission import AdmissionPolicy
 from .connections import parse_connection
 from .defaults import DEFAULT_LOGGING_DATE_FORMAT, DEFAULT_LOGGING_FORMAT
 from .job import Job
@@ -57,6 +58,7 @@ class WorkerPool:
         job_class: type[Job] = Job,
         queue_class: type[Queue] = Queue,
         exception_handlers=None,
+        admission_policy: AdmissionPolicy | None = None,
         *args,
         **kwargs,
     ):
@@ -74,6 +76,7 @@ class WorkerPool:
         self.job_class: type[Job] = job_class
         self.queue_class: type[Queue] = queue_class
         self.exception_handlers = exception_handlers
+        self.admission_policy = admission_policy
 
         # A dictionary of WorkerData keyed by worker name
         self.worker_dict: dict[str, WorkerData] = {}
@@ -179,6 +182,7 @@ class WorkerPool:
                 'queue_class': self.queue_class,
                 'serializer': self.serializer,
                 'exception_handlers': self.exception_handlers,
+                'admission_policy': self.admission_policy,
             },
             name=f'Worker {name} (WorkerPool {self.name})',
         )
@@ -271,6 +275,7 @@ def run_worker(
     burst: bool = True,
     logging_level: str = 'INFO',
     _sleep: int = 0,
+    admission_policy: AdmissionPolicy | None = None,
 ):
     connection = connection_class(
         connection_pool=ConnectionPool(connection_class=connection_pool_class, **connection_pool_kwargs)
@@ -286,6 +291,7 @@ def run_worker(
         job_class=job_class,
         queue_class=queue_class,
         exception_handlers=exception_handlers,
+        admission_policy=admission_policy,
     )
     worker.log.info('Starting worker started with PID %s', os.getpid())
     time.sleep(_sleep)

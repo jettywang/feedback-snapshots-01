@@ -29,6 +29,7 @@ if TYPE_CHECKING:
 import redis.exceptions
 
 from .. import worker_registration
+from ..admission import AdmissionPolicy, AdmissionResult
 from ..callbacks import execute_failure_callback, execute_success_callback
 from ..command import PUBSUB_CHANNEL_TEMPLATE, handle_command, parse_payload
 from ..defaults import (
@@ -149,6 +150,7 @@ class BaseWorker:
         prepare_for_work: bool = True,
         serializer: Serializer | str | None = None,
         work_horse_killed_handler: Callable[[Job, int, int, struct_rusage], None] | None = None,
+        admission_policy: AdmissionPolicy | None = None,
     ):  # noqa
         self.default_result_ttl = default_result_ttl
 
@@ -162,6 +164,7 @@ class BaseWorker:
 
         self.job_monitoring_interval = job_monitoring_interval
         self.maintenance_interval = maintenance_interval
+        self.admission_policy = admission_policy
 
         if not connection:
             connection = get_connection_from_queues(queues)
@@ -930,6 +933,7 @@ class BaseWorker:
             serializer=self.serializer,
             job_class=self.job_class,
             queue_class=self.queue_class,
+            admission_policy=self.admission_policy,
         )
         self.scheduler.acquire_locks()
         if self.scheduler.acquired_locks:
@@ -1185,6 +1189,33 @@ class BaseWorker:
                 )
                 if result is not None:
                     job, queue = result
+                    if self.admission_policy is not None:
+                        decision = self.admission_policy.check_worker_job(job)
+                        if decision.result is not AdmissionResult.ADMIT:
+                            self.log.warning(
+                                'Worker %s: holding job %s (%s): %s',
+                                self.name,
+                                job.id,
+                                decision.result.value,
+                                decision.reason,
+                            )
+                            if decision.result is AdmissionResult.IN_PROGRESS:
+                                # An execution already owns this job. Drop this duplicate
+                                # queue entry without touching the job's status or record.
+                                pass
+                            else:
+                                # The job was already dequeued, so keep it inspectable as
+                                # scheduled and record the original queue as its holder.
+                                job.set_status(JobStatus.SCHEDULED)
+                                job.save()
+                                self.admission_policy.hold_job(
+                                    job,
+                                    queue.name,
+                                    reason=decision.reason,
+                                    decision=decision,
+                                )
+                            result = None
+                            continue
                     self.reorder_queues(reference_queue=queue)
                     self.log.debug('Worker %s: dequeued job %s from %s', self.name, blue(job.id), green(queue.name))
                     job.redis_server_version = self.get_redis_server_version()
@@ -1539,10 +1570,37 @@ class BaseWorker:
                     if job.repeats_left is not None and job.repeats_left > 0:
                         from ..repeat import Repeat
 
-                        self.log.info(
-                            'Worker %s: job %s scheduled to repeat (%s left)', self.name, job.id, job.repeats_left
-                        )
-                        Repeat.schedule(job, queue, pipeline=pipeline)
+                        repeat_allowed = True
+                        if self.admission_policy is not None:
+                            occurrence = f'repeat:{job.repeats_left}'
+                            decision = self.admission_policy.check_repeat(job, occurrence)
+                            if decision.result is AdmissionResult.REVIEW:
+                                # Registration is missing/ambiguous: keep the finished job
+                                # inspectable instead of guessing whether to repeat.
+                                job._status = JobStatus.FINISHED
+                                job.cleanup(result_ttl, pipeline=pipeline, remove_from_queue=False)
+                                repeat_allowed = False
+                            elif decision.result is not AdmissionResult.ADMIT:
+                                job._status = JobStatus.FINISHED
+                                job.cleanup(result_ttl, pipeline=pipeline, remove_from_queue=False)
+                                repeat_allowed = False
+                            else:
+                                self.admission_policy.claim_occurrence(
+                                    decision.schedule_key,
+                                    occurrence,
+                                    job_id=job.id,
+                                    result='enqueued',
+                                    rule_revision=decision.rule_revision,
+                                )
+
+                        if repeat_allowed:
+                            self.log.info(
+                                'Worker %s: job %s scheduled to repeat (%s left)',
+                                self.name,
+                                job.id,
+                                job.repeats_left,
+                            )
+                            Repeat.schedule(job, queue, pipeline=pipeline)
                     else:
                         job.cleanup(result_ttl, pipeline=pipeline, remove_from_queue=False)
                         # An aborted immediate repeat may have left the cached status QUEUED.

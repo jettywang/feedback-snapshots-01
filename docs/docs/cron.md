@@ -291,3 +291,84 @@ Each scheduler has these attributes:
 - `created_at`: `datetime` at which scheduler is created
 - `config_file`: configuration file path (if loaded from file)
 - `last_heartbeat`: `datetime` of last recorded heartbeat
+
+## Runtime Admission for Recovery
+
+Schedulers recover work across restarts and takeovers. If you retire a schedule
+while another scheduler is still running, the replacement scheduler must consult
+the *current* rule rather than its own stale in-memory state. `AdmissionPolicy`
+provides that optional boundary without changing default behaviour.
+
+```python
+from redis import Redis
+from rq import AdmissionPolicy
+from rq.cron import CronScheduler
+
+connection = Redis()
+policy = AdmissionPolicy(connection)
+
+# Retire a logical cron schedule (job `name`, or `func_name` when unnamed).
+policy.stop('cron:send-newsletter', reason='retired for Q4')
+
+scheduler = CronScheduler(connection=connection, admission_policy=policy)
+scheduler.load_config_from_file('myapp.cron_config')
+scheduler.start()
+```
+
+Rules are keyed by a schedule identity:
+
+- cron schedules: `cron:<job name>` (the `name` passed to `cron.register`, or its
+  function name)
+- timed and repeating jobs: `job:<job id>`; a job may instead carry
+  `meta['admission_key']` to share a cron schedule's rule
+
+The rule is checked for **every** occurrence and for every job in
+`ScheduledJobRegistry`, so a retirement recorded after a takeover still applies.
+Without a registered rule, work is admitted by default, preserving existing jobs.
+Construct `AdmissionPolicy(connection, require_registration=True)` to hold
+unregistered schedules for review instead.
+
+### Decision records
+
+Decisions are written to `rq:admission:records` (newest first) and can be read
+from Python:
+
+```python
+from rq import AdmissionResult
+
+for record in policy.records(result=AdmissionResult.STOPPED, limit=20):
+    print(record['schedule_key'], record['reason'], record['recorded_at'])
+```
+
+Results distinguish:
+
+- `admit`: the occurrence may be emitted
+- `stopped`: the schedule is retired; the occurrence is recorded as terminal so a
+  later reactivation does not backfill it
+- `completed`: the occurrence/job was already emitted or adjudicated, so a
+  takeover does not enqueue it twice
+- `in_progress`: the job is already `started`; its status and execution record are
+  left untouched
+- `review`: the current rule is missing or the job's recorded revision is newer
+  than the registered one, so a human must resolve it
+
+### Held jobs and the original schedule
+
+A stopped or review-classified timed job that has not been emitted is removed
+from `ScheduledJobRegistry` and recorded in `rq:admission:held:<queue>` together
+with its original scheduled timestamp and `rq:admission:held-meta:<queue>`. The
+job hash is not deleted and its status remains `scheduled` for inspection:
+
+```python
+policy.held_job_ids('default')
+policy.held_job_meta('default', job_id)
+policy.release_held_job('default', job_id)
+```
+
+Jobs stopped before execution are held before an execution record is created.
+Jobs that already started are returned/dropped without rewriting their `started`
+status, so their original execution remains authoritative.
+
+Workers and `rq worker` accept the same policy. Enable it from an RQ config file
+with `ADMISSION = True` or `ADMISSION = {'require_registration': True}`; `rq cron`
+also honours that setting.

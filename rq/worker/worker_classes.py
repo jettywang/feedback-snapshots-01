@@ -212,6 +212,9 @@ class SpawnWorker(Worker):
                     'log_job_description': self.log_job_description,
                     'log_result_lifespan': self.log_result_lifespan,
                     'disable_default_exception_handler': self.disable_default_exception_handler,
+                    'admission_policy_options': (
+                        self.admission_policy.export_options() if self.admission_policy is not None else None
+                    ),
                 },
             )
         )
@@ -259,7 +262,15 @@ worker = worker_class.find_by_key(
 if not worker:
     sys.exit(1)
 for name, value in worker_attributes.items():
+    if name == 'admission_policy_options':
+        continue
     setattr(worker, name, value)
+if worker_attributes.get('admission_policy_options') is not None:
+    from rq.admission import AdmissionPolicy
+
+    options = dict(worker_attributes['admission_policy_options'])
+    options.pop('connection', None)
+    worker.admission_policy = AdmissionPolicy(worker.connection, **options)
 
 # Reconstruct job, queue and execution objects
 job = worker.job_class.fetch({job.id!r}, connection=worker.connection, serializer=worker.serializer)

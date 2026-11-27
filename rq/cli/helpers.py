@@ -14,6 +14,7 @@ import click
 from redis import Redis
 from redis.sentinel import Sentinel
 
+from rq.admission import AdmissionPolicy
 from rq.defaults import (
     DEFAULT_CONNECTION_CLASS,
     DEFAULT_DEATH_PENALTY_CLASS,
@@ -425,3 +426,20 @@ def pass_cli_config(func):
         return ctx.invoke(func, cli_config, *args[1:], **kwargs)
 
     return update_wrapper(wrapper, func)
+
+
+def get_admission_policy(connection, settings):
+    """Build an optional AdmissionPolicy from CLI settings.
+
+    Returns None unless ``ADMISSION`` is set to a truthy value.  ``ADMISSION`` may
+    be ``True`` or a dict of ``AdmissionPolicy`` options, e.g.
+    ``{'require_registration': True}``.
+    """
+    value = settings.get('ADMISSION')
+    if not value:
+        return None
+    if value is True:
+        return AdmissionPolicy(connection)
+    if isinstance(value, dict):
+        return AdmissionPolicy(connection, **value)
+    raise ValueError('ADMISSION must be True or a dict of AdmissionPolicy options')

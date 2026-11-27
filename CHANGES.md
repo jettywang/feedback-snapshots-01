@@ -1,3 +1,8 @@
+### Unreleased
+
+New Features:
+* Added an optional runtime admission policy for cron and scheduled-job recovery. `AdmissionPolicy` lets operators retire a schedule with `policy.stop(...)`, records decisions that distinguish stopped, completed, in-progress and review outcomes, and holds un-emitted jobs without rewriting jobs that already started. Thanks @selwin!
+
 ### RQ 3.0 (2026-10-28)
 
 New Features:

@@ -16,6 +16,7 @@ from uuid import uuid4
 from redis import ConnectionPool, Redis
 from redis.client import Pipeline
 
+from .admission import AdmissionPolicy, AdmissionResult
 from .connections import parse_connection
 from .defaults import (
     DEFAULT_LOGGING_DATE_FORMAT,
@@ -67,6 +68,7 @@ class RQScheduler:
         name: str | None = None,
         job_class: type[Job] | None = None,
         queue_class: type[Queue] | None = None,
+        admission_policy: AdmissionPolicy | None = None,
     ):
         self._queue_names = set(parse_names(queues))
         self._acquired_locks: set[str] = set()
@@ -76,6 +78,7 @@ class RQScheduler:
         self.serializer = resolve_serializer(serializer)
         self.job_class = job_class if job_class else Job
         self.queue_class = queue_class if queue_class else Queue
+        self.admission_policy = admission_policy
 
         # Identity, stable across the fork (name is pickled to the child process).
         self.name: str = name or uuid4().hex
@@ -264,7 +267,29 @@ class RQScheduler:
             for job_id, job in zip(job_ids, jobs):
                 if job is None:
                     missing_job_ids.append(job_id)
-                elif job.has_rate_limit:
+                    continue
+                if self.admission_policy is not None:
+                    decision = self.admission_policy.evaluate_scheduled_job(job, queue_name=registry.name)
+                    if decision.result is AdmissionResult.IN_PROGRESS:
+                        # Already executing elsewhere: preserve its status, execution and
+                        # schedule record. Its own recovery pass will adjudicate it.
+                        self.log.info(
+                            'Scheduler: leaving already-started job %s untouched (%s)', job.id, decision.reason
+                        )
+                        continue
+                    if not decision.admitted:
+                        # Keep the schedule score for inspection, but do not re-enqueue.
+                        score = self.connection.zscore(registry.key, job.id)
+                        self.admission_policy.hold_job(
+                            job,
+                            registry.name,
+                            score=score,
+                            reason=decision.reason,
+                            decision=decision,
+                        )
+                        registry.remove(job.id, pipeline=self.connection)
+                        continue
+                if job.has_rate_limit:
                     jobs_with_rate_limit.append(job)
                 else:
                     normal_jobs.append(job)

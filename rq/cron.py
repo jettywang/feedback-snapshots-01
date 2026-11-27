@@ -18,6 +18,7 @@ from redis import Redis
 from redis.client import Pipeline
 
 from . import cron_job_registry, cron_scheduler_registry
+from .admission import AdmissionPolicy
 from .defaults import (
     DEFAULT_CRON_JOB_HISTORY_LIMIT,
     DEFAULT_CRON_JOB_HISTORY_TTL,
@@ -135,16 +136,35 @@ class CronJob:
         """Redis key of the sorted set holding IDs of jobs spawned by this cron job"""
         return get_cron_job_history_key(self.name)
 
-    def enqueue(self, connection: Redis) -> Job:
-        """Enqueue this job to its queue, record it in the job history and update the next run time"""
+    def enqueue(
+        self,
+        connection: Redis,
+        *,
+        admission_key: str | None = None,
+        admission_revision: int | None = None,
+    ) -> Job:
+        """Enqueue this job to its queue, record it in the job history and update the next run time.
+
+        ``admission_key`` and ``admission_revision`` are stored on the job so a
+        takeover or late recovery can evaluate the rule that was current when the
+        occurrence was emitted.
+        """
         if not self.func:
             raise ValueError('CronJob has no function to enqueue. It may have been created for monitoring purposes.')
 
         queue = Queue(self.queue_name, connection=connection)
+        meta = dict(self.job_options.get('meta') or {})
+        if admission_key is not None:
+            meta['admission_key'] = admission_key
+        if admission_revision is not None:
+            meta['admission_revision'] = admission_revision
+        job_options = dict(self.job_options)
+        if meta:
+            job_options['meta'] = meta
         # Enqueue the job and record it in one round trip
         with connection.pipeline() as pipeline:
             # Pass args and kwargs explicitly, so the function's kwargs can have the same names as job options
-            job = queue.enqueue(self.func, args=self.args, kwargs=self.kwargs, **self.job_options, pipeline=pipeline)
+            job = queue.enqueue(self.func, args=self.args, kwargs=self.kwargs, **job_options, pipeline=pipeline)
             assert job.enqueued_at is not None  # narrows datetime | None for mypy
             pipeline.zadd(self.job_history_key, {job.id: job.enqueued_at.timestamp()})
             pipeline.zremrangebyrank(self.job_history_key, 0, -(DEFAULT_CRON_JOB_HISTORY_LIMIT + 1))
@@ -203,6 +223,22 @@ class CronJob:
         # Update next run time if interval or cron is set
         if self.interval is not None or self.cron is not None:
             self.next_enqueue_time = self.get_next_enqueue_time()
+
+    def admission_occurrence(self, now: datetime) -> str:
+        """Stable key for the occurrence currently being emitted.
+
+        A fresh scheduler has no persisted timing, so interval jobs derive the
+        occurrence from the current interval bucket.  That keeps a takeover from
+        replaying the same bucket while still allowing the next bucket through.
+        """
+        if self.next_enqueue_time is not None:
+            return self.next_enqueue_time.isoformat()
+        if self.latest_enqueue_time is not None and self.interval:
+            return (self.latest_enqueue_time + timedelta(seconds=self.interval)).isoformat()
+        if self.interval:
+            bucket = int(now.timestamp()) // self.interval
+            return f'interval:{self.interval}:{bucket}'
+        return 'initial'
 
     def to_dict(self) -> dict[str, Any]:
         """Convert CronJob instance to a dictionary for monitoring purposes"""
@@ -294,8 +330,10 @@ class CronScheduler:
         connection: Redis,
         logging_level: str | int = logging.INFO,
         name: str = '',
+        admission_policy: AdmissionPolicy | None = None,
     ):
         self.connection: Redis = connection
+        self.admission_policy = admission_policy
         self._cron_jobs: list[CronJob] = []
         self.hostname: str = socket.gethostname()
         self.pid: int = os.getpid()
@@ -371,14 +409,70 @@ class CronScheduler:
         return self._cron_jobs
 
     def enqueue_jobs(self) -> list[CronJob]:
-        """Enqueue all jobs that are due to run"""
+        """Enqueue all jobs that are due to run, respecting admission rules.
+
+        With an admission policy, each due occurrence gets exactly one decision.
+        A stopped schedule or a held occurrence is recorded but not enqueued;
+        the job's schedule timing still advances so the scheduler keeps moving.
+        """
         enqueue_time = now()
         enqueued_jobs: list[CronJob] = []
         for job in self._cron_jobs:
-            if job.should_run():
+            if not job.should_run():
+                continue
+            occurrence = job.admission_occurrence(enqueue_time)
+            if self.admission_policy is None:
                 job.enqueue(self.connection)
                 job.set_enqueue_time(enqueue_time)
                 enqueued_jobs.append(job)
+                continue
+
+            decision = self.admission_policy.evaluate_cron(job, occurrence)
+            if not decision.admitted:
+                self.log.warning(
+                    'CronScheduler %s: not enqueuing %s (%s): %s',
+                    self.name,
+                    job.name,
+                    decision.result.value,
+                    decision.reason,
+                )
+                job.set_enqueue_time(enqueue_time)
+                continue
+
+            if not self.admission_policy.claim_occurrence(
+                decision.schedule_key,
+                occurrence,
+                result='reserved',
+                rule_revision=decision.rule_revision,
+            ):
+                # Another scheduler claimed this occurrence first. Do not emit it twice.
+                self.log.info(
+                    'CronScheduler %s: occurrence %s for %s was already claimed; skipping',
+                    self.name,
+                    occurrence,
+                    job.name,
+                )
+                job.set_enqueue_time(enqueue_time)
+                continue
+
+            try:
+                enqueued_job = job.enqueue(
+                    self.connection,
+                    admission_key=decision.schedule_key,
+                    admission_revision=decision.rule_revision,
+                )
+            except Exception:
+                self.admission_policy.release_occurrence(decision.schedule_key, occurrence, expected_job_id=None)
+                raise
+            self.admission_policy.update_occurrence(
+                decision.schedule_key,
+                occurrence,
+                job_id=enqueued_job.id,
+                result='enqueued',
+                rule_revision=decision.rule_revision,
+            )
+            job.set_enqueue_time(enqueue_time)
+            enqueued_jobs.append(job)
         return enqueued_jobs
 
     def calculate_sleep_interval(self) -> float:

@@ -6,10 +6,12 @@ import click
 
 from rq.cli.cli import main
 from rq.cli.helpers import (
+    get_admission_policy,
     pass_cli_config,
     read_config_file,
-    # setup_loghandlers_from_args is not used when only --logging-level is present
 )
+
+# setup_loghandlers_from_args is not used when only --logging-level is present
 from rq.cron import CronScheduler
 
 
@@ -45,7 +47,11 @@ def cron(
         logging.getLogger('rq.cron').info('Logging configured via DICT_CONFIG setting.')
 
     try:
-        cron = CronScheduler(connection=cli_config.connection, logging_level=logging_level)
+        cron = CronScheduler(
+            connection=cli_config.connection,
+            logging_level=logging_level,
+            admission_policy=get_admission_policy(cli_config.connection, settings),
+        )
         cron.load_config_from_file(config_path)
         cron.start()
     except KeyboardInterrupt:
