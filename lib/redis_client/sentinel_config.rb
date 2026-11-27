@@ -7,7 +7,7 @@ class RedisClient
     SENTINEL_DELAY = 0.25
     DEFAULT_RECONNECT_ATTEMPTS = 2
 
-    attr_reader :name
+    attr_reader :name, :recorder, :sentinel_address_policy, :node_address_policy
 
     def initialize(
       sentinels:,
@@ -16,6 +16,9 @@ class RedisClient
       role: :master,
       name: nil,
       url: nil,
+      allowed_sentinel_addresses: nil,
+      allowed_node_addresses: nil,
+      recorder: nil,
       **client_config
     )
       unless %i(master replica slave).include?(role.to_sym)
@@ -67,6 +70,10 @@ class RedisClient
       @role = role.to_sym
       @mutex = Mutex.new
       @config = nil
+
+      @sentinel_address_policy = AddressPolicy.new(Array(allowed_sentinel_addresses))
+      @node_address_policy = AddressPolicy.new(Array(allowed_node_addresses))
+      @recorder = recorder || DiscoveryRecorder.new
 
       client_config[:reconnect_attempts] ||= DEFAULT_RECONNECT_ATTEMPTS
       @client_config = client_config || {}
@@ -139,6 +146,12 @@ class RedisClient
       end
     end
 
+    # Invoked by the client immediately before opening a socket to the resolved
+    # Redis node, so an offline driver can observe the final connection target.
+    def record_connection
+      @recorder.record_connection(host, port)
+    end
+
     private
 
     def sentinels_to_configs(sentinels)
@@ -169,8 +182,12 @@ class RedisClient
 
         refresh_sentinels(sentinel_client)
 
+        approve_node!(host, Integer(port), "master")
+
         return Config.new(host: host, port: Integer(port), **@client_config)
       end
+    rescue AddressNotAllowedError
+      raise
     rescue ConnectionError
       raise ConnectionError, "No sentinels available"
     else
@@ -191,22 +208,44 @@ class RedisClient
         next if replicas.empty?
 
         replica = replicas.sample
-        return Config.new(host: replica["ip"], port: Integer(replica["port"]), **@client_config)
+        host = replica["ip"]
+        port = Integer(replica["port"])
+        approve_node!(host, port, "replica")
+
+        return Config.new(host: host, port: port, **@client_config)
       end
+    rescue AddressNotAllowedError
+      raise
     rescue ConnectionError
       raise ConnectionError, "No sentinels available"
     else
       raise ConnectionError, "Couldn't locate a replica for role: #{@name}"
     end
 
+    # A candidate is only serviceable when its origin (network range), role and
+    # approval region all agree. The check is run for every resolution so a
+    # failover never inherits the approval granted to the previous connection.
+    # An out-of-range candidate is recorded and rejected before any connection
+    # is opened to it.
+    def approve_node!(host, port, role)
+      @recorder.record_candidate(host, port, role)
+      return if @node_address_policy.allowed?(host, port)
+
+      @recorder.record_rejection(host, port, role, "address_not_allowed")
+      raise AddressNotAllowedError,
+        "#{role.capitalize} node #{host}:#{port} is outside of the configured allowed node ranges"
+    end
+
     def each_sentinel
       last_error = nil
 
       @sentinel_configs.dup.each do |sentinel_config|
+        @sentinel_address_policy.check!(sentinel_config.host, sentinel_config.port, "Sentinel")
         sentinel_client = sentinel_client(sentinel_config)
         success = true
         begin
-          yield sentinel_client
+          @recorder.record_sentinel(sentinel_config.host, sentinel_config.port, sentinel_command)
+          yield sentinel_client, sentinel_config
         rescue RedisClient::Error => error
           last_error = error
           success = false
@@ -225,6 +264,10 @@ class RedisClient
       raise last_error if last_error
     end
 
+    def sentinel_command
+      @role == :master ? ["SENTINEL", "get-master-addr-by-name", @name] : ["SENTINEL", "replicas", @name]
+    end
+
     def refresh_sentinels(sentinel_client)
       sentinel_response = sentinel_client.call_v(["SENTINEL", "sentinels", @name], &@to_list_of_hash)
       sentinels = sentinel_response.map do |sentinel|
@@ -236,7 +279,18 @@ class RedisClient
         end
       end
 
-      @sentinel_configs.concat sentinels_to_configs(new_sentinels)
+      approved_sentinels = new_sentinels.select do |sentinel|
+        host = sentinel.fetch(:host)
+        port = sentinel.fetch(:port)
+        if @sentinel_address_policy.allowed?(host, port)
+          true
+        else
+          @recorder.record_rejection(host, port, "sentinel", "address_not_allowed")
+          false
+        end
+      end
+
+      @sentinel_configs.concat sentinels_to_configs(approved_sentinels)
     end
   end
 end

@@ -5,6 +5,7 @@ require "redis_client/command_builder"
 require "redis_client/url_config"
 require "redis_client/config"
 require "redis_client/pid_cache"
+require "redis_client/address_policy"
 require "redis_client/sentinel_config"
 require "redis_client/middlewares"
 
@@ -168,6 +169,10 @@ class RedisClient
   CannotConnectError = Class.new(ConnectionError)
 
   FailoverError = Class.new(ConnectionError)
+
+  # Raised when a resolved endpoint (a Sentinel or a Redis node) falls outside of
+  # the address ranges explicitly approved through configuration.
+  AddressNotAllowedError = Class.new(ConnectionError)
 
   TimeoutError = Class.new(ConnectionError)
   ReadTimeoutError = Class.new(TimeoutError)
@@ -851,6 +856,7 @@ class RedisClient
         @raw_connection.reconnect
       end
     else
+      config.record_connection if config.sentinel?
       @raw_connection = @middlewares.connect(config) do
         config.driver.new(
           config,
@@ -890,7 +896,7 @@ class RedisClient
         config.check_role!(results.last.first)
       end
     end
-  rescue FailoverError, CannotConnectError => error
+  rescue FailoverError, AddressNotAllowedError, CannotConnectError => error
     @raw_connection&.close
     error._set_config(config)
     raise error

@@ -168,6 +168,39 @@ Also the `name`, `password`, `username` and `db` for Redis instance can be passe
 redis_config = RedisClient.sentinel(url: "redis://appuser:mysecret@mymaster/10", sentinels: SENTINELS, role: :master)
 ```
 
+#### Restricting connections to approved network ranges
+
+When Sentinels live on a discovery network and Redis nodes on a different one, you
+can pin each kind of endpoint to the CIDR ranges it is allowed to use.
+
+* `allowed_sentinel_addresses` restricts which Sentinels may be queried, including
+the ones discovered through `SENTINEL sentinels`.
+* `allowed_node_addresses` restricts which Redis master/replica nodes may be
+connected to after discovery.
+
+A range accepts CIDR strings (e.g. `10.0.0.0/24`) or `IPAddr` objects. When an
+option is omitted every address is allowed, preserving the default behaviour.
+The check is performed on every resolution, so after a failover the new candidate
+must independently pass origin, role and range validation; approval is never
+carried over from the previous connection. An out-of-range endpoint raises
+`RedisClient::AddressNotAllowedError` before any socket is opened.
+
+```ruby
+redis_config = RedisClient.sentinel(
+  name: "mymaster",
+  sentinels: SENTINELS,
+  role: :master,
+  allowed_sentinel_addresses: ["10.0.0.0/24"],
+  allowed_node_addresses: ["192.168.0.0/16"],
+)
+```
+
+For observability without opening sockets (e.g. tests with an offline driver), the
+config exposes a `recorder` (`RedisClient::SentinelConfig::DiscoveryRecorder`)
+tracking queried Sentinels, considered candidates, rejection reasons and the final
+connection target. A custom recorder responding to the same methods can be passed
+via the `recorder:` option.
+
 ### Consistent Hashing
 
 To horizontally shard keys across multiple servers without relying on clustering, a `RedisClient::HashRing` class is provided:

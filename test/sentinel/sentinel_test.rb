@@ -371,6 +371,75 @@ class RedisClient
       end
     end
 
+    def test_allowed_node_ranges_accept_in_range_master
+      config = new_config(allowed_node_addresses: ["127.0.0.0/8"])
+      sentinel_client_mock = SentinelClientMock.new([
+        [["SENTINEL", "get-master-addr-by-name", "cache"], [Servers::REDIS.host, Servers::REDIS.port.to_s]],
+        sentinel_refresh_command_mock,
+      ])
+
+      stub(config, :sentinel_client, ->(_c) { sentinel_client_mock }) do
+        assert_equal [Servers::REDIS.host, Servers::REDIS.port], [config.host, config.port]
+      end
+
+      candidate = config.recorder.candidates.last
+      assert_equal Servers::REDIS.host, candidate[:host]
+      assert_equal "master", candidate[:role]
+      assert_empty config.recorder.rejections
+    end
+
+    def test_out_of_range_node_is_rejected_before_connection
+      foreign_host = "203.0.113.9"
+      config = new_config(allowed_node_addresses: ["127.0.0.0/8"])
+      sentinel_client_mock = SentinelClientMock.new([
+        [["SENTINEL", "get-master-addr-by-name", "cache"], [foreign_host, Servers::REDIS.port.to_s]],
+        sentinel_refresh_command_mock,
+      ])
+
+      stub(config, :sentinel_client, ->(_c) { sentinel_client_mock }) do
+        error = assert_raises(RedisClient::AddressNotAllowedError) { config.host }
+        assert_includes error.message, foreign_host
+      end
+
+      assert_empty config.recorder.connections
+      rejection = config.recorder.rejections.last
+      assert_equal foreign_host, rejection[:host]
+      assert_equal "address_not_allowed", rejection[:reason]
+    end
+
+    def test_out_of_range_sentinel_is_rejected_before_querying
+      foreign_sentinel = { host: "203.0.113.50", port: Servers::SENTINELS.first.port }
+      config = new_config(
+        sentinels: [foreign_sentinel],
+        allowed_sentinel_addresses: ["127.0.0.0/8"],
+      )
+
+      assert_raises(RedisClient::AddressNotAllowedError) { config.host }
+      assert_empty config.recorder.sentinel_queries
+      assert_empty config.recorder.connections
+    end
+
+    def test_node_approval_is_re_evaluated_after_reset
+      allowed_host = Servers::REDIS.host
+      foreign_host = "203.0.113.9"
+      config = new_config(allowed_node_addresses: ["127.0.0.0/8"])
+      sentinel_client_mock = SentinelClientMock.new([
+        [["SENTINEL", "get-master-addr-by-name", "cache"], [allowed_host, Servers::REDIS.port.to_s]],
+        sentinel_refresh_command_mock,
+        [["SENTINEL", "get-master-addr-by-name", "cache"], [foreign_host, Servers::REDIS.port.to_s]],
+        sentinel_refresh_command_mock,
+      ])
+
+      stub(config, :sentinel_client, ->(_c) { sentinel_client_mock }) do
+        assert_equal allowed_host, config.host
+        config.reset
+        assert_raises(RedisClient::AddressNotAllowedError) { config.host }
+      end
+
+      assert_equal [allowed_host, foreign_host], config.recorder.candidates.map { |c| c[:host] }
+      assert_equal foreign_host, config.recorder.rejections.last[:host]
+    end
+
     private
 
     def response_hash(hash)
