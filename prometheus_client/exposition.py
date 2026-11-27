@@ -22,6 +22,7 @@ from wsgiref.simple_server import make_server, WSGIRequestHandler, WSGIServer
 
 from .openmetrics import exposition as openmetrics
 from .registry import Collector, REGISTRY
+from .scrape import CollectionBudget, ScrapeBudgetExceeded
 from .utils import floatToGoString, parse_version
 
 try:
@@ -113,8 +114,14 @@ class _PrometheusRedirectHandler(HTTPRedirectHandler):
         return new_request
 
 
-def _bake_output(registry, accept_header, accept_encoding_header, params, disable_compression):
-    """Bake output for metrics output."""
+def _generate_output(registry, accept_header, accept_encoding_header, params,
+                     disable_compression) -> Tuple[bytes, List[Tuple[str, str]]]:
+    """Generate the encoded response body and its content headers.
+
+    This does the actual work, including any compression, and is the operation
+    that a :class:`CollectionBudget` bounds. It must not enforce a budget
+    itself, so an entry point can apply the budget exactly once.
+    """
     # Choose the correct plain text format of the output.
     encoder, content_type = choose_encoder(accept_header)
     if 'name[]' in params:
@@ -125,11 +132,38 @@ def _bake_output(registry, accept_header, accept_encoding_header, params, disabl
     if not disable_compression and gzip_accepted(accept_encoding_header):
         output = gzip.compress(output)
         headers.append(('Content-Encoding', 'gzip'))
+    return output, headers
+
+
+def _bake_output(registry, accept_header, accept_encoding_header, params,
+                 disable_compression, budget: Optional[CollectionBudget] = None):
+    """Bake output for metrics output.
+
+    When ``budget`` is supplied the entire generation of the encoded response
+    body (including any compression) runs under the budget, so a scrape only
+    succeeds if the selected exposition format can be produced completely
+    within its collection budget.
+    """
+    if budget is None:
+        output, headers = _generate_output(
+            registry, accept_header, accept_encoding_header, params,
+            disable_compression)
+    else:
+        output, headers = budget.run(lambda: _generate_output(
+            registry, accept_header, accept_encoding_header, params,
+            disable_compression))
     return '200 OK', headers, output
 
 
-def make_wsgi_app(registry: Collector = REGISTRY, disable_compression: bool = False) -> Callable:
-    """Create a WSGI app which serves the metrics from a registry."""
+def make_wsgi_app(registry: Collector = REGISTRY, disable_compression: bool = False,
+                  budget: Optional[CollectionBudget] = None) -> Callable:
+    """Create a WSGI app which serves the metrics from a registry.
+
+    ``budget`` optionally bounds the per-scrape generation time and the total
+    number of concurrent scrapes, protecting worker threads from slow or
+    blocked custom collectors. A scrape that exceeds the budget is answered
+    with ``503 Service Unavailable`` rather than a partial metrics response.
+    """
 
     def prometheus_app(environ, start_response):
         # Prepare parameters
@@ -155,7 +189,14 @@ def make_wsgi_app(registry: Collector = REGISTRY, disable_compression: bool = Fa
             # Note: For backwards compatibility, the URI path for GET is not
             # constrained to the documented /metrics, but any path is allowed.
             # Bake output
-            status, headers, output = _bake_output(registry, accept_header, accept_encoding_header, params, disable_compression)
+            try:
+                status, headers, output = _bake_output(
+                    registry, accept_header, accept_encoding_header, params,
+                    disable_compression, budget)
+            except ScrapeBudgetExceeded as exceeded:
+                status = exceeded.status
+                headers = [('Content-Type', CONTENT_TYPE_PLAIN_0_0_4)]
+                output = exceeded.body
         # Return output
         start_response(status, headers)
         return [output]
