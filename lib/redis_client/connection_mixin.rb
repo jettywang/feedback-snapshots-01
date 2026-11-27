@@ -17,6 +17,10 @@ class RedisClient
       connect
     end
 
+    def _set_batch_progress(progress) # :nodoc:
+      @batch_progress = progress
+    end
+
     def close
       @pending_reads = 0
       nil
@@ -51,38 +55,64 @@ class RedisClient
 
       size = commands.size
       results = Array.new(commands.size)
+      progress = @batch_progress || BatchProgress.new(commands, results: results)
+      results = progress.results
+      @batch_progress = progress
       @pending_reads += size
-      write_multi(commands)
 
-      size.times do |index|
-        timeout = timeouts && timeouts[index]
-        result = read(connection_timeout(timeout))
-        @pending_reads -= 1
+      begin
+        write_multi(commands)
+        progress.write = :complete
+      rescue Exception => error
+        error._set_batch_progress(progress) if error.is_a?(Error)
+        raise
+      end
 
-        # A multi/exec command can return an array of results.
-        # An error from a multi/exec command is handled in Multi#_coerce!.
-        if result.is_a?(Array)
-          result.each do |res|
-            res._set_config(config) if res.is_a?(Error)
+      begin
+        size.times do |index|
+          timeout = timeouts && timeouts[index]
+          result = read(connection_timeout(timeout))
+          @pending_reads -= 1
+
+          # A multi/exec command can return an array of results.
+          # An error from a multi/exec command is handled in Multi#_coerce!.
+          if result.is_a?(Array)
+            result.each do |res|
+              res._set_config(config) if res.is_a?(Error)
+            end
+          elsif result.is_a?(Error)
+            result._set_command(commands[index])
+            result._set_config(config)
+            result._set_retry_attempt(@retry_attempt)
+
+            last_error&._set_next_error(result)
+            first_error ||= result
+            last_error = result
           end
-        elsif result.is_a?(Error)
-          result._set_command(commands[index])
-          result._set_config(config)
-          result._set_retry_attempt(@retry_attempt)
 
-          last_error&._set_next_error(result)
-          first_error ||= result
-          last_error = result
+          results[index] = result
+          progress.record_result(index, result)
         end
-
-        results[index] = result
+      rescue Exception => error
+        error._set_batch_progress(progress) if error.is_a?(Error)
+        raise
       end
 
       if first_error && exception
+        first_error._set_batch_progress(progress) if first_error.is_a?(Error)
         raise first_error
       else
         results
       end
+    ensure
+      @batch_progress = nil
+    end
+
+    # Called by drivers immediately before the first byte of a batch may
+    # leave the client. Anything that fails before this point can still be
+    # retried because no command was sent.
+    def batch_write_started!
+      @batch_progress.write = :started if @batch_progress
     end
 
     def connection_timeout(timeout)

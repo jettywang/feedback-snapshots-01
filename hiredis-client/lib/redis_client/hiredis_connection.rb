@@ -120,6 +120,9 @@ class RedisClient
       commands.each do |command|
         _write(command)
       end
+      # The commands are buffered at this point; flag the transfer before the
+      # flush may push the first byte onto the socket.
+      batch_write_started!
       flush
     rescue SystemCallError, IOError => error
       raise connection_error(error.message)

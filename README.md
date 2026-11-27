@@ -384,6 +384,64 @@ results.each do |result|
 end
 ```
 
+#### Partial results and retry safety
+
+When the connection is interrupted while a pipeline is in flight, the default
+behavior raises a `RedisClient::ConnectionError` and it is impossible to know how
+many commands reached the server. Some may have been applied, some not.
+
+Pass `result_status: true` to receive a `RedisClient::BatchResult` instead. The
+wrapper keeps the normal result array under `#results`, and adds independent
+evidence about the write and the read side of the exchange:
+
+```ruby
+result = redis.pipelined(result_status: true) do |pipeline|
+  pipeline.call("SET", "foo", "bar")
+  pipeline.call("INCR", "baz")
+end
+
+result.status        # => :complete, :failed, :retryable or :pending_confirmation
+result.results       # => ["OK", 1] (unchanged on a complete batch)
+
+if result.retryable?
+  # Nothing was sent: every command can safely be retried.
+  result.retryable_commands # => [["SET", "foo", "bar"], ["INCR", "baz"]]
+elsif result.pending_confirmation?
+  # The write was attempted but the connection was lost before all replies
+  # were parsed. Use whatever replies arrived, and verify the rest.
+  result.available_results    # => ["OK"] (parsed replies only)
+  result.pending_confirmation # => [["INCR", "baz"]] (must be checked by you)
+  result.write_completed?     # => true (the batch did reach the server)
+  result.receive_completed?   # => false
+end
+```
+
+`result_status: true` disables automatic reconnection for that call. Retrying
+transparently would hide the interrupted exchange and could re-apply commands
+whose outcome is unknown, so the caller decides. Command errors are also kept
+as `CommandError` elements (`#status` is `:failed`) rather than raised, so
+every outcome stays inspectable.
+
+The same option is available on `#multi`. For transactions the reply to `EXEC`
+is the only proof that the queued commands ran, so a transaction interrupted
+before that reply reports `:pending_confirmation` with every queued command
+pending and no available results, even if `MULTI` and `QUEUED` were
+acknowledged:
+
+```ruby
+result = redis.multi(result_status: true) do |transaction|
+  transaction.call("SET", "foo", "bar")
+  transaction.call("INCR", "baz")
+end
+
+result.transaction?          # => true
+result.pending_confirmation  # => [["SET", "foo", "bar"], ["INCR", "baz"]]
+result.available_results     # => [] (EXEC never confirmed)
+```
+
+If `EXEC` returns `nil` because a watched key changed, `#status` is
+`:aborted`, `#retryable?` is true and no command was applied.
+
 ### Transactions
 
 You can use [`MULTI/EXEC` to run a number of commands in an atomic fashion](https://redis.io/topics/transactions).

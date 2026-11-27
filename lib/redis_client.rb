@@ -144,9 +144,38 @@ class RedisClient
     end
   end
 
+  # Tracks the two independent halves of a batch exchange: the write side and
+  # the read side. Drivers that perform their own I/O should flag
+  # `write = :started` right before the first byte may leave the socket, so a
+  # failure before that point is reported as retryable instead of pending.
+  class BatchProgress
+    attr_accessor :write, :received_count
+    attr_reader :results
+
+    def initialize(commands, results: nil)
+      @write = :not_started
+      @received_count = 0
+      @results = results || Array.new(commands.size)
+    end
+
+    def record_result(index, result)
+      @results[index] = result
+      @received_count = index + 1
+    end
+  end
+
+  module HasBatchProgress
+    attr_reader :batch_progress
+
+    def _set_batch_progress(progress) # :nodoc:
+      @batch_progress = progress
+    end
+  end
+
   class Error < StandardError
     include HasConfig
     include Retriable
+    include HasBatchProgress
 
     attr_reader :next_error
 
@@ -188,6 +217,280 @@ class RedisClient
     def initialize(message = nil, code = nil)
       super(message)
       @code = code
+    end
+  end
+
+  # Returned by `pipelined` and `multi` when `result_status: true` is passed.
+  #
+  # `#results` keeps the normal structure: for a pipeline it is the array of
+  # replies, for a transaction it is the array returned by `EXEC`. On top of
+  # that, the wrapper records two independent facts:
+  #
+  # * how far the write got (`#write_completed?`, `#write_started?`), and
+  # * how many replies were parsed (`#receive_completed?`, `#received_count`).
+  #
+  # From those facts the caller can tell which results are usable
+  # (`#available_results`), which commands are safe to retry because they were
+  # never sent (`#retryable_commands`), and which commands may have been
+  # applied without a confirmed reply (`#pending_confirmation`).
+  #
+  # For transactions the reply to `EXEC` is the only evidence that the queued
+  # commands ran. Until that reply is parsed every queued command is reported as
+  # pending confirmation, even when `MULTI` and `QUEUED` replies were received.
+  class BatchResult
+    include Enumerable
+
+    # Nothing was written, every command can safely be retried.
+    RETRYABLE = :retryable
+    # Some or all commands may have been applied, but their replies were not
+    # parsed. The caller must verify those commands before retrying them.
+    PENDING_CONFIRMATION = :pending_confirmation
+    # Every reply was parsed and no command error was returned.
+    COMPLETE = :complete
+    # Every reply was parsed, but at least one was a server-side error.
+    # `#results` exposes those errors as elements.
+    FAILED = :failed
+    # A transaction was discarded because `EXEC` returned nil (for example a
+    # watched key changed). No command was applied and the caller can retry the
+    # transaction from scratch.
+    ABORTED = :aborted
+
+    attr_reader :results, :status, :exception, :commands, :received_count, :write_status
+
+    def results=(results)
+      @results = results
+    end
+
+    def expected_replies
+      @expected_replies || @commands.size
+    end
+
+    def expected_replies=(count)
+      @expected_replies = count
+    end
+
+    # Build a status wrapper for a batch that completed successfully.
+    def self.complete(results, commands:, transaction: false, received_count: nil)
+      new(
+        results,
+        status: COMPLETE,
+        commands: commands,
+        transaction: transaction,
+        received_count: received_count || (results ? results.size : 0),
+        write_status: :complete,
+      )
+    end
+
+    # Build a status wrapper for a batch whose replies were all parsed, but
+    # where at least one entry is a `CommandError`. The parsed replies stay
+    # available under `#results`.
+    def self.failed(results, commands:, transaction: false, received_count: nil)
+      new(
+        results,
+        status: FAILED,
+        commands: commands,
+        transaction: transaction,
+        received_count: received_count || (results ? results.size : 0),
+        write_status: :complete,
+      )
+    end
+
+    # A transaction discarded by `EXEC` returning nil: every reply was parsed,
+    # but no command was applied. `received_count` and `expected_replies` refer
+    # to the full MULTI/.../EXEC batch, even though `#commands` only lists the
+    # queued commands that have a result slot.
+    def self.aborted(commands:, received_count: commands.size)
+      result = new(
+        nil,
+        status: ABORTED,
+        commands: commands,
+        transaction: true,
+        received_count: received_count,
+        write_status: :complete,
+      )
+      result.expected_replies = received_count
+      result
+    end
+
+    # Build a status wrapper for a batch interrupted by an error. The status is
+    # derived from the two independent progress counters: a request that never
+    # started writing is retryable, anything else must be verified.
+    def self.interrupted(progress, commands:, exception:, transaction: false)
+      write = progress.write
+
+      if write == :not_started
+        status = RETRYABLE
+        results = []
+        received_count = 0
+      elsif transaction
+        # `MULTI`/`QUEUED` acknowledgements are not command results, so an
+        # interrupted transaction has no usable results at all.
+        status = PENDING_CONFIRMATION
+        results = []
+        received_count = 0
+      elsif progress.received_count >= commands.size
+        results = progress.results
+        status = results.any? { |result| result.is_a?(CommandError) } ? FAILED : COMPLETE
+        received_count = progress.received_count
+      else
+        status = PENDING_CONFIRMATION
+        results = progress.results
+        received_count = progress.received_count
+      end
+
+      new(
+        results,
+        status: status,
+        commands: commands,
+        transaction: transaction,
+        exception: exception,
+        received_count: received_count,
+        write_status: write,
+      )
+    end
+
+    def initialize(
+      results,
+      status:,
+      commands:,
+      transaction: false,
+      exception: nil,
+      received_count: nil,
+      write_status: nil
+    )
+      @results = results
+      @status = status
+      @commands = commands
+      @transaction = transaction
+      @exception = exception
+      @received_count = received_count || 0
+      @write_status = write_status
+    end
+
+    # True when every reply was parsed, regardless of command errors. An
+    # aborted transaction also parsed every reply, but applied nothing.
+    def complete?
+      @status == COMPLETE || @status == FAILED || @status == ABORTED
+    end
+
+    def success?
+      @status == COMPLETE
+    end
+
+    def failed?
+      @status == FAILED
+    end
+
+    def aborted?
+      @status == ABORTED
+    end
+
+    def retryable?
+      @status == RETRYABLE || @status == ABORTED
+    end
+
+    def pending_confirmation?
+      @status == PENDING_CONFIRMATION
+    end
+    alias_method :partial?, :pending_confirmation?
+
+    def needs_verification?
+      pending_confirmation?
+    end
+
+    def transaction?
+      @transaction
+    end
+
+    # Whether every command reached the socket. Judged independently from
+    # reply parsing: a batch can be fully written but only partially read.
+    def write_completed?
+      @write_status == :complete
+    end
+
+    # `:not_started`, `:started` (a transfer was attempted) or `:complete`.
+    def write_started?
+      @write_status == :started || @write_status == :complete
+    end
+
+    # Whether every reply was parsed.
+    def receive_completed?
+      @received_count >= expected_replies
+    end
+
+    # Replies that were actually parsed. Always empty for an interrupted
+    # transaction, because partial `MULTI`/`QUEUED` acknowledgements do not
+    # confirm any command. An aborted transaction has no results at all.
+    def available_results
+      return [] if transaction? && (pending_confirmation? || aborted?)
+
+      return [] unless @results
+
+      @results.first(@received_count)
+    end
+    alias_method :confirmed_results, :available_results
+
+    # Indexes whose result is usable, following the order of `#results`.
+    def available_indexes
+      return [] if transaction? && (pending_confirmation? || aborted?)
+
+      0...@received_count
+    end
+
+    # Commands that may have been applied without a confirmed reply.
+    def pending_confirmation
+      return [] unless pending_confirmation?
+
+      @commands[@received_count..-1] || []
+    end
+    alias_method :pending_commands, :pending_confirmation
+
+    # Indexes whose outcome needs to be verified by the caller.
+    def pending_indexes
+      return [] unless pending_confirmation?
+
+      (@received_count...@commands.size)
+    end
+
+    # Commands that are safe to retry because nothing was written.
+    def retryable_commands
+      return [] unless retryable?
+
+      @commands
+    end
+
+    # The commands represented by `#results`, excluding MULTI/EXEC.
+    def transaction_commands
+      @commands
+    end
+
+    def [](index)
+      @results && @results[index]
+    end
+
+    def size
+      @results ? @results.size : 0
+    end
+
+    def to_a
+      @results
+    end
+
+    def each(&block)
+      @results&.each(&block)
+    end
+
+    def ==(other)
+      other.is_a?(BatchResult) ? @results == other.results : @results == other
+    end
+
+    def deconstruct
+      @results
+    end
+
+    def inspect
+      "#<#{self.class.name} status=#{@status.inspect} received=#{@received_count}/#{@commands.size} " \
+        "write=#{@write_status.inspect} transaction=#{@transaction}>"
     end
   end
 
@@ -507,66 +810,116 @@ class RedisClient
     ensure_connected(retryable: false, &block)
   end
 
-  def pipelined(exception: true)
+  def pipelined(exception: true, result_status: false)
     pipeline = Pipeline.new(@command_builder)
     yield pipeline
 
     if pipeline._size == 0
-      []
-    else
-      results = ensure_connected(retryable: pipeline._retryable?) do |connection|
-        commands = pipeline._commands
+      result = []
+      return result_status ? BatchResult.complete(result, commands: []) : result
+    end
+
+    commands = pipeline._commands
+
+    # When status evidence is requested, never let the connection layer retry
+    # the batch: a retry would hide the interrupted exchange and could re-apply
+    # commands whose fate is unknown. Command errors are also returned as
+    # elements rather than raised, so every outcome stays inspectable.
+    retryable = result_status ? false : pipeline._retryable?
+    raise_on_error = exception && !result_status
+    begin
+      results = ensure_connected(retryable: retryable) do |connection|
         @middlewares.call_pipelined(commands, config) do
-          connection.call_pipelined(commands, pipeline._timeouts, exception: exception)
+          connection.call_pipelined(commands, pipeline._timeouts, exception: raise_on_error)
         end
       end
+    rescue ConnectionError, ProtocolError => error
+      raise unless result_status
 
+      progress = error.batch_progress || BatchProgress.new(commands)
+      return pipeline._coerce_batch!(BatchResult.interrupted(progress, commands: commands, exception: error))
+    end
+
+    if result_status
+      final_results = pipeline._coerce_status!(results)
+
+      batch = if final_results && final_results.any? { |result| result.is_a?(CommandError) }
+        BatchResult.failed(final_results, commands: commands)
+      else
+        BatchResult.complete(final_results, commands: commands)
+      end
+
+      batch
+    else
       pipeline._coerce!(results)
     end
   end
 
-  def multi(watch: nil, &block)
+  def multi(watch: nil, result_status: false, &block)
     transaction = nil
 
-    results = if watch
-      # WATCH is stateful, so we can't reconnect if it's used, the whole transaction
-      # has to be redone.
-      ensure_connected(retryable: false) do |connection|
-        call("WATCH", *watch)
-        begin
-          if transaction = build_transaction(&block)
-            commands = transaction._commands
-            results = @middlewares.call_pipelined(commands, config) do
-              connection.call_pipelined(commands, nil)
-            end.last
-          else
-            call("UNWATCH")
-            []
+    begin
+      results = if watch
+        # WATCH is stateful, so we can't reconnect if it's used, the whole transaction
+        # has to be redone.
+        ensure_connected(retryable: false) do |connection|
+          call("WATCH", *watch)
+          begin
+            if transaction = build_transaction(&block)
+              commands = transaction._commands
+              call_pipelined_for(connection, commands, transaction, exception: !result_status)
+            else
+              call("UNWATCH")
+              []
+            end
+          rescue
+            call("UNWATCH") if connected? && watch
+            raise
           end
-        rescue
-          call("UNWATCH") if connected? && watch
-          raise
         end
-      end
-    else
-      transaction = build_transaction(&block)
-      if transaction._empty?
-        []
       else
-        ensure_connected(retryable: transaction._retryable?) do |connection|
+        transaction = build_transaction(&block)
+        if transaction._empty?
+          []
+        else
           commands = transaction._commands
-          @middlewares.call_pipelined(commands, config) do
-            connection.call_pipelined(commands, nil)
-          end.last
+          # Status mode must not silently retry a transaction: if the EXEC reply
+          # was lost the commands may already have been applied.
+          retryable = result_status ? false : transaction._retryable?
+          ensure_connected(retryable: retryable) do |connection|
+            call_pipelined_for(connection, commands, transaction, exception: !result_status)
+          end
         end
       end
+    rescue ConnectionError, ProtocolError => error
+      raise unless result_status && transaction
+
+      progress = error.batch_progress || BatchProgress.new(transaction._commands)
+      return BatchResult.interrupted(
+        progress,
+        commands: transaction.transaction_commands,
+        exception: error,
+        transaction: true,
+      )
     end
 
-    if transaction
-      transaction._coerce!(results)
-    else
-      results
-    end
+    return [] unless transaction
+    return transaction._coerce!(results) unless result_status
+
+    transaction._batch_result(results)
+  end
+
+  # Runs a transaction's MULTI/.../EXEC batch and records the progress on the
+  # transaction so an interrupted exchange can be reported afterwards. Returns
+  # the reply to `EXEC` (the last item of the batch). In status mode command
+  # errors are not raised, so the caller can inspect the per-command outcome.
+  def call_pipelined_for(connection, commands, transaction, exception: true)
+    @middlewares.call_pipelined(commands, config) do
+      progress = BatchProgress.new(commands)
+      transaction._set_progress(progress)
+      connection._set_batch_progress(progress)
+      connection.call_pipelined(commands, nil, exception: exception)
+    end.last
   end
 
   class PubSub
@@ -683,6 +1036,78 @@ class RedisClient
 
       results
     end
+
+    # Status mode keeps command errors as elements instead of raising, so the
+    # caller can inspect every command's outcome (and the batch status).
+    def _coerce_status!(results)
+      results&.each_with_index do |result, index|
+        if result.is_a?(CommandError)
+          result._set_command(@commands[index + 1])
+          next
+        end
+
+        if @blocks && block = @blocks[index + 1]
+          results[index] = block.call(result)
+        end
+      end
+
+      results
+    end
+
+    def _progress
+      @progress
+    end
+
+    def _set_progress(progress)
+      @progress = progress
+    end
+
+    # Build the status wrapper for a completed transaction. `EXEC` returns
+    # `nil` when the transaction was aborted (e.g. a watched key changed); that
+    # is a confirmed outcome, not an interrupted exchange. An interrupted
+    # exchange instead surfaces the progress recorded by the connection.
+    # Command errors inside the EXEC reply are reported as a failed batch
+    # instead of raising, so the caller still receives the per-command outcome.
+    def _batch_result(results)
+      progress = @progress
+
+      if results.nil?
+        if progress && progress.received_count >= @commands.size
+          # Every reply, including `EXEC` returning nil, was parsed.
+          return BatchResult.aborted(
+            commands: transaction_commands,
+            received_count: progress.received_count,
+          )
+        end
+
+        return BatchResult.interrupted(
+          progress || BatchProgress.new(@commands),
+          commands: transaction_commands,
+          exception: nil,
+          transaction: true,
+        )
+      end
+
+      if results.is_a?(CommandError)
+        # The `EXEC` reply itself was an error (e.g. an ACL error). It stands
+        # for the whole transaction, so it is the single failed entry.
+        results._set_command(["EXEC"])
+        return BatchResult.failed([results], commands: [], transaction: true)
+      end
+
+      coerced = _coerce_status!(results)
+      failed = coerced.any? { |result| result.is_a?(CommandError) }
+
+      if failed
+        BatchResult.failed(coerced, commands: transaction_commands, transaction: true)
+      else
+        BatchResult.complete(coerced, commands: transaction_commands, transaction: true)
+      end
+    end
+
+    def transaction_commands
+      @commands[1..-2] || []
+    end
   end
 
   class Pipeline < Multi
@@ -727,6 +1152,32 @@ class RedisClient
       end
 
       results
+    end
+
+    def _coerce_status!(results)
+      return results unless results
+
+      @blocks&.each_with_index do |block, index|
+        if block
+          results[index] = block.call(results[index])
+        end
+      end
+
+      results
+    end
+
+    # Apply the configured blocks to the replies that were actually parsed and
+    # return the batch with those transformed results. Entries that were never
+    # received stay as `nil` placeholders.
+    def _coerce_batch!(batch)
+      results = batch.results
+      received = batch.received_count
+      @blocks&.each_with_index do |block, index|
+        if block && index < received && results
+          results[index] = block.call(results[index])
+        end
+      end
+      batch
     end
   end
 

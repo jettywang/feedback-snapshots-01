@@ -79,6 +79,9 @@ class RedisClient
       commands.each do |command|
         buffer = RESP3.dump(command, buffer)
       end
+      # Flag the transfer just before the socket write: a failure while
+      # serializing above means nothing was sent and remains retryable.
+      batch_write_started!
       begin
         @io.write(buffer)
       rescue SystemCallError, IOError, OpenSSL::SSL::SSLError => error

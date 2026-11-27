@@ -1,5 +1,7 @@
 # Unreleased
 
+- Added `result_status: true` to `#pipelined` and `#multi`. It returns a `RedisClient::BatchResult` that keeps the normal result array under `#results` and exposes independent write/read evidence: `#retryable?` with `#retryable_commands`, or `#pending_confirmation?` with `#available_results` and `#pending_confirmation`. Transactions are only confirmed by the `EXEC` reply, and `EXEC` returning `nil` is reported as an aborted, retryable batch. Status mode does not auto-retry interrupted batches.
+
 # 0.31.0
 
 - Improved the Ruby driver buffering logic, should trigger GC less, particularly for large response and when using SSL.

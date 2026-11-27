@@ -472,6 +472,66 @@ module RedisClientTests
     assert_equal "3", @redis.call("GET", "foo")
   end
 
+  def test_pipelined_result_status_complete
+    result = @redis.pipelined(result_status: true) do |pipeline|
+      pipeline.call("SET", "foo", "1")
+      pipeline.call("INCR", "counter")
+    end
+
+    assert_instance_of RedisClient::BatchResult, result
+    assert_predicate result, :complete?
+    assert_predicate result, :success?
+    assert_predicate result, :write_completed?
+    assert_predicate result, :receive_completed?
+    assert_equal ["OK", 1], result.results
+    assert_equal ["OK", 1], result.available_results
+    assert_empty result.pending_confirmation
+  end
+
+  def test_pipelined_result_status_keeps_command_errors
+    result = @redis.pipelined(result_status: true) do |pipeline|
+      pipeline.call("DOESNOTEXIST", 12)
+      pipeline.call("SET", "foo", "1")
+    end
+
+    assert_predicate result, :complete?
+    assert_predicate result, :failed?
+    assert_instance_of RedisClient::CommandError, result.results[0]
+    assert_equal "OK", result.results[1]
+    assert_equal "1", @redis.call("GET", "foo")
+  end
+
+  def test_multi_result_status_complete
+    result = @redis.multi(result_status: true) do |transaction|
+      transaction.call("SET", "foo", "1")
+      transaction.call("INCR", "counter")
+    end
+
+    assert_instance_of RedisClient::BatchResult, result
+    assert_predicate result, :transaction?
+    assert_predicate result, :success?
+    assert_equal ["OK", 1], result.results
+  end
+
+  def test_multi_result_status_abort
+    other_client = new_client
+
+    @redis.call("SET", "foo", "1")
+
+    result = @redis.multi(watch: ["foo"], result_status: true) do |transaction|
+      counter = Integer(@redis.call("GET", "foo"))
+      other_client.call("SET", "foo", "2")
+      transaction.call("SET", "foo", (counter + 1).to_s)
+    end
+
+    assert_instance_of RedisClient::BatchResult, result
+    assert_predicate result, :aborted?
+    assert_predicate result, :retryable?
+    assert_nil result.results
+    assert_equal [["SET", "foo", "2"]], result.retryable_commands
+  end
+
+
   def test_empty_transaction_watch_reset
     other_client = new_client
 
