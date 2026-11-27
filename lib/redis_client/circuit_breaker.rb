@@ -19,6 +19,11 @@ class RedisClient
     OpenCircuitError = Class.new(CannotConnectError)
 
     attr_reader :error_timeout, :error_threshold, :error_threshold_timeout, :success_threshold
+    attr_reader :state, :generation, :successes, :last_error
+
+    def error_count
+      @lock.synchronize { @errors.size }
+    end
 
     def initialize(error_threshold:, error_timeout:, error_threshold_timeout: error_timeout, success_threshold: 0)
       @error_threshold = Integer(error_threshold)
@@ -28,6 +33,7 @@ class RedisClient
       @errors = []
       @successes = 0
       @state = :closed
+      @generation = 0
       @lock = Mutex.new
     end
 
@@ -36,27 +42,33 @@ class RedisClient
         refresh_state
       end
 
-      case @state
+      # Snapshot the probe window the command enters in. A command that is still
+      # in flight when the window changes must not have its result applied to the
+      # new window.
+      entry_generation = @generation
+      entry_state = @state
+
+      case entry_state
       when :open
         raise OpenCircuitError, "Too many connection errors happened recently"
       when :closed
         begin
           yield
-        rescue ConnectionError
-          record_error
+        rescue ConnectionError => error
+          record_error(entry_generation, error)
           raise
         end
       when :half_open
         begin
           result = yield
-          record_success
+          record_success(entry_generation)
           result
-        rescue ConnectionError
-          record_error
+        rescue ConnectionError => error
+          record_error(entry_generation, error)
           raise
         end
       else
-        raise "[BUG] RedisClient::CircuitBreaker unexpected @state (#{@state.inspect}})"
+        raise "[BUG] RedisClient::CircuitBreaker unexpected @state (#{entry_state.inspect}})"
       end
     end
 
@@ -75,35 +87,48 @@ class RedisClient
             @errors.clear
             @state = :closed
           end
+          @generation += 1
         end
       end
     end
 
-    def record_error
+    def record_error(entry_generation, error = nil)
       now = RedisClient.now
       expiry = now - @error_threshold_timeout
       @lock.synchronize do
+        # The window this command entered has already ended; keep the failure
+        # observable (it is re-raised to the caller) but do not let it drive a
+        # state transition or pollute the new window's counters.
+        if entry_generation != @generation
+          @last_error = error
+          return
+        end
+
         if @state == :closed
           @errors.reject! { |t| t < expiry }
         end
         @errors << now
+        @last_error = error
         @successes = 0
         if @state == :half_open || (@state == :closed && @errors.size >= @error_threshold)
           @state = :open
+          @generation += 1
         end
       end
     end
 
-    def record_success
-      return unless @state == :half_open
-
+    def record_success(entry_generation)
       @lock.synchronize do
+        # A success from a previous, already closed window cannot close the
+        # current half-open probe.
+        return unless entry_generation == @generation
         return unless @state == :half_open
 
         @successes += 1
         if @successes >= @success_threshold
           @errors.clear
           @state = :closed
+          @generation += 1
         end
       end
     end

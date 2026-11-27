@@ -1,5 +1,11 @@
 # Unreleased
 
+- Bind each in-flight command's result to the circuit breaker probe window it
+  entered. Results arriving after a window switch no longer drive transitions or
+  pollute the new window's counters, while the underlying error stays re-raised
+  and observable via `last_error`. Expose `state`, `generation`, `successes`,
+  `error_count` and `last_error` for observability.
+
 # 0.31.0
 
 - Improved the Ruby driver buffering logic, should trigger GC less, particularly for large response and when using SSL.
