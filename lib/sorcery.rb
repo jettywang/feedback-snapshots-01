@@ -39,6 +39,7 @@ module Sorcery
       require 'sorcery/controller/submodules/brute_force_protection'
       require 'sorcery/controller/submodules/http_basic_auth'
       require 'sorcery/controller/submodules/activity_logging'
+      require 'sorcery/controller/submodules/session_scope'
       require 'sorcery/controller/submodules/external'
     end
   end

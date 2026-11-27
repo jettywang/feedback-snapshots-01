@@ -5,6 +5,11 @@ require 'oauth'
 class SorceryController < ApplicationController
   protect_from_forgery
 
+  class << self
+    attr_accessor :committed_scoped_writes
+  end
+  self.committed_scoped_writes = []
+
   before_action :require_login_from_http_basic, only: [:test_http_basic_auth]
   before_action :require_login, only: %i[
     test_logout
@@ -508,5 +513,68 @@ class SorceryController < ApplicationController
   # Action to test CSRF protection behavior
   def test_csrf_protected_action
     head :ok
+  end
+
+  def test_session_scope_grant
+    expires_at = params[:expires_in] ? Time.now + params[:expires_in].to_f : nil
+    grant = grant_session_scope!(params[:organization], actions: params[:actions], expires_at:)
+    render json: grant.to_h
+  end
+
+  def test_session_scope_revoke
+    revoked = revoke_session_scope!(params[:actions].presence, resource: params[:organization].presence)
+    render json: { revoked: revoked }
+  end
+
+  def test_session_scope_read
+    decide_session_scope(:read)
+  end
+
+  def test_session_scope_write
+    decide_session_scope(:write)
+  end
+
+  def test_session_scope_request
+    decide_session_scope(session_scope_request_action)
+  end
+
+  # Stage a restricted write without committing it, then re-check the grant at
+  # commit time. A narrowing that happens in between must block the commit.
+  def test_session_scope_prepare_write
+    decision = session_scope_decision(:write, resource: params[:organization])
+    if decision.allowed?
+      session[:pending_scoped_write] = { 'organization' => params[:organization], 'payload' => params[:payload] }
+    end
+    render json: decision.to_h, status: decision.http_status
+  end
+
+  def test_session_scope_commit_write
+    pending = session[:pending_scoped_write]
+    return render json: { committed: false, reason: 'no_pending_write' }, status: :unprocessable_entity unless pending
+
+    decision = session_scope_decision(:write, resource: pending['organization'])
+    if decision.allowed?
+      self.class.committed_scoped_writes << pending
+      session.delete(:pending_scoped_write)
+      render json: decision.to_h.merge(committed: true)
+    else
+      render json: decision.to_h.merge(committed: false), status: decision.http_status
+    end
+  end
+
+  def test_session_scope_activity
+    render json: {
+      user_id: current_user&.id,
+      logged_in: logged_in?,
+      last_login_at: current_user&.last_login_at,
+      last_activity_at: current_user&.last_activity_at
+    }
+  end
+
+  private
+
+  def decide_session_scope(action)
+    decision = session_scope_decision(action, resource: params[:organization])
+    render json: decision.to_h, status: decision.http_status
   end
 end

@@ -53,8 +53,11 @@ module Sorcery
           # To be used as a before_action, before require_login
           def validate_session
             session_to_use = Config.session_timeout_from_last_action ? session[:last_action_time] : session[:login_time]
-            if (session_to_use && sorcery_session_expired?(session_to_use.to_time)) || sorcery_session_invalidated?
+            expired = session_to_use && sorcery_session_expired?(session_to_use.to_time)
+            invalidated = sorcery_session_invalidated?
+            if expired || invalidated
               reset_sorcery_session
+              record_session_termination_reason(invalidated ? :session_invalidated : :session_expired)
               remove_instance_variable :@current_user if defined? @current_user
             else
               session[:last_action_time] = Time.now.in_time_zone
@@ -63,6 +66,16 @@ module Sorcery
 
           def sorcery_session_expired?(time)
             Time.now.in_time_zone - time > Config.session_timeout
+          end
+
+          # Keeps a small, business-readable marker when a session ends because
+          # of a timeout or a server-side invalidation. It is set after the
+          # session is reset so it survives into the next request. SessionScope
+          # uses it; apps without that submodule simply carry one session key.
+          def record_session_termination_reason(reason)
+            return unless Config.submodules.include?(:session_scope)
+
+            session[Sorcery::Controller::Submodules::SessionScope::TERMINATION_SESSION_KEY] = reason
           end
 
           # Use login time if present, otherwise use last action time.

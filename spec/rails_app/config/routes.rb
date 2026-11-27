@@ -82,5 +82,15 @@ AppRoot::Application.routes.draw do
     get :test_create_from_provider_with_block
     get :login_at_test_with_state
     post :test_csrf_protected_action
+    get :test_session_scope_grant
+    post :test_session_scope_grant
+    get :test_session_scope_revoke
+    post :test_session_scope_revoke
+    get :test_session_scope_read
+    get :test_session_scope_write
+    post :test_session_scope_prepare_write
+    post :test_session_scope_commit_write
+    get :test_session_scope_request
+    get :test_session_scope_activity
   end
 end

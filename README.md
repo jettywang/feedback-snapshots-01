@@ -190,6 +190,26 @@ Inside the initializer, the comments will tell you what each setting does.
 - Optionally session timeout will be calculated from last user action
 - Optionally enable a method to clear all active sessions, expects an `invalidate_sessions_before` datetime attribute.
 
+**Session Scope** (see [lib/sorcery/controller/submodules/session_scope.rb](https://github.com/Sorcery/sorcery/blob/main/lib/sorcery/controller/submodules/session_scope.rb)):
+
+- Narrow, session-bound grants of individual actions on a single resource, for example a support agent temporarily viewing one organization
+- Grants live only in the login session, so they never persist to the user record and are dropped with the session
+- Reads never imply writes: every check is re-evaluated, so a write must be authorized again at submit time
+- Revoking one action keeps the login session and its activity logging untouched
+- Decisions carry a business-readable reason for subject changes, revocation, timeout and out-of-scope requests
+
+```ruby
+# In the login path, after the agent has picked an organization:
+grant_session_scope!(organization, actions: [:read])
+
+# In a before_action, for both reads and staged writes:
+decision = session_scope_decision(:write, resource: organization)
+head decision.http_status unless decision.allowed? # :ok, :unauthorized or :forbidden
+
+# Narrow the grant when the business revokes the write allowance:
+revoke_session_scope!([:write], resource: organization)
+```
+
 **Brute Force Protection** (see [lib/sorcery/model/submodules/brute_force_protection.rb](https://github.com/Sorcery/sorcery/blob/main/lib/sorcery/model/submodules/brute_force_protection.rb)):
 
 - Brute force login hammering protection
