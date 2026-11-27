@@ -3,6 +3,7 @@
 require "redis_client/version"
 require "redis_client/command_builder"
 require "redis_client/url_config"
+require "redis_client/tls_config"
 require "redis_client/config"
 require "redis_client/pid_cache"
 require "redis_client/sentinel_config"
@@ -498,6 +499,23 @@ class RedisClient
     @raw_connection&.revalidate
   end
 
+  # Trust version the underlying raw connection was established against, or nil
+  # when not connected / not using versioned TLS. Lets callers verify the actual
+  # connection's trust version before relying on a borrowed connection.
+  def connection_tls_version
+    @raw_connection&.tls_version
+  end
+
+  # Ensures the borrowed connection is live and negotiated against an approved
+  # trust version before any command is issued. When versioned TLS is in use and
+  # the pooled connection's trust version is no longer borrowable, this triggers
+  # a reconnect against the current approved version. Returns the trust version
+  # the connection is now effectively using (nil for non-versioned TLS).
+  def verify_connection!
+    raw_connection if config.versioned_tls?
+    connection_tls_version
+  end
+
   def close
     @raw_connection&.close
     self
@@ -846,11 +864,12 @@ class RedisClient
   def connect
     @pid = PIDCache.pid
 
-    if @raw_connection&.revalidate
+    if @raw_connection && !@raw_connection.stale_tls? && @raw_connection.revalidate
       @middlewares.connect(config) do
         @raw_connection.reconnect
       end
     else
+      @raw_connection&.close
       @raw_connection = @middlewares.connect(config) do
         config.driver.new(
           config,
@@ -860,6 +879,7 @@ class RedisClient
         )
       end
     end
+    @raw_connection.tls_version = config.tls_version
     @last_used_at = RedisClient.now
     @raw_connection.retry_attempt = @retry_attempt
 

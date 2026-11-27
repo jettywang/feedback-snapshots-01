@@ -2,7 +2,7 @@
 
 class RedisClient
   module ConnectionMixin
-    attr_accessor :retry_attempt
+    attr_accessor :retry_attempt, :tls_version
     attr_reader :config
 
     def initialize(config)
@@ -10,6 +10,7 @@ class RedisClient
       @retry_attempt = nil
       @config = config
       @server_key = nil
+      @tls_version = config.tls_version
     end
 
     def reconnect
@@ -26,9 +27,25 @@ class RedisClient
       if @pending_reads > 0 || @server_key != @config.server_key
         close
         false
+      elsif stale_tls?
+        # The connection was established against a trust version that is no
+        # longer allowed to be borrowed. Close it so the caller reconnects
+        # against the current approved version.
+        close
+        false
       else
         connected?
       end
+    end
+
+    # True when the connection's trust version no longer matches what the
+    # configuration allows for an idle/borrowed connection. Unlike a plain
+    # socket failure, this requires a brand-new connection negotiated against
+    # the current version rather than reusing the stale SSL session.
+    def stale_tls?
+      return false unless @config.versioned_tls?
+
+      !@config.tls_version_borrowable?(@tls_version, checked_out: @pending_reads > 0)
     end
 
     def call(command, timeout)

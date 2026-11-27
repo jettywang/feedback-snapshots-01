@@ -128,7 +128,7 @@ class RedisClient
       end
 
       if @config.ssl
-        socket = OpenSSL::SSL::SSLSocket.new(socket, @config.ssl_context)
+        socket = OpenSSL::SSL::SSLSocket.new(socket, @config.ssl_context(@tls_version))
         socket.hostname = @config.host
         loop do
           case status = socket.connect_nonblock(exception: false)

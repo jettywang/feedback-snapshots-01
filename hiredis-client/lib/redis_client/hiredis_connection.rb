@@ -55,7 +55,7 @@ class RedisClient
 
     def reconnect
       reconnected = begin
-        _reconnect(@config.path, @config.ssl_context)
+        _reconnect(@config.path, @config.ssl_context(@tls_version))
       rescue SystemCallError => error
         host = @config.path || "#{@config.host}:#{@config.port}"
         error_code = error.class.name.split("::").last
@@ -133,7 +133,7 @@ class RedisClient
 
     def connect
       @server_key = @config.server_key
-      _connect(@config.path, @config.host, @config.port, @config.ssl_context)
+      _connect(@config.path, @config.host, @config.port, @config.ssl_context(@tls_version))
     rescue SystemCallError => error
       host = @config.path || "#{@config.host}:#{@config.port}"
       error_code = error.class.name.split("::").last

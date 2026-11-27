@@ -2,6 +2,7 @@
 
 require "openssl"
 require "uri"
+require "redis_client/tls_config"
 
 class RedisClient
   class Config
@@ -15,7 +16,8 @@ class RedisClient
     module Common
       attr_reader :db, :id, :ssl, :ssl_params, :command_builder, :inherit_socket,
         :connect_timeout, :read_timeout, :write_timeout, :driver, :protocol,
-        :middlewares_stack, :custom, :circuit_breaker, :driver_info, :idle_timeout
+        :middlewares_stack, :custom, :circuit_breaker, :driver_info, :idle_timeout,
+        :trust_registry
 
       alias_method :ssl?, :ssl
 
@@ -32,6 +34,8 @@ class RedisClient
         ssl: nil,
         custom: {},
         ssl_params: nil,
+        tls: nil,
+        tls_retain: :in_flight,
         driver: nil,
         protocol: 3,
         client_implementation: RedisClient,
@@ -51,15 +55,23 @@ class RedisClient
         end
 
         @id = id
-        @ssl = ssl || false
 
-        @ssl_params = ssl_params
+        @driver = driver ? RedisClient.driver(driver) : RedisClient.default_driver
+
+        if tls
+          @trust_registry = build_trust_registry(tls, tls_retain)
+          @ssl = true
+          @ssl_params = nil
+        else
+          @trust_registry = nil
+          @ssl = ssl || false
+          @ssl_params = ssl_params
+        end
+
         @connect_timeout = connect_timeout
         @read_timeout = read_timeout
         @write_timeout = write_timeout
         @idle_timeout = idle_timeout
-
-        @driver = driver ? RedisClient.driver(driver) : RedisClient.default_driver
 
         @custom = custom
 
@@ -176,6 +188,29 @@ class RedisClient
         @reconnect_attempts && @reconnect_attempts[attempt]
       end
 
+      def build_trust_registry(tls, retain)
+        entries =
+          case tls
+          when Array then tls
+          else [tls]
+          end
+
+        entries = entries.map do |entry|
+          case entry
+          when TLSConfig
+            entry
+          when Hash
+            version = entry.fetch(:version)
+            TLSConfig.new(version: version, ssl_params: entry.fetch(:ssl_params), driver: @driver)
+          else
+            raise ArgumentError,
+              "tls: entries must be a Hash or RedisClient::TLSConfig, got: #{entry.class}"
+          end
+        end
+
+        TrustRegistry.new(entries, retain: retain)
+      end
+
       def retry_connecting?(attempt, _error)
         if @reconnect_attempts
           if (pause = @reconnect_attempts[attempt])
@@ -188,10 +223,54 @@ class RedisClient
         false
       end
 
-      def ssl_context
-        if ssl
+      def ssl_context(version = nil)
+        if @trust_registry
+          @trust_registry.ssl_context(version)
+        elsif ssl
           @driver.ssl_context(@ssl_params || {})
         end
+      end
+
+      # The trust version freshly established connections are negotiated with.
+      def tls_version
+        @trust_registry&.current_version
+      end
+
+      # All trust versions currently retained (the approved one plus any
+      # superseded versions still reusable according to the retain policy).
+      def tls_versions
+        @trust_registry&.versions || []
+      end
+
+      def tls_retain
+        @trust_registry&.retain
+      end
+
+      def versioned_tls?
+        !@trust_registry.nil?
+      end
+
+      # Rotates the approved trust root.
+      #
+      # +entry+ is built (and its SSL context validated) before the registry is
+      # mutated, so a broken certificate configuration raises here without ever
+      # entering the set of approved instances.
+      def rotate_tls!(version:, ssl_params:)
+        unless @trust_registry
+          raise ArgumentError, "TLS rotation is only available for versioned TLS configurations (use `tls:`)"
+        end
+
+        entry = TLSConfig.new(version: version, ssl_params: ssl_params, driver: @driver)
+        @trust_registry.rotate(entry)
+        version
+      end
+
+      # Whether a raw connection established against +version+ may be borrowed.
+      # +checked_out+ reflects whether the caller currently holds the connection.
+      def tls_version_borrowable?(version, checked_out: false)
+        return true unless @trust_registry
+
+        @trust_registry.borrowable?(version, checked_out: checked_out)
       end
 
       def server_url

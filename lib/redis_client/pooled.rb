@@ -27,6 +27,10 @@ class RedisClient
         client.connect_timeout = connect_timeout
         client.read_timeout = read_timeout
         client.write_timeout = write_timeout
+        # Verify the borrowed connection's trust version eagerly: a connection
+        # established against a superseded trust root is reconnected against the
+        # current approved version before the caller issues any command.
+        client.verify_connection!
         yield client
       end
     rescue ConnectionPool::TimeoutError => error
@@ -47,6 +51,26 @@ class RedisClient
 
     def size
       pool.size
+    end
+
+    def tls_version
+      @config.tls_version
+    end
+
+    def tls_versions
+      @config.tls_versions
+    end
+
+    def tls_retain
+      @config.tls_retain
+    end
+
+    def versioned_tls?
+      @config.versioned_tls?
+    end
+
+    def rotate_tls!(**kwargs)
+      @config.rotate_tls!(**kwargs)
     end
 
     methods = %w(pipelined multi pubsub call call_v call_once call_once_v blocking_call blocking_call_v)

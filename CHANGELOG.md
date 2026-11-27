@@ -1,5 +1,7 @@
 # Unreleased
 
+- Add versioned TLS configurations (`tls:` + `tls_retain:`) and `Config#rotate_tls!` for smooth trusted-root certificate rotation. Pooled connections record their negotiated trust version and are revalidated on checkout according to the retain policy (`:none`, `:in_flight`, or `:idle`); invalid certificate configurations raise before entering the approved set.
+
 # 0.31.0
 
 - Improved the Ruby driver buffering logic, should trigger GC less, particularly for large response and when using SSL.

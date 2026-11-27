@@ -89,6 +89,46 @@ redis.call("GET", "mykey")
 - `protocol:` The version of the RESP protocol to use. Default to `3`.
 - `custom`: A user-owned value ignored by `redis-client` but available as `Config#custom`. This can be used to hold middleware configurations and other user-specific metadata.
 
+#### Versioned TLS (rotating trusted root certificates)
+
+When you replace the trusted root certificate (CA), a connection pool can absorb the change without downtime by tracking **versioned** TLS configurations. Pass `tls:` instead of the plain `ssl`/`ssl_params` pair; each entry pairs an immutable `version` with the usual `ssl_params`:
+
+```ruby
+redis_config = RedisClient.config(
+  host: "redis.example.com",
+  tls: { version: "ca-2026", ssl_params: { ca_file: "/etc/ssl/ca-2026.crt", verify_mode: OpenSSL::SSL::VERIFY_PEER } },
+  tls_retain: :in_flight,
+)
+pool = redis_config.new_pool(size: 5)
+```
+
+`tls_retain` controls how long connections established against an older trust version may keep being reused:
+
+- `:in_flight` (default) — a connection already checked out when the rotation happens may finish its current command, but once returned to the pool it reconnects against the current version on the next borrow.
+- `:none` — every borrow after a rotation reconnects against the current version. Existing connections are not reused at all.
+- `:idle` — connections sitting idle in the pool keep being reused across borrows until they are closed or drained; only freshly established connections use the new version.
+
+Rotate the trusted root at runtime with `rotate_tls!`. The new SSL context is built and validated *before* the approved set is changed, so an invalid certificate configuration raises and never replaces a working version:
+
+```ruby
+begin
+  pool.rotate_tls!(version: "ca-2027", ssl_params: { ca_file: "/etc/ssl/ca-2027.crt", verify_mode: OpenSSL::SSL::VERIFY_PEER })
+rescue OpenSSL::SSL::SSLError => error
+  # The previous approved version stays in effect; fix the config and retry.
+end
+
+pool.tls_version      # => "ca-2027" (the version new connections negotiate)
+pool.tls_versions     # => ["ca-2026", "ca-2027"] (versions still retained)
+```
+
+Every pooled connection records the trust version it was actually negotiated with. On checkout the pool revalidates it against the active policy, and `RedisClient#connection_tls_version` lets you verify the real connection's trust version before relying on it:
+
+```ruby
+pool.with do |client|
+  client.connection_tls_version # => "ca-2027"
+end
+```
+
 ### Sentinel support
 
 The client is able to perform automatic failover by using [Redis Sentinel](https://redis.io/docs/latest/operate/oss_and_stack/management/sentinel/).
