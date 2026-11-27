@@ -436,6 +436,27 @@ end
 The caller is responsible for reconnecting if the connection is lost and to resubscribe to
 all channels.
 
+#### Restricted subscription view
+
+When framework code passes a subscription to application callbacks or plugins, exposing the
+full `PubSub` object lets the callee issue arbitrary subscription commands or close the shared
+connection. `PubSub#reader` returns a restricted view that is only allowed to read
+notifications and to end its own reading:
+
+```ruby
+pubsub = redis.pubsub
+pubsub.call("SUBSCRIBE", "channel-1")
+
+reader = pubsub.reader
+handle_notification(reader) # the callback can only read or close its own view
+```
+
+The reader exposes `next_event` (including the `nil` timeout behavior) and `close`. It does
+not expose `call` or `call_v`, so it cannot subscribe, unsubscribe, or send any other command.
+Closing a reader only marks that view as finished; the underlying connection stays open and
+the owning `PubSub` object (as well as any other readers) keeps working. The connection is
+only shut down when the manager itself calls `PubSub#close`.
+
 ## Production
 
 ### Instrumentation and Middlewares

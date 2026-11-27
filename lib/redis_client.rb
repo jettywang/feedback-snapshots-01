@@ -601,9 +601,48 @@ class RedisClient
       nil
     end
 
+    # Builds a restricted view of this subscription suitable for handing to
+    # framework callbacks and application plugins.
+    #
+    # The returned object can only read notifications with #next_event and end
+    # its own reading with #close. It has no access to the subscription
+    # management commands (#call, #call_v), and closing it only marks the view
+    # as finished: the underlying connection stays owned by this PubSub object
+    # and keeps working for the other readers and for the manager.
+    def reader
+      Reader.new(self)
+    end
+
     private
 
     attr_reader :raw_connection
+
+    # Restricted subscription view. See RedisClient::PubSub#reader.
+    class Reader
+      def initialize(pubsub)
+        @pubsub = pubsub
+        @closed = false
+      end
+
+      # Reads the next notification, delegating to the owning subscription.
+      # Returns nil on read timeout, mirroring PubSub#next_event.
+      def next_event(timeout = nil)
+        raise ConnectionError, "Subscription reader was closed" if @closed
+
+        @pubsub.next_event(timeout)
+      end
+
+      # Ends this reader only. The owning PubSub connection is left open, so
+      # the manager and any other readers are unaffected.
+      def close
+        @closed = true
+        self
+      end
+
+      def closed?
+        @closed
+      end
+    end
   end
 
   class Multi
