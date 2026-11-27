@@ -253,11 +253,13 @@ module Rollbar
         begin
           if payload.is_a?(String)
             # The final payload has already been built.
-            send_body(payload)
+            body = body_with_current_scrub_policy(payload)
+
+            send_body(body) if body
           else
             item = build_item_with_payload(payload)
 
-            process_item(item)
+            process_item(item) if apply_current_scrub_policy(item.payload)
           end
         rescue StandardError => e
           report_internal_error(e)
@@ -894,6 +896,10 @@ module Rollbar
     end
 
     def process_async_item(item)
+      # Stamp the payload with the current scrub policy version, so the
+      # delayed sender can detect payloads enqueued under a stale policy.
+      configuration.scrub_policy.stamp(item.payload)
+
       # Send async payloads as JSON string when async_json_payload is set.
       payload = configuration.async_json_payload ? item.dump : item.payload
 
@@ -924,6 +930,52 @@ module Rollbar
             "item: #{Rollbar::JSON.dump(item.payload)}"
         end
       end
+    end
+
+    # Applies the current scrub policy to a delayed payload. Returns the
+    # payload to send, or nil when the item is deferred. Payloads stamped
+    # with a stale policy version are re-scrubbed and re-stamped when the
+    # current policy is strict and async_stale_policy is :reprocess;
+    # payloads without policy state are sent as they are.
+    def apply_current_scrub_policy(payload)
+      policy = configuration.scrub_policy
+      return payload unless policy.strict?
+
+      stamped = policy.version_of(payload)
+      return payload if stamped.nil? || stamped >= policy.version
+
+      if configuration.async_stale_policy == :defer
+        log_warning '[Rollbar] Deferring item scrubbed with stale scrub policy ' \
+          "version #{stamped} (current version #{policy.version})"
+        return nil
+      end
+
+      log_info '[Rollbar] Re-scrubbing item with stale scrub policy version ' \
+        "#{stamped} (current version #{policy.version})"
+      rescrub_payload_data(payload)
+      policy.stamp(payload)
+
+      payload
+    end
+
+    def body_with_current_scrub_policy(body)
+      return body unless configuration.scrub_policy.strict?
+
+      payload = apply_current_scrub_policy(Rollbar::JSON.load(body))
+
+      payload && Rollbar::JSON.dump(payload)
+    end
+
+    def rescrub_payload_data(payload)
+      key = payload.key?('data') ? 'data' : :data
+      data = payload[key]
+      return unless data.is_a?(Hash)
+
+      payload[key] = Rollbar::Scrubbers::Params.call(
+        :params => data,
+        :config => configuration.scrub_fields,
+        :whitelist => configuration.scrub_whitelist
+      )
     end
 
     alias log_warning log_warn

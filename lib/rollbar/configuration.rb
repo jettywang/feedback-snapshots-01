@@ -1,4 +1,5 @@
 require 'logger'
+require 'rollbar/scrub_policy'
 
 module Rollbar
   class Configuration
@@ -9,6 +10,7 @@ module Rollbar
                   :async_handler,
                   :async_json_payload,
                   :async_skip_report_handler,
+                  :async_stale_policy,
                   :backtrace_cleaner,
                   :branch,
                   :capture_uncaught,
@@ -80,6 +82,7 @@ module Rollbar
                 :enable_rails_error_subscriber,
                 :logger_level,
                 :project_gem_paths,
+                :scrub_policy,
                 :send_extra_frame_data,
                 :transform,
                 :use_eventmachine
@@ -110,6 +113,7 @@ module Rollbar
       @dj_threshold = 0
       @dj_use_scoped_block = false
       @async_skip_report_handler = nil
+      @async_stale_policy = :reprocess
       @enabled = nil # set to true when configure is called
       @endpoint = DEFAULT_ENDPOINT
       @environment = nil
@@ -187,6 +191,7 @@ module Rollbar
       @use_payload_access_token = false
 
       @configured_options = ConfiguredOptions.new(self)
+      @scrub_policy = ScrubPolicy.new
     end
 
     def initialize_copy(orig)
@@ -223,6 +228,25 @@ module Rollbar
       end
 
       self
+    end
+
+    # Updates the scrub (masking) options and bumps the scrub policy
+    # version, so delayed async payloads enqueued under the previous
+    # policy are reprocessed (or deferred) before transmission instead
+    # of leaking fields masked only by the new policy.
+    #
+    # Options: :scrub_fields, :scrub_whitelist, :scrub_headers and
+    # :strict (default true). A non-strict update lets already queued
+    # payloads be sent as they are; a strict one applies
+    # #async_stale_policy (:reprocess or :defer) to them.
+    def update_scrub_policy(options = {})
+      self.scrub_fields = options[:scrub_fields] if options.key?(:scrub_fields)
+      if options.key?(:scrub_whitelist)
+        self.scrub_whitelist = options[:scrub_whitelist]
+      end
+      self.scrub_headers = options[:scrub_headers] if options.key?(:scrub_headers)
+
+      scrub_policy.update(:strict => options.fetch(:strict, true))
     end
 
     def use_active_job(options = {})
