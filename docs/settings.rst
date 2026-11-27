@@ -171,6 +171,23 @@ signing of tokens. When using Auth0 for example you might set this to
 this field is excluded from the token backend and is not used during
 validation.
 
+The JWK set is cached for 300 seconds and the HTTP request has a 5 second
+timeout. If the JWK source becomes temporarily unavailable, a token whose
+``kid`` is present in the last good key set is still verified with that cached
+key. A token with an unknown ``kid`` cannot be verified and fails until the
+source recovers; a refresh issued with an unknown key is not attempted from a
+partial or merged cache. A successful refresh replaces the complete key set, so
+a key removed by the issuer is retired immediately.
+
+:class:`~rest_framework_simplejwt.jwks.ResilientJWKClient` exposes
+``cache_status()`` for diagnostics. Its ``reads`` list records the ``kid``,
+whether the key was served from ``cache`` or ``network``, the outcome, and a
+category: ``fresh``, ``refreshed``, ``source_unavailable`` or ``retired``.
+The available metrics are also emitted as structured log events on the
+``rest_framework_simplejwt.jwks`` logger (``jwks_cache_hit``,
+``jwks_refresh_ok``, ``jwks_refresh_failed``, ``jwks_stale_key_served`` and
+``jwks_key_not_found``).
+
 ``LEEWAY``
 ----------
 

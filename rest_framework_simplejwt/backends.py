@@ -22,7 +22,15 @@ try:
 
     JWK_CLIENT_AVAILABLE = True
 except ImportError:
+    PyJWKClient = None  # type: ignore[assignment,misc]
     JWK_CLIENT_AVAILABLE = False
+
+if JWK_CLIENT_AVAILABLE:
+    from .jwks import ResilientJWKClient
+
+    # Keep the historical name as the patch point used by downstream
+    # projects and tests.  Only the JWKS retrieval/cache layer is replaced.
+    PyJWKClient = ResilientJWKClient
 
 ALLOWED_ALGORITHMS = {
     "HS256",
