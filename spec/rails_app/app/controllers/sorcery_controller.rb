@@ -13,6 +13,7 @@ class SorceryController < ApplicationController
     test_should_be_logged_in
     some_action
   ]
+  before_action -> { require_external_grant(:admin_console) }, only: %i[test_admin_action]
 
   def index; end
 
@@ -336,6 +337,32 @@ class SorceryController < ApplicationController
     else
       redirect_to 'blu', alert: 'Failed!'
     end
+  end
+
+  def test_login_from_example
+    if (@user = login_from(:example))
+      redirect_to 'bla', notice: 'Success!'
+    else
+      redirect_to 'blu', alert: 'Failed!'
+    end
+  end
+
+  def test_login_from_example_provider
+    if (@user = login_from(:example_provider))
+      redirect_to 'bla', notice: 'Success!'
+    else
+      redirect_to 'blu', alert: 'Failed!'
+    end
+  end
+
+  def test_admin_action
+    head :ok
+  end
+
+  # Overridable hook from the external_grants submodule, rendered so specs can
+  # tell the distinguishable denial reasons apart.
+  def external_grant_access_denied(purpose, reason)
+    render plain: "denied #{purpose}: #{reason}", status: :forbidden
   end
 
   def test_return_to_with_external_twitter

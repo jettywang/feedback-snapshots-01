@@ -82,6 +82,12 @@ create_from(provider) # Create the user in the local app database
 build_from(provider) # Build user instance using user_info_mappings
 ```
 
+### External Grants
+
+```ruby
+require_external_grant(purpose) # A before action guarding actions that need an approved external grant
+```
+
 ### Remember Me
 
 ```ruby
@@ -211,6 +217,13 @@ Inside the initializer, the comments will tell you what each setting does.
 - OAuth1 and OAuth2 support (currently: Twitter, Facebook, Github, Google, Heroku, LinkedIn, VK, Salesforce)
 - Configurable database column names
 - Authentications table
+
+**External Grants** (see [lib/sorcery/controller/submodules/external_grants.rb](https://github.com/Sorcery/sorcery/blob/main/lib/sorcery/controller/submodules/external_grants.rb)):
+
+- Limited-authorization entry from the provider callback to business actions; regular external login is unaffected
+- Only purposes listed in `config.external_grant_purposes` are recorded and handed to downstream actions
+- Access is derived from the approved purpose, the session's provider and the current scope
+- Grants move through distinguishable unconfirmed/granted/stopped states; a failed grant sync never breaks the login
 
 ## Planned Features
 

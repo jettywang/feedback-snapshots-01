@@ -25,6 +25,7 @@ module Sorcery
       require 'sorcery/model/submodules/activity_logging'
       require 'sorcery/model/submodules/brute_force_protection'
       require 'sorcery/model/submodules/external'
+      require 'sorcery/model/submodules/external_grants'
       require 'sorcery/model/submodules/magic_login'
     end
   end
@@ -40,6 +41,7 @@ module Sorcery
       require 'sorcery/controller/submodules/http_basic_auth'
       require 'sorcery/controller/submodules/activity_logging'
       require 'sorcery/controller/submodules/external'
+      require 'sorcery/controller/submodules/external_grants'
     end
   end
 

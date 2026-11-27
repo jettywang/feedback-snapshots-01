@@ -42,6 +42,9 @@ AppRoot::Application.routes.draw do
     get :test_login_from_line
     get :test_login_from_discord
     get :test_login_from_battlenet
+    get :test_login_from_example
+    get :test_login_from_example_provider
+    get :test_admin_action
     get :login_at_test
     get :login_at_test_twitter
     get :login_at_test_facebook
