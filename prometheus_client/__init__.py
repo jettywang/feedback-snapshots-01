@@ -2,7 +2,7 @@
 
 from . import (
     exposition, gc_collector, metrics, metrics_core, platform_collector,
-    process_collector, registry,
+    process_collector, registry, safe_textfile,
 )
 from .exposition import (
     CONTENT_TYPE_LATEST, CONTENT_TYPE_PLAIN_0_0_4, CONTENT_TYPE_PLAIN_1_0_0,
@@ -20,6 +20,9 @@ from .metrics_core import Metric
 from .platform_collector import PLATFORM_COLLECTOR, PlatformCollector
 from .process_collector import PROCESS_COLLECTOR, ProcessCollector
 from .registry import CollectorRegistry, REGISTRY
+from .safe_textfile import (
+    CommitReceipt, CommitStatus, GenerationAuthority, safe_write_to_textfile,
+)
 
 __all__ = (
     'CollectorRegistry',
@@ -43,6 +46,10 @@ __all__ = (
     'start_http_server',
     'start_wsgi_server',
     'write_to_textfile',
+    'safe_write_to_textfile',
+    'GenerationAuthority',
+    'CommitReceipt',
+    'CommitStatus',
     'push_to_gateway',
     'pushadd_to_gateway',
     'delete_from_gateway',
