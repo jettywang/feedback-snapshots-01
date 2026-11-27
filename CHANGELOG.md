@@ -1,5 +1,18 @@
 ## [Unreleased]
 
+### Added
+- Explicit OIDC federation boundary for foreign credentials:
+  `SIMPLE_JWT["FEDERATION_PROVIDERS"]` registers providers by issuer, with
+  per-provider audiences/purposes, key material, claim projection and optional
+  local application mapping.
+  `rest_framework_simplejwt.federation.FederatedToken` validates a foreign token
+  only against its registered provider;
+  `FederatedJWTAuthentication` / `LocalOrFederatedJWTAuthentication` authenticate
+  the mapped local identity; `HasApplication` performs the separate downstream
+  application authorization check. `FederatedTokenVerifyView` reports identity
+  evidence only and never an authorization decision. Local issuance and
+  `JWTAuthentication` are unchanged.
+
 ### Changed
 - **BREAKING:** In `serializers.py`, when a user linked to a token is missing or deleted, the code now raises `AuthenticationFailed("no_active_account")` instead of allowing `DoesNotExist` to propagate.
   - Response changed from **404 Not Found** → **401 Unauthorized**.

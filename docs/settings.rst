@@ -57,6 +57,8 @@ Some of Simple JWT's behavior can be customized through settings variables in
       "CHECK_REVOKE_TOKEN": False,
       "REVOKE_TOKEN_CLAIM": "hash_password",
       "CHECK_USER_IS_ACTIVE": True,
+
+      "FEDERATION_PROVIDERS": {},
   }
 
 Above, the default values for these settings are shown.
@@ -313,6 +315,18 @@ payload of the JWT token.
 The claim name that is used to store a user hash password.
 If the value of this CHECK_REVOKE_TOKEN field is ``True``, this field will be
 included in the JWT payload.
+
+``FEDERATION_PROVIDERS``
+------------------------
+
+A mapping of explicitly registered external OIDC providers.  The default is
+empty, which disables federated credential consumption.  Each provider entry
+declares its own issuer, audiences/purposes, key material or discovery URL,
+claim mapping and optional local application mapping.  Local issuance,
+``JWTAuthentication`` and the token obtain/refresh/verify views are unaffected.
+
+See :doc:`/federation` for the provider schema and the distinction between
+verification, authentication and application authorization.
 
 ``CHECK_USER_IS_ACTIVE``
 ------------------------

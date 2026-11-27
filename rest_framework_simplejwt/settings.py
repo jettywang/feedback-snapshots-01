@@ -37,6 +37,7 @@ DEFAULTS = {
     "ON_LOGIN_SUCCESS": "rest_framework_simplejwt.serializers.default_on_login_success",
     "ON_LOGIN_FAILED": "rest_framework_simplejwt.serializers.default_on_login_failed",
     "AUTH_TOKEN_CLASSES": ("rest_framework_simplejwt.tokens.AccessToken",),
+    "FEDERATION_PROVIDERS": {},
     "TOKEN_TYPE_CLAIM": "token_type",
     "JTI_CLAIM": "jti",
     "TOKEN_USER_CLASS": "rest_framework_simplejwt.models.TokenUser",

@@ -12,6 +12,22 @@ class ExpiredTokenError(TokenError):
     pass
 
 
+class FederationTokenError(TokenError):
+    """
+    Raised when a token from an external identity provider does not satisfy the
+    registered provider boundary.  ``code`` is intended for API diagnostics and
+    must not be treated as an authorization decision.
+    """
+
+    def __init__(self, message: str, code: str = "federation_token_invalid") -> None:
+        super().__init__(message)
+        self.code = code
+
+
+class FederationConfigurationError(Exception):
+    """Raised when the explicit federation provider registry is malformed."""
+
+
 class TokenBackendError(Exception):
     pass
 
