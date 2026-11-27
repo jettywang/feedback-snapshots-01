@@ -35,6 +35,8 @@ class job:  # noqa
         on_success: Callback | Callable[..., Any] | None = None,
         on_stopped: Callback | Callable[..., Any] | None = None,
         webhooks: Sequence[Webhook] | None = None,
+        forensic_ttl: int | None = None,
+        forensic_summary_limit: int | None = None,
     ):
         """A decorator that adds a ``enqueue`` method to the decorated function,
         which in turn creates a RQ job when called. Accepts a required
@@ -71,6 +73,10 @@ class job:  # noqa
                 to None.
             webhooks (Optional[Sequence[Webhook]], optional): Webhooks to send on matching terminal job statuses.
                 Defaults to None.
+            forensic_ttl (Optional[int], optional): Opt-in execution-receipt retention in seconds.
+                Defaults to None (worker setting); 0 disables receipts.
+            forensic_summary_limit (Optional[int], optional): Maximum characters of the business result
+                kept as a receipt summary. Defaults to None (worker setting); 0 disables summaries.
         """
         self.queue = queue
         self.queue_class = queue_class if queue_class else Queue
@@ -88,6 +94,8 @@ class job:  # noqa
         self.on_failure = on_failure
         self.on_stopped = on_stopped
         self.webhooks = webhooks
+        self.forensic_ttl = forensic_ttl
+        self.forensic_summary_limit = forensic_summary_limit
 
     def __call__(self, f):
         @wraps(f)
@@ -125,6 +133,8 @@ class job:  # noqa
                 on_success=self.on_success,
                 on_stopped=self.on_stopped,
                 webhooks=self.webhooks,
+                forensic_ttl=self.forensic_ttl,
+                forensic_summary_limit=self.forensic_summary_limit,
             )
 
         f.delay = delay  # TODO: Remove this in 3.0

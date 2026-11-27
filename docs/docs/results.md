@@ -79,6 +79,62 @@ You can do the following:
     q.enqueue(foo, result_ttl=0)  # result gets deleted immediately
     q.enqueue(foo, result_ttl=-1)  # result never expires--you should delete jobs manually
 
+## Execution Receipts (Opt-in Forensic Timeline)
+_New in version 3.1.0._
+
+When a job is retried or repeated several times, the result stream alone is
+hard to correlate with worker logs, and it expires according to `result_ttl`.
+An opt-in forensic timeline keeps one **execution receipt** per attempt,
+independent of the result stream's retention.
+
+Receipts are disabled by default. Enable them on the worker (all jobs it
+runs) or per job:
+
+```python
+# Per job, or with queue.enqueue(..., forensic_ttl=...)
+q.enqueue(my_job, forensic_ttl=30 * 24 * 60 * 60)  # keep receipts 30 days
+q.enqueue(my_job, forensic_ttl=-1)                 # keep receipts forever
+q.enqueue(my_job, forensic_ttl=0)                  # disable for this job
+
+# Worker-wide default
+Worker([q], forensic_ttl=30 * 24 * 60 * 60)
+```
+`rq worker` and `rq worker-pool` accept `--forensic-ttl`.
+
+Receipts record only facts about the attempt:
+
+* `execution_id`, `job_id`, `worker_name` and the attempt number
+* `started_at`, `ended_at`
+* `outcome` (`active`, `successful`, `failed`, `retried`, `max_retries_exceeded`, `stopped`, `abandoned`)
+* `cleanup_status` (`active`, `cleaned`, `job_deleted`) and `cleaned_at`
+* whether a result was recorded and when that result is due to expire
+* retry counters (`retried`, `retries_left`, `number_of_retries`)
+
+The business result itself is never stored in a receipt. If a summary is
+allowed by configuration, only the first `forensic_summary_limit` characters
+of its representation are kept (`0`, the default, records only whether a
+result existed):
+
+```python
+q.enqueue(my_job, forensic_ttl=3600, forensic_summary_limit=80)
+```
+
+Read the timeline from the job:
+
+```python
+job = Job.fetch('my_job_id', connection=redis)
+for receipt in job.get_receipts():
+    print(receipt.attempt, receipt.worker_name, receipt.started_at, receipt.ended_at)
+    print(receipt.outcome, receipt.cleanup_status, receipt.has_result)
+```
+
+`job.get_receipts()` cross-checks receipts against the results that still
+exist: `receipt.has_result` is `False` once the result has expired or been
+discarded, while the receipt's identity and timing remain. Receipts have their
+own TTL (`forensic_ttl`), so they outlive expired results; the `result_ttl`
+and retry semantics are unchanged. `job.forensic_timeline.reconcile()` also
+returns `unmatched_result_execution_ids` for results that have no receipt.
+
 ## Asking RQ to Retry
 _New in version 2.1.0._
 

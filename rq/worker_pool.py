@@ -18,7 +18,7 @@ from redis import ConnectionPool, Redis
 from rq.serializers import DefaultSerializer
 
 from .connections import parse_connection
-from .defaults import DEFAULT_LOGGING_DATE_FORMAT, DEFAULT_LOGGING_FORMAT
+from .defaults import DEFAULT_FORENSIC_SUMMARY_LIMIT, DEFAULT_LOGGING_DATE_FORMAT, DEFAULT_LOGGING_FORMAT
 from .job import Job
 from .logutils import setup_loghandlers
 from .queue import Queue
@@ -57,6 +57,8 @@ class WorkerPool:
         job_class: type[Job] = Job,
         queue_class: type[Queue] = Queue,
         exception_handlers=None,
+        forensic_ttl: int | None = None,
+        forensic_summary_limit: int = DEFAULT_FORENSIC_SUMMARY_LIMIT,
         *args,
         **kwargs,
     ):
@@ -74,6 +76,8 @@ class WorkerPool:
         self.job_class: type[Job] = job_class
         self.queue_class: type[Queue] = queue_class
         self.exception_handlers = exception_handlers
+        self.forensic_ttl = forensic_ttl
+        self.forensic_summary_limit = forensic_summary_limit
 
         # A dictionary of WorkerData keyed by worker name
         self.worker_dict: dict[str, WorkerData] = {}
@@ -179,6 +183,8 @@ class WorkerPool:
                 'queue_class': self.queue_class,
                 'serializer': self.serializer,
                 'exception_handlers': self.exception_handlers,
+                'forensic_ttl': self.forensic_ttl,
+                'forensic_summary_limit': self.forensic_summary_limit,
             },
             name=f'Worker {name} (WorkerPool {self.name})',
         )
@@ -268,6 +274,8 @@ def run_worker(
     job_class: type[Job] = Job,
     queue_class: type[Queue] = Queue,
     exception_handlers=None,
+    forensic_ttl: int | None = None,
+    forensic_summary_limit: int = DEFAULT_FORENSIC_SUMMARY_LIMIT,
     burst: bool = True,
     logging_level: str = 'INFO',
     _sleep: int = 0,
@@ -286,6 +294,8 @@ def run_worker(
         job_class=job_class,
         queue_class=queue_class,
         exception_handlers=exception_handlers,
+        forensic_ttl=forensic_ttl,
+        forensic_summary_limit=forensic_summary_limit,
     )
     worker.log.info('Starting worker started with PID %s', os.getpid())
     time.sleep(_sleep)

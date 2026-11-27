@@ -32,6 +32,7 @@ from .. import worker_registration
 from ..callbacks import execute_failure_callback, execute_success_callback
 from ..command import PUBSUB_CHANNEL_TEMPLATE, handle_command, parse_payload
 from ..defaults import (
+    DEFAULT_FORENSIC_SUMMARY_LIMIT,
     DEFAULT_JOB_MONITORING_INTERVAL,
     DEFAULT_LOGGING_DATE_FORMAT,
     DEFAULT_LOGGING_FORMAT,
@@ -42,6 +43,16 @@ from ..defaults import (
 )
 from ..exceptions import DequeueTimeout, DeserializationError, StopRequested
 from ..executions import WORKER_EXECUTIONS_KEY_TEMPLATE, Execution, cleanup_execution, prepare_execution
+from ..forensics import (
+    FAILED,
+    MAX_RETRIES_EXCEEDED,
+    RETRIED,
+    STOPPED,
+    SUCCESSFUL,
+    ForensicSettings,
+    ForensicTimeline,
+    result_expiry,
+)
 from ..group import Group
 from ..job import Job, JobStatus, Retry
 from ..job_lifecycle import call_exception_handlers, format_exc_info
@@ -149,8 +160,14 @@ class BaseWorker:
         prepare_for_work: bool = True,
         serializer: Serializer | str | None = None,
         work_horse_killed_handler: Callable[[Job, int, int, struct_rusage], None] | None = None,
+        forensic_ttl: int | None = None,
+        forensic_summary_limit: int = DEFAULT_FORENSIC_SUMMARY_LIMIT,
     ):  # noqa
         self.default_result_ttl = default_result_ttl
+        # Opt-in forensic receipts. `None` keeps the feature disabled; a positive
+        # or negative TTL enables it independently of `default_result_ttl`.
+        self.forensic_ttl = forensic_ttl
+        self.forensic_summary_limit = forensic_summary_limit
 
         if worker_ttl:
             self.worker_ttl = worker_ttl
@@ -765,6 +782,9 @@ class BaseWorker:
             execution_started_at = execution.created_at if execution else None
             execution_ended_at = job.ended_at
 
+            if execution is not None:
+                self._record_failure_forensics(pipeline, job, execution, retry=retry, stopped=job_is_stopped)
+
             self.cleanup_execution(job, pipeline=pipeline, execution=execution)
 
             if not self.disable_default_exception_handler and not retry:
@@ -799,6 +819,111 @@ class BaseWorker:
                 if should_enqueue_dependents:
                     self._enqueue_dependents_safely(queue, job)
                 self._release_slot_safely(job)
+
+    def _forensic_settings(self, job: Job) -> ForensicSettings | None:
+        """Resolved opt-in forensic settings for a job, or None when disabled."""
+        return ForensicSettings.for_job(job, self)
+
+    def _record_success_forensics(
+        self, pipeline: Pipeline, job: Job, execution: Execution, *, result_ttl: int
+    ) -> None:
+        """Record terminal facts for a successful attempt without touching the business result."""
+        settings = self._forensic_settings(job)
+        if settings is None:
+            return
+        timeline = ForensicTimeline(job.id, self.connection)
+        if result_ttl == 0:
+            # The result was intentionally discarded. Receipt evidence must not
+            # resurrect it; only the absence is recorded.
+            timeline.record_outcome(
+                execution,
+                job,
+                settings,
+                SUCCESSFUL,
+                result_recorded=False,
+                result_ttl=result_ttl,
+                pipeline=pipeline,
+            )
+            return
+        timeline.record_outcome(
+            execution,
+            job,
+            settings,
+            SUCCESSFUL,
+            retried=False,
+            result_recorded=True,
+            result_type=SUCCESSFUL,
+            result_ttl=result_ttl,
+            result_expires_at=result_expiry(result_ttl),
+            return_value=job._result,
+            pipeline=pipeline,
+        )
+
+    def _record_failure_forensics(
+        self,
+        pipeline: Pipeline,
+        job: Job,
+        execution: Execution,
+        *,
+        retry: bool,
+        stopped: bool,
+    ) -> None:
+        """Record identity, timing and whether a failure result was kept."""
+        settings = self._forensic_settings(job)
+        if settings is None:
+            return
+        if retry:
+            outcome = RETRIED
+        elif stopped:
+            outcome = STOPPED
+        else:
+            outcome = FAILED
+        result_recorded = not retry and not self.disable_default_exception_handler
+        timeline = ForensicTimeline(job.id, self.connection)
+        timeline.record_outcome(
+            execution,
+            job,
+            settings,
+            outcome,
+            retried=retry,
+            result_recorded=result_recorded,
+            result_type=outcome if result_recorded else None,
+            result_ttl=job.failure_ttl if result_recorded else None,
+            pipeline=pipeline,
+        )
+
+    def _record_retry_forensics(
+        self,
+        pipeline: Pipeline,
+        job: Job,
+        execution: Execution,
+        *,
+        outcome: str,
+        result_ttl: int | None,
+    ) -> None:
+        """Record a return-based retry without retaining its return value."""
+        settings = self._forensic_settings(job)
+        if settings is None:
+            return
+        timeline = ForensicTimeline(job.id, self.connection)
+        timeline.record_outcome(
+            execution,
+            job,
+            settings,
+            outcome,
+            retried=True,
+            result_recorded=True,
+            result_type=outcome,
+            result_ttl=result_ttl,
+            result_expires_at=result_expiry(result_ttl),
+            pipeline=pipeline,
+        )
+
+    def record_forensic_cleanup(self, job: Job, execution: Execution, pipeline: Pipeline) -> None:
+        """Record cleanup for an execution whose receipt already exists."""
+        if self._forensic_settings(job) is None:
+            return
+        ForensicTimeline(job.id, self.connection).record_cleanup_if_exists(execution, pipeline)
 
     def _enqueue_dependents_safely(self, queue: Queue, job: Job) -> None:
         """Enqueue dependents after the failure commits, logging errors so slot release still runs."""
@@ -1450,6 +1575,14 @@ class BaseWorker:
                     execution_ended_at=execution_ended_at,
                 )
 
+                self._record_retry_forensics(
+                    pipeline,
+                    job,
+                    execution,
+                    outcome=MAX_RETRIES_EXCEEDED,
+                    result_ttl=job.failure_ttl,
+                )
+                self.record_forensic_cleanup(job, execution, pipeline)
                 self.increment_failed_job_count(pipeline=pipeline)
                 self.increment_total_working_time(job.ended_at - job.started_at, pipeline)  # type: ignore
 
@@ -1475,6 +1608,13 @@ class BaseWorker:
                 execution_id=execution_id,
                 execution_started_at=execution_started_at,
                 execution_ended_at=execution_ended_at,
+            )
+            self._record_retry_forensics(
+                pipeline,
+                job,
+                execution,
+                outcome=RETRIED,
+                result_ttl=job.failure_ttl,
             )
             self.cleanup_execution(job, pipeline=pipeline, execution=execution)
             pipeline.execute()
@@ -1535,6 +1675,8 @@ class BaseWorker:
                             execution_started_at=execution.created_at,
                             execution_ended_at=job.ended_at,
                         )
+
+                    self._record_success_forensics(pipeline, job, execution, result_ttl=result_ttl)
 
                     if job.repeats_left is not None and job.repeats_left > 0:
                         from ..repeat import Repeat

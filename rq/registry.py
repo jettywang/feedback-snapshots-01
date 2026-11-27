@@ -325,6 +325,7 @@ class StartedJobRegistry(BaseRegistry):
                     )
                     logger.warning('%s cleanup: %s %s', self.__class__.__name__, job.id, exc_string)
                     record_job_failure(job, exc_string, pipeline)
+                    self._record_abandoned_receipts(job, pipeline)
                     # Use the cached status: FAILED is still buffered in the pipeline.
                     queue.enqueue_dependents(job, refresh_job_status=False)
                     failed_jobs.append((job, exc_string))
@@ -341,6 +342,17 @@ class StartedJobRegistry(BaseRegistry):
         # Release only after the commit, so promotion sees each job's persisted status.
         for job in processed_jobs:
             release_slot(job)
+
+    def _record_abandoned_receipts(self, job: Job, pipeline: Pipeline) -> None:
+        """Mark the open receipt of an abandoned job as abandoned.
+
+        The execution hash may already have expired, so the receipt is the
+        surviving evidence that the attempt existed. This is a no-op when the
+        forensic timeline was not enabled for the job.
+        """
+        from .forensics import ForensicTimeline
+
+        ForensicTimeline(job.id, connection=self.connection).mark_active_abandoned(pipeline=pipeline)
 
     def add_execution(self, execution: Execution, pipeline: Pipeline, ttl: int = 0, xx: bool = False) -> int:
         """Adds an execution to a registry with expiry time of now + ttl, unless it's -1 which is set to +inf

@@ -15,6 +15,7 @@ from rq.cli.helpers import (
     setup_loghandlers_from_args,
 )
 from rq.defaults import (
+    DEFAULT_FORENSIC_SUMMARY_LIMIT,
     DEFAULT_JOB_MONITORING_INTERVAL,
     DEFAULT_LOGGING_DATE_FORMAT,
     DEFAULT_LOGGING_FORMAT,
@@ -34,6 +35,18 @@ from rq.worker_pool import WorkerPool
 @click.option('--date-format', type=str, default=DEFAULT_LOGGING_DATE_FORMAT, help='Set the date format of the logs')
 @click.option('--name', '-n', help='Specify a different name')
 @click.option('--results-ttl', type=int, default=DEFAULT_RESULT_TTL, help='Default results timeout to be used')
+@click.option(
+    '--forensic-ttl',
+    type=int,
+    default=None,
+    help='Opt-in execution-receipt retention (seconds). Omit to disable; -1 keeps receipts forever.',
+)
+@click.option(
+    '--forensic-summary-limit',
+    type=int,
+    default=DEFAULT_FORENSIC_SUMMARY_LIMIT,
+    help='Maximum result-summary characters kept in a receipt; 0 keeps none.',
+)
 @click.option('--worker-ttl', type=int, default=DEFAULT_WORKER_TTL, help='Worker timeout to be used')
 @click.option(
     '--maintenance-interval',
@@ -67,6 +80,8 @@ def worker(
     logging_level,
     name,
     results_ttl,
+    forensic_ttl,
+    forensic_summary_limit,
     worker_ttl,
     maintenance_interval,
     job_monitoring_interval,
@@ -137,6 +152,8 @@ def worker(
             default_worker_ttl=worker_ttl,  # TODO remove this arg in 2.0
             worker_ttl=worker_ttl,
             default_result_ttl=results_ttl,
+            forensic_ttl=forensic_ttl,
+            forensic_summary_limit=forensic_summary_limit,
             maintenance_interval=maintenance_interval,
             job_monitoring_interval=job_monitoring_interval,
             job_class=cli_config.job_class,
@@ -182,6 +199,18 @@ def worker(
 @click.option('--date-format', type=str, default=DEFAULT_LOGGING_DATE_FORMAT, help='Set the date format of the logs')
 @click.argument('queues', nargs=-1)
 @click.option('--num-workers', '-n', type=int, default=1, help='Number of workers to start')
+@click.option(
+    '--forensic-ttl',
+    type=int,
+    default=None,
+    help='Opt-in execution-receipt retention (seconds). Omit to disable; -1 keeps receipts forever.',
+)
+@click.option(
+    '--forensic-summary-limit',
+    type=int,
+    default=DEFAULT_FORENSIC_SUMMARY_LIMIT,
+    help='Maximum result-summary characters kept in a receipt; 0 keeps none.',
+)
 @pass_cli_config
 def worker_pool(
     cli_config,
@@ -195,6 +224,8 @@ def worker_pool(
     log_format,
     date_format,
     num_workers,
+    forensic_ttl,
+    forensic_summary_limit,
     **options,
 ):
     """Starts a RQ worker pool"""
@@ -229,5 +260,7 @@ def worker_pool(
         job_class=cli_config.job_class,
         queue_class=cli_config.queue_class,
         exception_handlers=exception_handlers or None,
+        forensic_ttl=forensic_ttl,
+        forensic_summary_limit=forensic_summary_limit,
     )
     pool.start(burst=burst, logging_level=logging_level)

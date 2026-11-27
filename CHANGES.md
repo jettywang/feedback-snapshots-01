@@ -1,3 +1,8 @@
+### RQ 3.1.0 (unreleased)
+
+New Features:
+* Added an opt-in forensic timeline of execution receipts via `forensic_ttl` (worker, queue, decorator, CLI and per-job). Receipts record execution identity, start/end, cleanup status, result presence and retry counters with retention independent from `result_ttl`; business results are never stored, only a configured summary at most (`forensic_summary_limit`). Read them with `job.get_receipts()`.
+
 ### RQ 3.0 (2026-10-28)
 
 New Features:

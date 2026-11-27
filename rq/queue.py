@@ -55,6 +55,8 @@ class EnqueueData(
             'result_ttl',
             'ttl',
             'failure_ttl',
+            'forensic_ttl',
+            'forensic_summary_limit',
             'description',
             'depends_on',
             'job_id',
@@ -85,6 +87,8 @@ class EnqueueArgs(NamedTuple):
     result_ttl: int | None
     ttl: int | None
     failure_ttl: int | None
+    forensic_ttl: int | None
+    forensic_summary_limit: int | None
     depends_on: JobDependencyType | None
     job_id: str | None
     at_front: bool
@@ -569,6 +573,8 @@ class Queue:
         job_id: str | None = None,
         meta: dict | None = None,
         status: JobStatus = JobStatus.QUEUED,
+        forensic_ttl: int | None = None,
+        forensic_summary_limit: int | None = None,
         retry: Retry | None = None,
         repeat: Repeat | None = None,
         *,
@@ -589,6 +595,10 @@ class Queue:
             result_ttl (Optional[int], optional): Result time to live. Defaults to None.
             ttl (Optional[int], optional): Time to live. Defaults to None.
             failure_ttl (Optional[int], optional): Failure time to live. Defaults to None.
+            forensic_ttl (Optional[int], optional): Opt-in execution-receipt retention in seconds.
+                `None` uses the worker setting, `0` disables receipts. Defaults to None.
+            forensic_summary_limit (Optional[int], optional): Maximum characters of the business result
+                kept as a receipt summary. `0` disables summaries. Defaults to None.
             description (Optional[str], optional): The description. Defaults to None.
             depends_on (Optional[JobDependencyType], optional): The job dependencies. Defaults to None.
             job_id (Optional[str], optional): Job ID. Defaults to None.
@@ -635,6 +645,8 @@ class Queue:
             result_ttl=result_ttl,
             ttl=ttl,
             failure_ttl=failure_ttl,
+            forensic_ttl=forensic_ttl,
+            forensic_summary_limit=forensic_summary_limit,
             status=status,
             description=description,
             depends_on=depends_on,
@@ -752,6 +764,8 @@ class Queue:
         pipeline: Pipeline | None = None,
         unique: bool = False,
         webhooks: Sequence[Webhook] | None = None,
+        forensic_ttl: int | None = None,
+        forensic_summary_limit: int | None = None,
     ) -> Job:
         """Creates a job to represent the delayed function call and enqueues it.
 
@@ -784,6 +798,10 @@ class Queue:
                 Defaults to False.
             webhooks (Optional[Sequence[Webhook]], optional): Webhooks to send on matching terminal job statuses.
                 Defaults to None.
+            forensic_ttl (Optional[int], optional): Opt-in execution-receipt retention in seconds.
+                `None` uses the worker setting, `0` disables receipts. Defaults to None.
+            forensic_summary_limit (Optional[int], optional): Maximum characters of the business result
+                kept as a receipt summary. `0` disables summaries. Defaults to None.
 
         Returns:
             Job: The enqueued Job
@@ -798,6 +816,8 @@ class Queue:
             result_ttl=result_ttl,
             ttl=ttl,
             failure_ttl=failure_ttl,
+            forensic_ttl=forensic_ttl,
+            forensic_summary_limit=forensic_summary_limit,
             description=description,
             depends_on=depends_on,
             job_id=job_id,
@@ -834,6 +854,8 @@ class Queue:
         on_stopped: Callback | Callable | None = None,
         repeat: Repeat | None = None,
         webhooks: Sequence[Webhook] | None = None,
+        forensic_ttl: int | None = None,
+        forensic_summary_limit: int | None = None,
     ) -> EnqueueData:
         """Need this till support dropped for python_version < 3.7, where defaults can be specified for named tuples
         And can keep this logic within EnqueueData
@@ -861,6 +883,10 @@ class Queue:
             repeat (Optional[Repeat], optional): Repeat object. Defaults to None.
             webhooks (Optional[Sequence[Webhook]], optional): Webhooks to send on matching terminal job statuses.
                 Defaults to None.
+            forensic_ttl (Optional[int], optional): Opt-in execution-receipt retention in seconds.
+                Defaults to None (worker setting); 0 disables receipts.
+            forensic_summary_limit (Optional[int], optional): Maximum characters of the business result
+                kept as a receipt summary. Defaults to None (worker setting); 0 disables summaries.
 
         Returns:
             EnqueueData: The EnqueueData
@@ -873,6 +899,8 @@ class Queue:
             result_ttl,
             ttl,
             failure_ttl,
+            forensic_ttl,
+            forensic_summary_limit,
             description,
             depends_on,
             job_id,
@@ -912,6 +940,8 @@ class Queue:
                 'result_ttl': job_data.result_ttl,
                 'ttl': job_data.ttl,
                 'failure_ttl': job_data.failure_ttl,
+                'forensic_ttl': job_data.forensic_ttl,
+                'forensic_summary_limit': job_data.forensic_summary_limit,
                 'description': job_data.description,
                 'depends_on': job_data.depends_on,
                 'job_id': job_data.job_id,
@@ -1037,6 +1067,8 @@ class Queue:
         result_ttl = kwargs.pop('result_ttl', None)
         ttl = kwargs.pop('ttl', None)
         failure_ttl = kwargs.pop('failure_ttl', None)
+        forensic_ttl = kwargs.pop('forensic_ttl', None)
+        forensic_summary_limit = kwargs.pop('forensic_summary_limit', None)
         depends_on = kwargs.pop('depends_on', None)
         job_id = kwargs.pop('job_id', None)
         at_front = kwargs.pop('at_front', False)
@@ -1063,6 +1095,8 @@ class Queue:
             result_ttl,
             ttl,
             failure_ttl,
+            forensic_ttl,
+            forensic_summary_limit,
             depends_on,
             job_id,
             at_front,
@@ -1099,6 +1133,8 @@ class Queue:
             result_ttl,
             ttl,
             failure_ttl,
+            forensic_ttl,
+            forensic_summary_limit,
             depends_on,
             job_id,
             at_front,
@@ -1124,6 +1160,8 @@ class Queue:
             result_ttl=result_ttl,
             ttl=ttl,
             failure_ttl=failure_ttl,
+            forensic_ttl=forensic_ttl,
+            forensic_summary_limit=forensic_summary_limit,
             description=description,
             depends_on=depends_on,
             job_id=job_id,
@@ -1157,6 +1195,8 @@ class Queue:
             result_ttl,
             ttl,
             failure_ttl,
+            forensic_ttl,
+            forensic_summary_limit,
             depends_on,
             job_id,
             at_front,
@@ -1182,6 +1222,8 @@ class Queue:
             result_ttl=result_ttl,
             ttl=ttl,
             failure_ttl=failure_ttl,
+            forensic_ttl=forensic_ttl,
+            forensic_summary_limit=forensic_summary_limit,
             description=description,
             depends_on=depends_on,
             job_id=job_id,

@@ -118,6 +118,11 @@ class Execution:
         ExecutionRegistry(job_id=self.job_id, connection=self.connection).remove(execution=self, pipeline=pipeline)
         if self.worker_name:
             pipeline.srem(self.worker_executions_key, self.composite_key)
+        # The cleanup status is evidence of its own and outlives the hash. Only
+        # writing for existing receipts keeps the timeline strictly opt-in.
+        from .forensics import ForensicTimeline
+
+        ForensicTimeline(self.job_id, self.connection).record_cleanup_if_exists(self, pipeline)
 
     def serialize(self) -> dict:
         return {
@@ -230,11 +235,17 @@ def prepare_execution(worker: BaseWorker, job: Job) -> Execution:
         Execution: The created Execution object
     """
     # Import here to avoid circular imports
+    from .forensics import ForensicSettings, ForensicTimeline
     from .worker.base import WorkerStatus
 
+    settings = ForensicSettings.for_job(job, worker)
+
+    settings = ForensicSettings.for_job(job, worker)
     with worker.connection.pipeline() as pipeline:
         heartbeat_ttl = worker.get_heartbeat_ttl(job)
         execution = Execution.create(job, heartbeat_ttl, pipeline=pipeline, worker_name=worker.name)
+        if settings is not None:
+            ForensicTimeline(job.id, worker.connection).record_start(execution, job, settings, pipeline)
         worker.executions[execution.id] = execution
         worker.set_state(WorkerStatus.BUSY, pipeline=pipeline)
         pipeline.execute()

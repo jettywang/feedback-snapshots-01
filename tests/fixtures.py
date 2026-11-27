@@ -115,6 +115,16 @@ def returns_retry():
     return Retry(max=1)
 
 
+def returns_retry_once():
+    """Returns Retry on the first attempt, then succeeds."""
+    from rq import Retry
+
+    job = get_current_job()
+    if not job.number_of_retries:
+        return Retry(max=1)
+    return 'ok'
+
+
 def returns_retry_with_delay():
     """Always returns a delayed Retry object (return-based retry)."""
     from rq import Retry

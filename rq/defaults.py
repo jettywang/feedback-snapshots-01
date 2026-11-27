@@ -76,6 +76,20 @@ Defaults to 1 YEAR in seconds
 """
 
 
+DEFAULT_FORENSIC_TTL = 2592000
+""" The default Time To Live (TTL) in seconds for execution receipts.
+Receipts are the opt-in forensic timeline: they outlive expired results
+and store only the execution identity, its start/end, cleanup and retry
+facts, never the job's business result.
+"""
+
+
+DEFAULT_FORENSIC_SUMMARY_LIMIT = 0
+""" The default maximum number of characters kept from a business result's
+summary when forensic receipts include one. `0` disables result summaries,
+so receipts record only whether a result was recorded, not its contents."""
+
+
 DEFAULT_CRON_JOB_HISTORY_LIMIT = 1000
 """ The maximum number of spawned job IDs to keep in a cron job's history
 """

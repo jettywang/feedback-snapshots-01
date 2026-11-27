@@ -212,6 +212,8 @@ class SpawnWorker(Worker):
                     'log_job_description': self.log_job_description,
                     'log_result_lifespan': self.log_result_lifespan,
                     'disable_default_exception_handler': self.disable_default_exception_handler,
+                    'forensic_ttl': self.forensic_ttl,
+                    'forensic_summary_limit': self.forensic_summary_limit,
                 },
             )
         )

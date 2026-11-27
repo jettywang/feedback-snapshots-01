@@ -183,6 +183,8 @@ print(execution.last_heartbeat)  # Worker's last heartbeat
 * `composite_key`: a combination of `job.id` and `execution.id`, formatted as `<job_id>:<execution_id>`
 * `created_at`: returns a datetime object representing the start of this execution
 * `last_heartbeat`: worker's last heartbeat
+* execution receipts (`job.get_receipts()`) are a separate, opt-in forensic
+  timeline described in [Results](/docs/results/#execution-receipts-opt-in-forensic-timeline)
 
 
 ## Stopping a Currently Executing Job

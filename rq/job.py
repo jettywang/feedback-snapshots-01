@@ -25,6 +25,7 @@ if TYPE_CHECKING:
     from typing_extensions import Unpack
 
     from .executions import Execution, ExecutionRegistry
+    from .forensics import ExecutionReceipt, ForensicTimeline
     from .queue import Queue
     from .results import Result
 
@@ -211,6 +212,11 @@ class Job:
         self._stopped_callback_timeout: int | None = None
         self.result_ttl: int | None = None
         self.failure_ttl: int | None = None
+        # Opt-in forensic timeline settings. `forensic_ttl` None means "use the
+        # worker's setting"; 0 disables receipts for this job. Retaining them is
+        # independent from result_ttl so expired results do not erase evidence.
+        self.forensic_ttl: int | None = None
+        self.forensic_summary_limit: int | None = None
         self.ttl: int | None = None
         self.worker_name: str | None = None
         self._status: JobStatus = JobStatus.CREATED
@@ -261,6 +267,8 @@ class Job:
         origin: str = '',
         meta: dict[str, Any] | None = None,
         failure_ttl: int | None = None,
+        forensic_ttl: int | None = None,
+        forensic_summary_limit: int | None = None,
         serializer=None,
         group_id: str | None = None,
         *,
@@ -298,6 +306,11 @@ class Job:
                 Defaults to None.
             failure_ttl (Optional[int], optional): The time to live in seconds for failed-jobs information.
                 Defaults to None.
+            forensic_ttl (Optional[int], optional): Opt-in retention in seconds for this job's execution
+                receipts. `None` uses the worker's setting, `0` disables receipts and `-1` keeps them.
+                Receipt retention is independent from `result_ttl`. Defaults to None.
+            forensic_summary_limit (Optional[int], optional): Maximum characters of a business result kept
+                in a receipt as a summary. `0` disables result summaries. Defaults to None (worker setting).
             serializer (Optional[str], optional): The serializer class path to use. Should be a string with the import
                 path for the serializer to use. eg. `mymodule.myfile.MySerializer` Defaults to None.
             on_success (Optional[Union['Callback', Callable[..., Any]]], optional): A callback to run when/if the Job
@@ -378,6 +391,8 @@ class Job:
         job.description = description or job.get_call_string()
         job.result_ttl = parse_timeout(result_ttl)
         job.failure_ttl = parse_timeout(failure_ttl)
+        job.forensic_ttl = parse_timeout(forensic_ttl)
+        job.forensic_summary_limit = parse_timeout(forensic_summary_limit)
         job.ttl = parse_timeout(ttl)
         job.timeout = parse_timeout(timeout)
         job.meta = meta or {}
@@ -1003,6 +1018,10 @@ class Job:
         self.timeout = parse_timeout(obj.get('timeout')) if obj.get('timeout') else None
         self.result_ttl = int(obj['result_ttl']) if obj.get('result_ttl') else None
         self.failure_ttl = int(obj['failure_ttl']) if obj.get('failure_ttl') else None
+        self.forensic_ttl = int(obj['forensic_ttl']) if obj.get('forensic_ttl') not in (None, b'') else None
+        self.forensic_summary_limit = (
+            int(obj['forensic_summary_limit']) if obj.get('forensic_summary_limit') not in (None, b'') else None
+        )
 
         # Beginning from v2.4.1, jobs are created with a status, so the fallback to CREATED
         # is not needed, but we keep it for backwards compatibility
@@ -1157,6 +1176,10 @@ class Job:
             obj['result_ttl'] = self.result_ttl
         if self.failure_ttl is not None:
             obj['failure_ttl'] = self.failure_ttl
+        if self.forensic_ttl is not None:
+            obj['forensic_ttl'] = self.forensic_ttl
+        if self.forensic_summary_limit is not None:
+            obj['forensic_summary_limit'] = self.forensic_summary_limit
         obj['status'] = self._status
         if self._dependency_ids:
             obj['dependency_id'] = self._dependency_ids[0]  # for backwards compatibility
@@ -1347,6 +1370,20 @@ class Job:
     def get_executions(self) -> list[Execution]:
         return self.execution_registry.get_executions()
 
+    @property
+    def forensic_timeline(self) -> ForensicTimeline:
+        """The opt-in forensic timeline of execution receipts for this job."""
+        from .forensics import ForensicTimeline
+
+        return ForensicTimeline.for_job(self)
+
+    def get_receipts(self) -> list[ExecutionReceipt]:
+        """Execution receipts recorded for this job, oldest attempt first.
+
+        Receipts are only present when the forensic timeline was enabled.
+        """
+        return self.forensic_timeline.get_receipts()
+
     def _remove_from_registries(self, pipeline: Pipeline | None = None, remove_from_queue: bool = True):
         from .registry import BaseRegistry
 
@@ -1433,6 +1470,13 @@ class Job:
             # If a rate-limited job is still running (has a live execution), we don't delete the execution.
             # Deleting it could free the job's slot and enqueue another job, going over the allowed concurrency.
             self.execution_registry.delete(job=self, pipeline=connection)  # type: ignore
+
+        # Mark receipts that were still open when the job hash is removed. This
+        # runs after execution cleanup so `job_deleted` is the stronger final
+        # cleanup fact for a started job.
+        from .forensics import ForensicTimeline
+
+        ForensicTimeline(self.id, self.connection).mark_job_deleted(pipeline=pipeline)
         if self.group_id:
             from .group import Group
 

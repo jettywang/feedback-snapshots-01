@@ -11,7 +11,7 @@ from redis import Redis
 from .defaults import RQ_KEY_PREFIX, UNSERIALIZABLE_RETURN_VALUE_PAYLOAD
 from .job import Job
 from .serializers import resolve_serializer
-from .utils import decode_redis_hash, now
+from .utils import as_text, decode_redis_hash, now
 
 
 class Result:
@@ -184,6 +184,21 @@ class Result:
     def count(cls, job: Job) -> int:
         """Returns the number of job results"""
         return job.connection.xlen(cls.get_key(job.id))
+
+    @classmethod
+    def execution_ids(cls, job_id: str, connection: Redis) -> list[str]:
+        """Execution IDs named by the residual results still in Redis.
+
+        Used to cross-check an opt-in forensic timeline against what remains
+        after result TTLs have elapsed.
+        """
+        payloads = connection.xrevrange(cls.get_key(job_id), '+', '-')
+        execution_ids = []
+        for _result_id, payload in payloads:
+            execution_id = payload.get(b'execution_id')
+            if execution_id:
+                execution_ids.append(as_text(execution_id))
+        return execution_ids
 
     @classmethod
     def delete_all(cls, job: Job) -> None:
