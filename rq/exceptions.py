@@ -69,3 +69,16 @@ class StopRequested(Exception):
     """Raised inside a worker to stop its work loop, e.g. after a stop signal or
     when the worker is suspended in burst mode.
     """
+
+
+class AuthorizationError(Exception):
+    """Raised when an operator is not permitted to send a control command to a
+    worker, for example because the worker's current queues are outside the
+    operator's allowlist or the worker is no longer registered.
+    """
+
+
+class IdentityConflictError(Exception):
+    """Raised when a late execution record points to a different worker than the
+    one a command was about to target, or the record cannot identify a worker.
+    """

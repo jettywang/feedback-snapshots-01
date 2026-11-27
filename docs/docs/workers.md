@@ -561,6 +561,70 @@ redis = Redis()
 send_stop_job_command(redis, job_id)
 ```
 
+### Restricting Commands to Specific Queues
+
+Some operators are only allowed to manage workers that serve a given set of queues.
+`QueueAuthorizationPolicy` adds a least-privilege check to every command sender
+(`send_shutdown_command()`, `send_kill_horse_command()`, `send_stop_job_command()`,
+`send_stop_execution_command()`, and the low-level `send_command()`).
+
+An operator may control a worker only when **every** queue the worker currently
+serves is in the operator's allowlist. The worker's identity and current queues are
+read live from Redis, so the decision follows the worker across a normal restart or
+a queue migration instead of trusting a stale object. When no policy is passed, the
+historical control API is unchanged and every command is allowed.
+
+```python
+from redis import Redis
+from rq.authorization import QueueAuthorizationPolicy
+from rq.command import send_shutdown_command
+from rq.exceptions import AuthorizationError
+
+redis = Redis()
+
+# operator "ops-alpha" may only manage workers serving the "alpha" queue
+policy = QueueAuthorizationPolicy({'ops-alpha': {'alpha'}})
+
+try:
+    # Raises AuthorizationError and publishes nothing when the worker's current
+    # queues are outside ops-alpha's allowlist, or the worker is not registered.
+    send_shutdown_command(redis, worker.name, operator_id='ops-alpha', policy=policy)
+except AuthorizationError as exc:
+    print('command rejected:', exc)
+```
+
+Pass an optional `callback` to the policy to keep an in-memory audit trail. Each
+callback receives an `AuthorizationEvent` describing the decision, the operator, the
+target worker, the worker's current queues, and (for denials) the reason.
+
+```python
+audit_log = []
+policy = QueueAuthorizationPolicy({'ops-alpha': {'alpha'}}, callback=audit_log.append)
+```
+
+The receiving worker performs the same check against its own live registration.
+Override `BaseWorker.on_control_authorization()` to record, in memory, the actual
+executor and its current queues for both allowed and denied commands. A denial is
+logged and the command is skipped rather than raising inside the pubsub thread.
+
+```python
+from rq import Worker
+
+class AuditedWorker(Worker):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.control_authorization_policy = policy
+        self.events = []
+
+    def on_control_authorization(self, event):
+        self.events.append(event)  # event.worker_name / event.queue_names identify the executor
+```
+
+`send_stop_execution_command()` resolves the target worker from the execution record,
+which is essential for late heartbeats that outlive the worker that started them. If
+the record is missing, carries no worker identity, or points at a different worker
+than expected, an `IdentityConflictError` is raised instead of guessing the recipient.
+
 ## Worker Pool
 
 _New in version 1.14.0._

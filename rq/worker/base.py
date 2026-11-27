@@ -26,6 +26,8 @@ if TYPE_CHECKING:
     from redis import Redis
     from redis.client import Pipeline, PubSub, PubSubWorkerThread
 
+    from ..authorization import AuthorizationEvent
+
 import redis.exceptions
 
 from .. import worker_registration
@@ -232,6 +234,10 @@ class BaseWorker:
         self._dequeue_strategy: DequeueStrategy | None = DequeueStrategy.DEFAULT
 
         self.disable_default_exception_handler = disable_default_exception_handler
+
+        # Optional least-privilege policy used to re-authorize control commands
+        # received on this worker's pubsub channel. None keeps the historical API.
+        self.control_authorization_policy = None
 
         if prepare_for_work:
             self.hostname: str | None = socket.gethostname()
@@ -1103,7 +1109,27 @@ class BaseWorker:
         """Handle external commands"""
         self.log.debug('Worker %s: received message: %s', self.name, message)
         payload = parse_payload(message)
-        handle_command(self, payload)
+        handle_command(self, payload, policy=self.control_authorization_policy)
+
+    def on_control_authorization(self, event: 'AuthorizationEvent') -> None:
+        """In-memory hook invoked for every control-command decision.
+
+        Override this method or assign a callable to record the actual executor
+        (`worker.name`) and its current queues when a command arrives. It runs for
+        both allowed and denied commands, so audit trails keep identity conflicts
+        and denials. The default implementation only logs at debug level.
+
+        Args:
+            event (AuthorizationEvent): The authorization decision for this command.
+        """
+        self.log.debug(
+            'Worker %s: control command %r allowed=%s queues=%s reason=%s',
+            self.name,
+            event.command,
+            event.allowed,
+            list(event.queue_names),
+            event.reason,
+        )
 
     def subscribe(self):
         """Subscribe to this worker's channel"""
