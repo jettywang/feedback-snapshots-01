@@ -1,5 +1,7 @@
 # Unreleased
 
+- Added client side capabilities: `RedisClient#with_capabilities` and `RedisClient::Pooled#with_capabilities` grant a per-checkout command scope for regular calls, pipelines and transactions. Batches are accepted or rejected as a whole before being sent, each checkout returns a `RedisClient::CapabilityReceipt` of its decisions, and only command names are inspected or recorded so private arguments remain with the caller.
+
 # 0.31.0
 
 - Improved the Ruby driver buffering logic, should trigger GC less, particularly for large response and when using SSL.

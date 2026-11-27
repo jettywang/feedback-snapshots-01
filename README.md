@@ -414,6 +414,63 @@ If the transaction wasn't successful, `#multi` will return `nil`.
 
 Note that transactions using optimistic locking aren't automatically retried upon connection errors.
 
+### Capabilities
+
+When several services share a connection (or a pool of them), each checkout can be
+limited to the commands that caller is allowed to run. `#with_capabilities` grants a
+scope for the duration of a block. The scope is enforced entirely on the client side,
+before anything is written to the socket, and the underlying physical connection is
+still reused across checkouts.
+
+```ruby
+redis.with_capabilities(%w[GET MGET]) do |client, receipt|
+  client.call("GET", "session:1")            # allowed
+  client.call("SET", "session:1", "value")   # raises RedisClient::CapabilityDeniedError
+end
+```
+
+A scope can be an Array of command names (strings or symbols, case insensitive),
+`:all` to allow every command, or a callable that decides based on the command name:
+
+```ruby
+redis.with_capabilities(->(command_name) { command_name.start_with?("H") }) do |client, receipt|
+  client.call("HELLO", "3") # allowed
+end
+```
+
+Regular calls, pipelines and transactions are all covered. For batches, the whole
+batch is decided up front: if a single command is outside the scope, the entire
+pipeline or transaction is rejected and none of it is sent.
+
+```ruby
+redis.with_capabilities(%w[GET]) do |client, receipt|
+  client.pipelined do |pipeline|
+    pipeline.call("GET", "a")
+    pipeline.call("SET", "b", "c") # the whole pipeline is rejected before sending
+  end
+end
+```
+
+The block is yielded a `RedisClient::CapabilityReceipt`. It records every
+authorization decision for that checkout in `receipt.approved` and `receipt.denied`.
+Only command names are ever inspected or stored — command arguments are never passed
+to the policy or written to the receipt, so private parameters stay with the caller.
+The `CapabilityDeniedError` message likewise contains the command name only.
+
+Connection pools support the same pattern; each borrow gets its own scope and receipt
+while sharing the pool's connections:
+
+```ruby
+pool.with_capabilities(%w[GET]) do |client, receipt|
+  client.call("GET", "key")
+end
+```
+
+The scope covers every command issued through the client, including `#scan` iterators,
+blocking commands and the `#call_once` variants. It does not cover a dedicated
+`PubSub` object obtained through `#pubsub`, which is a separate stateful connection;
+keep pub/sub access outside of capability-scoped checkouts.
+
 ### Publish / Subscribe
 
 Pub/Sub related commands must be called on a dedicated `PubSub` object:

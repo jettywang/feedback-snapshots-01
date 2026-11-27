@@ -272,6 +272,7 @@ class RedisClient
     @raw_connection = nil
     @disable_reconnection = false
     @retry_attempt = nil
+    @capability_receipt = nil
   end
 
   def inspect
@@ -328,6 +329,28 @@ class RedisClient
   end
   alias_method :then, :with
 
+  # Checkout the client with a capability scope. The scope only applies for the
+  # duration of the block and each checkout gets its own receipt, so the same
+  # physical connection can be reused by different callers with different
+  # scopes without one caller inheriting another's permissions.
+  #
+  # The block is yielded the client and the CapabilityReceipt for the checkout.
+  def with_capabilities(scope)
+    previous_receipt = @capability_receipt
+    receipt = CapabilityReceipt.new(Capabilities.build(scope))
+    @capability_receipt = receipt
+    begin
+      yield self, receipt
+    ensure
+      @capability_receipt = previous_receipt
+    end
+  end
+
+  # The receipt of the capabilities currently in effect on this client, if any.
+  def capability_receipt
+    @capability_receipt
+  end
+
   def timeout=(timeout)
     super
     @raw_connection&.read_timeout = timeout
@@ -352,6 +375,7 @@ class RedisClient
 
   def measure_round_trip_delay
     ensure_connected do |connection|
+      authorize_command!(["PING"])
       @middlewares.call(["PING"], config) do
         connection.measure_round_trip_delay
       end
@@ -360,6 +384,7 @@ class RedisClient
 
   def call(*command, **kwargs)
     command = @command_builder.generate(command, kwargs)
+    authorize_command!(command)
     result = ensure_connected do |connection|
       @middlewares.call(command, config) do
         connection.call(command, nil)
@@ -375,6 +400,7 @@ class RedisClient
 
   def call_v(command)
     command = @command_builder.generate(command)
+    authorize_command!(command)
     result = ensure_connected do |connection|
       @middlewares.call(command, config) do
         connection.call(command, nil)
@@ -390,6 +416,7 @@ class RedisClient
 
   def call_once(*command, **kwargs)
     command = @command_builder.generate(command, kwargs)
+    authorize_command!(command)
     result = ensure_connected(retryable: false) do |connection|
       @middlewares.call(command, config) do
         connection.call(command, nil)
@@ -405,6 +432,7 @@ class RedisClient
 
   def call_once_v(command)
     command = @command_builder.generate(command)
+    authorize_command!(command)
     result = ensure_connected(retryable: false) do |connection|
       @middlewares.call(command, config) do
         connection.call(command, nil)
@@ -420,6 +448,7 @@ class RedisClient
 
   def blocking_call(timeout, *command, **kwargs)
     command = @command_builder.generate(command, kwargs)
+    authorize_command!(command)
     error = nil
     result = ensure_connected do |connection|
       @middlewares.call(command, config) do
@@ -440,6 +469,7 @@ class RedisClient
 
   def blocking_call_v(timeout, command)
     command = @command_builder.generate(command)
+    authorize_command!(command)
     error = nil
     result = ensure_connected do |connection|
       @middlewares.call(command, config) do
@@ -514,8 +544,10 @@ class RedisClient
     if pipeline._size == 0
       []
     else
+      commands = pipeline._commands
+      # The whole batch has to be acceptable before any of it reaches the socket.
+      authorize_commands!(commands)
       results = ensure_connected(retryable: pipeline._retryable?) do |connection|
-        commands = pipeline._commands
         @middlewares.call_pipelined(commands, config) do
           connection.call_pipelined(commands, pipeline._timeouts, exception: exception)
         end
@@ -536,6 +568,8 @@ class RedisClient
         begin
           if transaction = build_transaction(&block)
             commands = transaction._commands
+            # MULTI/EXEC framing is included: the batch is accepted or rejected as a whole.
+            authorize_commands!(commands)
             results = @middlewares.call_pipelined(commands, config) do
               connection.call_pipelined(commands, nil)
             end.last
@@ -553,12 +587,14 @@ class RedisClient
       if transaction._empty?
         []
       else
+        commands = transaction._commands
+        # MULTI/EXEC framing is included: the batch is accepted or rejected as a whole.
+        authorize_commands!(commands)
         ensure_connected(retryable: transaction._retryable?) do |connection|
-          commands = transaction._commands
           @middlewares.call_pipelined(commands, config) do
             connection.call_pipelined(commands, nil)
-          end.last
-        end
+          end
+        end.last
       end
     end
 
@@ -731,6 +767,14 @@ class RedisClient
   end
 
   private
+
+  def authorize_command!(command)
+    @capability_receipt&.authorize!(command)
+  end
+
+  def authorize_commands!(commands)
+    @capability_receipt&.authorize_batch!(commands)
+  end
 
   def build_transaction
     transaction = Multi.new(@command_builder)
@@ -913,5 +957,6 @@ end
 
 require "redis_client/pooled"
 require "redis_client/circuit_breaker"
+require "redis_client/capabilities"
 
 RedisClient.default_driver

@@ -34,6 +34,18 @@ class RedisClient
     end
     alias_method :then, :with
 
+    # Checkout a connection with a capability scope. The physical connection is
+    # still borrowed from and returned to the pool, but only the granted commands
+    # are accepted for the duration of the block. The block is yielded the client
+    # and its CapabilityReceipt.
+    def with_capabilities(scope, options = EMPTY_HASH)
+      with(options) do |client|
+        client.with_capabilities(scope) do |scoped_client, receipt|
+          yield scoped_client, receipt
+        end
+      end
+    end
+
     def close
       if @pool
         @mutex.synchronize do
