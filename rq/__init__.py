@@ -5,6 +5,7 @@ from .queue import Queue
 from .rate_limit import RateLimit
 from .repeat import Repeat
 from .version import VERSION
+from .visibility import InternalObserver, PublicJobError, VisibilityPolicy
 from .webhook import Webhook
 from .worker import SimpleWorker, SpawnWorker, Worker
 
@@ -20,6 +21,9 @@ __all__ = [
     'SpawnWorker',
     'Worker',
     'Repeat',
+    'VisibilityPolicy',
+    'InternalObserver',
+    'PublicJobError',
     'Webhook',
 ]
 

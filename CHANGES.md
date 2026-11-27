@@ -1,3 +1,12 @@
+### RQ 3.1.0 (unreleased)
+
+New Features:
+* Added result visibility policies via `queue.enqueue(..., visibility=VisibilityPolicy(...))`. Restricted result paths and exception details are withheld from callbacks, webhooks and `job.public_result()`, while an approved `InternalObserver` can still read the full result and traceback with `job.internal_result(observer)`.
+* Results now record the outcome of the callbacks that ran for their execution (`Result.callback_outcomes`), so a success callback failure is distinguishable from a failed job function.
+
+Bug Fixes:
+* A success callback that raises no longer loses the computed result: it is stored internally, marked `FAILED`, and retried when the job has retries left.
+
 ### RQ 3.0 (2026-10-28)
 
 New Features:

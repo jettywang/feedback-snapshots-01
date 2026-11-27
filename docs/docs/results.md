@@ -19,7 +19,7 @@ execution history. RQ stores up to the 10 most recent results for each job.
 
 Each `Result` has the following attributes:
 
-* `type` - an enum of `SUCCESSFUL`, `FAILED`, `RETRIED` or `STOPPED`
+* `type` - an enum of `SUCCESSFUL`, `FAILED`, `RETRIED`, `MAX_RETRIES_EXCEEDED` or `STOPPED`
 * `created_at` - the time at which the result was recorded
 * `return_value` - job's return value, only present if result type is `SUCCESSFUL`
 * `exc_string` - the exception raised by job, only present if result type is `FAILED`
@@ -28,6 +28,8 @@ Each `Result` has the following attributes:
 * `execution_id` - ID of the `Execution` that produced this result
 * `execution_started_at` - datetime when the worker began this execution attempt
 * `execution_ended_at` - datetime when this execution attempt finished
+* `callback_outcomes` - per-callback outcomes for this execution (`succeeded` / `failed`), so a
+  failed job function can be told apart from a failing success/failure callback
 
 ```python
 job = Job.fetch(id='my_id', connection=redis)

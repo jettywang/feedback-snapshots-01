@@ -398,6 +398,52 @@ def erroneous_callback(job):
     pass
 
 
+RESTRICTED_RESULT = {
+    'ticket': {'id': 'TCK-1', 'summary': 'public summary'},
+    'customer': {
+        'name': 'Acme',
+        'billing': {'card_token': 'tok_live_FIXTURE', 'account': 'acct_FIXTURE'},
+    },
+    'items': [{'sku': 'A-1', 'qty': 2}, {'sku': 'B-2', 'qty': 1}],
+    'error': {'service': 'payments', 'internal_note': 'ledger mismatch'},
+}
+"""Synthetic nested result used by visibility tests. Every 'FIXTURE' value is fake."""
+
+RESTRICTED_PATHS = ('customer.billing.card_token', 'customer.billing.account', 'error.internal_note')
+
+
+def returns_nested_restricted_result():
+    """Return a nested result containing fictitious restricted values."""
+    return RESTRICTED_RESULT
+
+
+class PaymentError(Exception):
+    """Synthetic exception whose message contains a restricted value."""
+
+
+def failing_with_restricted_value():
+    """Raise an exception whose message carries a fictitious restricted value."""
+    raise PaymentError('declined for tok_live_FIXTURE (acct_FIXTURE)')
+
+
+def record_failure_callback(job, connection, exc_type, exc_value, traceback, *args, **kwargs):
+    """Persist what a failure callback received, so a forked worker's call is observable."""
+    payload = f'{exc_type.__name__}|{type(exc_value).__name__}|{exc_value}|traceback={traceback!r}'
+    connection.set(f'failure_callback:{job.id}', payload, ex=60)
+
+
+def flaky_public_success_callback(job, connection, result, *args, **kwargs):
+    """Succeeds on the second execution, raising on the first.
+
+    Records every invocation so the test can prove how many executions reached the callback
+    and that later attempts succeeded. It sees only the public view of the result.
+    """
+    calls = connection.incr(f'public_callback_calls:{job.id}')
+    connection.set(f'public_callback_payload:{job.id}:{calls}', str(result), ex=60)
+    if calls == 1:
+        raise RuntimeError('public ticket service unavailable')
+
+
 def _send_shutdown_command(worker_name, connection_kwargs, delay=0.25):
     time.sleep(delay)
     send_shutdown_command(Redis(**connection_kwargs), worker_name)

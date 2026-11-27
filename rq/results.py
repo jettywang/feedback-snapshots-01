@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import zlib
 from base64 import b64decode, b64encode
 from datetime import datetime, timezone
@@ -12,6 +13,7 @@ from .defaults import RQ_KEY_PREFIX, UNSERIALIZABLE_RETURN_VALUE_PAYLOAD
 from .job import Job
 from .serializers import resolve_serializer
 from .utils import decode_redis_hash, now
+from .visibility import CallbackOutcome
 
 
 class Result:
@@ -36,6 +38,8 @@ class Result:
         execution_id: str | None = None,
         execution_started_at: datetime | None = None,
         execution_ended_at: datetime | None = None,
+        callback_outcomes: dict[str, CallbackOutcome] | None = None,
+        callback_exc_string: str | None = None,
     ):
         self.return_value = return_value
         self.exc_string = exc_string
@@ -49,6 +53,8 @@ class Result:
         self.execution_id = execution_id
         self.execution_started_at = execution_started_at
         self.execution_ended_at = execution_ended_at
+        self.callback_outcomes = callback_outcomes or {}
+        self.callback_exc_string = callback_exc_string
 
     def __repr__(self):
         return f'Result(id={self.id}, type={self.Type(self.type).name})'
@@ -75,6 +81,8 @@ class Result:
         execution_id: str | None = None,
         execution_started_at: datetime | None = None,
         execution_ended_at: datetime | None = None,
+        callback_outcomes: dict[str, CallbackOutcome] | None = None,
+        callback_exc_string: str | None = None,
     ) -> Result:
         result = cls(
             job_id=job.id,
@@ -87,6 +95,8 @@ class Result:
             execution_id=execution_id,
             execution_started_at=execution_started_at,
             execution_ended_at=execution_ended_at,
+            callback_outcomes=callback_outcomes,
+            callback_exc_string=callback_exc_string,
         )
         result.save(ttl=ttl, pipeline=pipeline)
         return result
@@ -102,17 +112,23 @@ class Result:
         execution_id: str | None = None,
         execution_started_at: datetime | None = None,
         execution_ended_at: datetime | None = None,
+        return_value=None,
+        callback_outcomes: dict[str, CallbackOutcome] | None = None,
+        callback_exc_string: str | None = None,
     ) -> Result:
         result = cls(
             job_id=job.id,
             type=cls.Type.FAILED,
             connection=job.connection,
+            return_value=return_value,
             exc_string=exc_string,
             worker_name=worker_name,
             serializer=job.serializer,
             execution_id=execution_id,
             execution_started_at=execution_started_at,
             execution_ended_at=execution_ended_at,
+            callback_outcomes=callback_outcomes,
+            callback_exc_string=callback_exc_string,
         )
         result.save(ttl=ttl, pipeline=pipeline)
         return result
@@ -128,6 +144,7 @@ class Result:
         execution_started_at: datetime,
         execution_ended_at: datetime,
         pipeline=None,
+        callback_outcomes: dict[str, CallbackOutcome] | None = None,
     ) -> Result:
         return cls.create(
             job,
@@ -139,6 +156,7 @@ class Result:
             execution_id=execution_id,
             execution_started_at=execution_started_at,
             execution_ended_at=execution_ended_at,
+            callback_outcomes=callback_outcomes,
         )
 
     @classmethod
@@ -152,6 +170,7 @@ class Result:
         execution_started_at: datetime,
         execution_ended_at: datetime,
         pipeline=None,
+        callback_outcomes: dict[str, CallbackOutcome] | None = None,
     ) -> Result:
         return cls.create(
             job,
@@ -163,6 +182,7 @@ class Result:
             execution_id=execution_id,
             execution_started_at=execution_started_at,
             execution_ended_at=execution_ended_at,
+            callback_outcomes=callback_outcomes,
         )
 
     @classmethod
@@ -222,6 +242,12 @@ class Result:
         if execution_ended_at:
             execution_ended_at = datetime.fromtimestamp(float(execution_ended_at), tz=timezone.utc)
 
+        callback_outcomes = _restore_callback_outcomes(payload.get('callback_outcomes'))
+
+        callback_exc_string = payload.get('callback_exc_string')
+        if callback_exc_string:
+            callback_exc_string = zlib.decompress(b64decode(callback_exc_string)).decode()
+
         return Result(
             job_id,
             Result.Type(int(payload['type'])),
@@ -235,6 +261,8 @@ class Result:
             execution_id=execution_id,
             execution_started_at=execution_started_at,
             execution_ended_at=execution_ended_at,
+            callback_outcomes=callback_outcomes,
+            callback_exc_string=callback_exc_string,
         )
 
     @classmethod
@@ -322,5 +350,29 @@ class Result:
         if self.execution_ended_at:
             data['execution_ended_at'] = self.execution_ended_at.timestamp()
 
+        if self.callback_outcomes:
+            data['callback_outcomes'] = json.dumps(
+                {callback_type: outcome.to_dict() for callback_type, outcome in self.callback_outcomes.items()}
+            )
+
+        if self.callback_exc_string is not None:
+            data['callback_exc_string'] = b64encode(zlib.compress(self.callback_exc_string.encode())).decode()
+
         # return json.dumps(data)
         return data
+
+
+def _restore_callback_outcomes(raw: bytes | str | None) -> dict[str, CallbackOutcome]:
+    if not raw:
+        return {}
+    if isinstance(raw, bytes):
+        raw = raw.decode()
+    data = json.loads(raw)
+    return {
+        callback_type: CallbackOutcome(
+            callback_type=callback_type,
+            status=outcome['status'],
+            error_type=outcome.get('error_type'),
+        )
+        for callback_type, outcome in data.items()
+    }

@@ -11,6 +11,7 @@ if TYPE_CHECKING:
 
 from .callbacks import Callback
 from .queue import Queue
+from .visibility import VisibilityPolicy
 from .webhook import Webhook
 
 
@@ -35,6 +36,7 @@ class job:  # noqa
         on_success: Callback | Callable[..., Any] | None = None,
         on_stopped: Callback | Callable[..., Any] | None = None,
         webhooks: Sequence[Webhook] | None = None,
+        visibility: VisibilityPolicy | None = None,
     ):
         """A decorator that adds a ``enqueue`` method to the decorated function,
         which in turn creates a RQ job when called. Accepts a required
@@ -71,6 +73,8 @@ class job:  # noqa
                 to None.
             webhooks (Optional[Sequence[Webhook]], optional): Webhooks to send on matching terminal job statuses.
                 Defaults to None.
+            visibility (Optional[VisibilityPolicy], optional): Policy restricting what external consumers
+                (callbacks, webhooks, public views) may see. Defaults to None.
         """
         self.queue = queue
         self.queue_class = queue_class if queue_class else Queue
@@ -88,6 +92,7 @@ class job:  # noqa
         self.on_failure = on_failure
         self.on_stopped = on_stopped
         self.webhooks = webhooks
+        self.visibility = visibility
 
     def __call__(self, f):
         @wraps(f)
@@ -125,6 +130,7 @@ class job:  # noqa
                 on_success=self.on_success,
                 on_stopped=self.on_stopped,
                 webhooks=self.webhooks,
+                visibility=self.visibility,
             )
 
         f.delay = delay  # TODO: Remove this in 3.0

@@ -68,6 +68,7 @@ from ..utils import (
     utcparse,
 )
 from ..version import VERSION
+from ..visibility import CallbackOutcome
 
 try:
     from setproctitle import setproctitle as setprocname
@@ -224,6 +225,12 @@ class BaseWorker:
         self.successful_job_count: int = 0
         self.failed_job_count: int = 0
         self.total_working_time: float = 0
+        # Whether the last perform_job() call returned a value from the job function. This is
+        # independent of whether the public success callback (or a later step) succeeded.
+        self.last_result_computed: bool | None = None
+        # Execution whose computed result was already written when its public success
+        # callback failed, so the failure path reuses that record instead of duplicating it.
+        self._result_recorded_execution_id: str | None = None
         self.birth_date: datetime | None = None
         self.last_heartbeat: datetime | None = None
         self.scheduler: RQScheduler | None = None
@@ -735,7 +742,14 @@ class BaseWorker:
             return
 
     def handle_job_failure(
-        self, job: Job, queue: Queue, started_job_registry=None, exc_string='', execution: Execution | None = None
+        self,
+        job: Job,
+        queue: Queue,
+        started_job_registry=None,
+        exc_string='',
+        execution: Execution | None = None,
+        callback_outcomes: dict | None = None,
+        callback_exc_string: str | None = None,
     ):
         """Handles the failure of an executing job.
 
@@ -767,6 +781,7 @@ class BaseWorker:
 
             self.cleanup_execution(job, pipeline=pipeline, execution=execution)
 
+            already_recorded = execution is not None and execution.id == self._result_recorded_execution_id
             if not self.disable_default_exception_handler and not retry:
                 job._handle_failure(
                     exc_string,
@@ -775,6 +790,9 @@ class BaseWorker:
                     execution_id=execution_id,
                     execution_started_at=execution_started_at,
                     execution_ended_at=execution_ended_at,
+                    callback_outcomes=callback_outcomes,
+                    callback_exc_string=callback_exc_string,
+                    record_result=not already_recorded,
                 )
 
             self.increment_failed_job_count(pipeline)
@@ -795,7 +813,12 @@ class BaseWorker:
             else:
                 # Send webhooks once the failure is persisted. send_webhooks never raises.
                 if not retry and not job_is_stopped:
-                    job.send_webhooks(JobStatus.FAILED, exc_string=exc_string)
+                    webhook_exc_string = exc_string
+                    if job.visibility is not None:
+                        webhook_exc_string = job.visibility.public_exc_string(
+                            exc_string, job_id=job.id, execution_id=execution_id
+                        )
+                    job.send_webhooks(JobStatus.FAILED, exc_string=webhook_exc_string)
                 if should_enqueue_dependents:
                     self._enqueue_dependents_safely(queue, job)
                 self._release_slot_safely(job)
@@ -1489,6 +1512,8 @@ class BaseWorker:
         queue: Queue,
         started_job_registry: StartedJobRegistry,
         execution: Execution,
+        callback_outcomes: dict | None = None,
+        callback_exc_string: str | None = None,
     ):
         """Handles the successful execution of a job.
 
@@ -1501,6 +1526,9 @@ class BaseWorker:
             queue (Queue): The queue
             started_job_registry (StartedJobRegistry): The started registry
             execution (Execution): The execution that ran the job.
+            callback_outcomes (Optional[dict]): Outcomes of the callbacks that ran for this
+                execution, stored on the result so public and internal views can correlate them.
+            callback_exc_string (Optional[str]): Internal traceback if a callback raised.
         """
         self.log.debug('Worker %s: handling successful execution of job %s', self.name, job.id)
 
@@ -1534,6 +1562,8 @@ class BaseWorker:
                             execution_id=execution.id,
                             execution_started_at=execution.created_at,
                             execution_ended_at=job.ended_at,
+                            callback_outcomes=callback_outcomes,
+                            callback_exc_string=callback_exc_string,
                         )
 
                     if job.repeats_left is not None and job.repeats_left > 0:
@@ -1584,12 +1614,61 @@ class BaseWorker:
         job.ended_at = now()
         job.heartbeat(now(), heartbeat_ttl)
 
+    def _record_computed_result(
+        self,
+        job: Job,
+        execution: Execution,
+        callback_outcomes: dict,
+        callback_exc_string: str | None,
+    ) -> bool:
+        """Persist a computed result whose public success callback failed.
+
+        Writes one FAILED result for this execution. It keeps the internally computed value
+        (so an approved observer can tell computation from publication) and the callback
+        outcome, but carries the callback's traceback as the failure reason. Best-effort:
+        errors are logged and never mask the callback's exception.
+
+        Returns True when the result was recorded; handle_job_failure() then reuses it.
+        """
+        if self.disable_default_exception_handler:
+            # Custom handlers own the failure record; don't write one behind their back.
+            return False
+        result_ttl = job.get_result_ttl(self.default_result_ttl)
+        if result_ttl == 0:
+            return False
+        try:
+            with self.connection.pipeline() as pipeline:
+                Result.create_failure(
+                    job,
+                    result_ttl,
+                    exc_string=callback_exc_string or '',
+                    worker_name=self.name,
+                    pipeline=pipeline,
+                    execution_id=execution.id,
+                    execution_started_at=execution.created_at,
+                    execution_ended_at=job.ended_at,
+                    return_value=job._result,
+                    callback_outcomes=callback_outcomes,
+                    callback_exc_string=callback_exc_string,
+                )
+                pipeline.execute()
+        except Exception:
+            self.log.exception('Worker %s: failed to record computed result of job %s', self.name, job.id)
+            return False
+        return True
+
     def _finalize_success(self, job: Job, queue: Queue, execution: Execution, return_value: Any) -> None:
-        """Finalize a job that returned, re-enqueuing it when the result is a `Retry`."""
+        """Finalize a job that returned, re-enqueuing it when the result is a `Retry`.
+
+        The job function's return value is the internal result. Running the success callback
+        is a separate step: it may raise, in which case the job ends FAILED even though the
+        result was computed successfully. The outcome is recorded on the execution's result.
+        """
         self.handle_execution_ended(job, queue, job.success_callback_timeout)
         # Pickle the result in the same try-except block since we need
         # to use the same exc handling when pickling fails
         job._result = return_value
+        self.last_result_computed = True
 
         if isinstance(return_value, Retry):
             self.log.debug('Worker %s: job %s returns a Retry object', self.name, job.id)
@@ -1602,10 +1681,33 @@ class BaseWorker:
             )
             return
 
+        # The job computed its result. Claim FINISHED so callbacks see the final state, but a
+        # raising callback must not be reported as a failure of the computation.
         job._status = JobStatus.FINISHED
-        execute_success_callback(job, self.death_penalty_class, return_value)
+        callback_outcomes: dict = {}
+        callback_exc_string: str | None = None
+        try:
+            outcome = execute_success_callback(job, self.death_penalty_class, return_value)
+        except Exception:
+            exc_info = sys.exc_info()
+            callback_exc_string = format_exc_info(exc_info)
+            callback_outcomes['success'] = CallbackOutcome(
+                'success', 'failed', error_type=exc_info[0].__name__ if exc_info[0] else None
+            )
+            # Record the computed value with the callback outcome before the normal failure path.
+            if self._record_computed_result(job, execution, callback_outcomes, callback_exc_string):
+                self._result_recorded_execution_id = execution.id
+            raise
+        if outcome is not None:
+            callback_outcomes['success'] = outcome
+
         self.handle_job_success(
-            job=job, queue=queue, started_job_registry=queue.started_job_registry, execution=execution
+            job=job,
+            queue=queue,
+            started_job_registry=queue.started_job_registry,
+            execution=execution,
+            callback_outcomes=callback_outcomes,
+            callback_exc_string=callback_exc_string,
         )
         job.send_webhooks(JobStatus.FINISHED)
 
@@ -1633,14 +1735,26 @@ class BaseWorker:
     ) -> None:
         """Terminal handling for a job that raised, including its failure callback."""
         self.log.debug('Worker %s: job %s raised an exception.', self.name, job.id)
+        # If no result was claimed yet, the job function itself raised, not a callback.
+        if self.last_result_computed is None:
+            self.last_result_computed = False
         job._status = JobStatus.FAILED
         self.handle_execution_ended(job, queue, job.failure_callback_timeout)
 
+        callback_outcomes: dict = {}
+        callback_exc_string: str | None = None
         try:
-            execute_failure_callback(job, self.death_penalty_class, *exc_info)
+            outcome = execute_failure_callback(job, self.death_penalty_class, *exc_info)
         except:  # noqa
             # A failing callback replaces the job's exception as the recorded failure.
             exc_info = sys.exc_info()
+            callback_exc_string = format_exc_info(exc_info)
+            callback_outcomes['failure'] = CallbackOutcome(
+                'failure', 'failed', error_type=exc_info[0].__name__ if exc_info[0] else None
+            )
+        else:
+            if outcome is not None:
+                callback_outcomes['failure'] = outcome
 
         # TODO: reversing the order of handle_job_failure() and handle_exception()
         # causes Sentry test to fail
@@ -1651,6 +1765,8 @@ class BaseWorker:
             queue=queue,
             started_job_registry=queue.started_job_registry,
             execution=execution,
+            callback_outcomes=callback_outcomes,
+            callback_exc_string=callback_exc_string,
         )
 
     def perform_job(self, job: Job, queue: Queue, execution: Execution) -> bool:
@@ -1665,6 +1781,8 @@ class BaseWorker:
         Returns:
             bool: True after finished.
         """
+        self.last_result_computed = None
+        self._result_recorded_execution_id = None
         try:
             remove_from_intermediate_queue = len(self.queues) == 1
             self.prepare_job_execution(job, remove_from_intermediate_queue)

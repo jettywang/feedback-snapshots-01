@@ -48,6 +48,7 @@ from .utils import (
     str_to_date,
     utcformat,
 )
+from .visibility import VisibilityPolicy
 from .webhook import Webhook
 
 logger = logging.getLogger('rq.job')
@@ -240,6 +241,10 @@ class Job:
         self.rate_limit_key: str | None = None
         self.rate_limit_concurrency: int | None = None
 
+        # Declares which parts of the result and exception details may be published to
+        # external consumers. `None` keeps the historical behavior (everything visible).
+        self.visibility: VisibilityPolicy | None = None
+
         self._cached_result: Result | None = None
         self.log = logger
 
@@ -268,6 +273,7 @@ class Job:
         on_failure: Callback | Callable[..., Any] | None = None,  # Callable is deprecated
         on_stopped: Callback | Callable[..., Any] | None = None,  # Callable is deprecated
         webhooks: Sequence[Webhook] | None = None,
+        visibility: VisibilityPolicy | Mapping[str, Any] | None = None,
     ) -> Job:
         """Creates a new Job instance for the given function, arguments, and
         keyword arguments.
@@ -308,6 +314,8 @@ class Job:
                 is stopped. Defaults to None. Passing a callable is deprecated.
             webhooks (Optional[Sequence[Webhook]], optional): Webhooks to send when the job reaches a matching
                 terminal state (`finished` or `failed`). Defaults to None.
+            visibility (Optional[VisibilityPolicy], optional): Policy describing which result fields and exception
+                details may be published to external consumers. Defaults to None (publish everything).
             group_id (Optional[str], optional): A group ID that the job is being added to. Defaults to None.
 
         Raises:
@@ -373,6 +381,9 @@ class Job:
             if not isinstance(webhooks, Sequence) or not all(isinstance(webhook, Webhook) for webhook in webhooks):
                 raise TypeError('webhooks must be a sequence of Webhook instances')
             job.webhooks = list(webhooks)
+
+        if visibility is not None:
+            job.visibility = VisibilityPolicy.from_dict(visibility) if isinstance(visibility, Mapping) else visibility
 
         # Extra meta data
         job.description = description or job.get_call_string()
@@ -902,6 +913,70 @@ class Job:
 
         return None
 
+    def public_return_value(self, refresh: bool = False) -> Any | None:
+        """Return the latest successful value as external consumers may see it.
+
+        Applies the job's `VisibilityPolicy` (if any) so restricted paths never leave RQ.
+        Without a policy this is identical to `return_value()`.
+        """
+        value = self.return_value(refresh=refresh)
+        if value is None or self.visibility is None:
+            return value
+        return self.visibility.redact(value)
+
+    def public_result(self, result: Result | None = None) -> dict[str, Any] | None:
+        """Return a redacted, JSON-friendly view of a stored `Result`.
+
+        The view always carries the identity fields, so a public consumer can correlate two
+        executions of the same job. Return values and exception details are redacted.
+        """
+        result = result if result is not None else self.latest_result()
+        if result is None:
+            return None
+
+        return_value = result.return_value
+        exc_string = result.exc_string
+        callback_exc_string = result.callback_exc_string
+        if self.visibility is not None:
+            if return_value is not None:
+                return_value = self.visibility.redact(return_value)
+            exc_string = self.visibility.public_exc_string(
+                exc_string, job_id=self.id, execution_id=result.execution_id
+            )
+            callback_exc_string = self.visibility.public_exc_string(
+                callback_exc_string, job_id=self.id, execution_id=result.execution_id
+            )
+
+        return {
+            'result_id': result.id,
+            'job_id': result.job_id,
+            'execution_id': result.execution_id,
+            'type': result.type.name,
+            'created_at': result.created_at,
+            'execution_started_at': result.execution_started_at,
+            'execution_ended_at': result.execution_ended_at,
+            'worker_name': result.worker_name,
+            'return_value': return_value,
+            'exc_string': exc_string,
+            'callback_outcomes': {name: outcome.to_dict() for name, outcome in result.callback_outcomes.items()},
+            'callback_exc_string': callback_exc_string,
+        }
+
+    def internal_result(self, observer: Any, result: Result | None = None) -> dict[str, Any] | None:
+        """Return the internal view of a `Result`, including unredacted values and tracebacks.
+
+        Requires an approved `InternalObserver`; this is the explicit capability that keeps
+        diagnostics readable without widening what public consumers can see.
+        """
+        from .visibility import InternalObserver
+
+        if not isinstance(observer, InternalObserver):
+            raise TypeError('internal_result() requires an InternalObserver')
+        result = result if result is not None else self.latest_result()
+        if result is None:
+            return None
+        return observer.read_result(result)
+
     @property
     def result(self) -> Any:
         """Returns the return value of the job.
@@ -1034,6 +1109,15 @@ class Job:
                 self.log.warning('Job %s: failed to deserialize webhooks', self.id, exc_info=True)
                 self.webhooks = []
 
+        raw_visibility = obj.get('visibility')
+        if raw_visibility:
+            try:
+                self.visibility = VisibilityPolicy.from_dict(json.loads(raw_visibility.decode()))
+            except Exception:
+                # A malformed policy must not silently widen visibility; publish nothing instead.
+                self.log.warning('Job %s: failed to deserialize visibility policy', self.id, exc_info=True)
+                self.visibility = VisibilityPolicy(restricted_paths=('*',))
+
         dep_ids = obj.get('dependency_ids')
         dep_id = obj.get('dependency_id')  # for backwards compatibility
         self._dependency_ids = json.loads(dep_ids.decode()) if dep_ids else [dep_id.decode()] if dep_id else []
@@ -1153,6 +1237,8 @@ class Job:
             obj['stopped_callback_timeout'] = self._stopped_callback_timeout
         if self.webhooks:
             obj['webhooks'] = json.dumps([webhook.to_dict() for webhook in self.webhooks])
+        if self.visibility is not None:
+            obj['visibility'] = json.dumps(self.visibility.to_dict())
         if self.result_ttl is not None:
             obj['result_ttl'] = self.result_ttl
         if self.failure_ttl is not None:
@@ -1642,6 +1728,8 @@ class Job:
         execution_id: str | None = None,
         execution_started_at: datetime | None = None,
         execution_ended_at: datetime | None = None,
+        callback_outcomes: dict | None = None,
+        callback_exc_string: str | None = None,
     ):
         """Saves and cleanup job after successful execution"""
         self.log.debug('Job %s: handling success...', self.id)
@@ -1661,6 +1749,8 @@ class Job:
             execution_id=execution_id,
             execution_started_at=execution_started_at,
             execution_ended_at=execution_ended_at,
+            callback_outcomes=callback_outcomes,
+            callback_exc_string=callback_exc_string,
         )
 
         if result_ttl != 0:
@@ -1675,6 +1765,9 @@ class Job:
         execution_id: str | None = None,
         execution_started_at: datetime | None = None,
         execution_ended_at: datetime | None = None,
+        callback_outcomes: dict | None = None,
+        callback_exc_string: str | None = None,
+        record_result: bool = True,
     ):
         self.log.debug(
             'Job %s: handling failure: %s', self.id, exc_string[:200] + '...' if len(exc_string) > 200 else exc_string
@@ -1687,6 +1780,11 @@ class Job:
             exc_string=exc_string,
             pipeline=pipeline,
         )
+        if not record_result:
+            # A compat result for this execution was already written (e.g. the computed value
+            # recorded when its public success callback failed); don't add a second one.
+            return
+
         from .results import Result
 
         Result.create_failure(
@@ -1698,6 +1796,8 @@ class Job:
             execution_id=execution_id,
             execution_started_at=execution_started_at,
             execution_ended_at=execution_ended_at,
+            callback_outcomes=callback_outcomes,
+            callback_exc_string=callback_exc_string,
         )
 
     def _handle_retry_result(

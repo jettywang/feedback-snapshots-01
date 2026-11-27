@@ -521,6 +521,66 @@ Delivery is best-effort: send errors (unreachable endpoint, timeout, HTTP error)
 logged and swallowed, so a failing webhook never affects job execution. Sending is blocking, so a slow endpoint can delay the worker by up to `timeout` seconds.
 
 
+## Result Visibility
+
+_New in version 3.1.0._
+
+Callbacks, webhooks and status pages are external consumers: they publish data outside your
+trust boundary. `VisibilityPolicy` lets a job compute its full result internally while exposing
+only a minimum view externally. Pass `visibility` to any enqueue method or `Job.create()`:
+
+```python
+from rq import Queue, VisibilityPolicy
+
+policy = VisibilityPolicy(
+    restricted_paths=('customer.billing.card_token', 'customer.billing.account', 'error.internal_note'),
+)
+queue.enqueue(charge_customer, order_id, visibility=policy, on_success=post_to_ticket)
+```
+
+* `restricted_paths` are dotted paths rooted at the job's return value. A `*` segment matches
+  one mapping key or sequence index (`customers.*.token`). Matching subtrees become
+  `placeholder` (default `'[redacted]'`) in every public view.
+* `hide_exception_details` (default `True`) keeps exception messages and tracebacks out of
+  public failure callbacks, `failed` webhooks and `public_result()`. The callback receives a
+  `PublicJobError` carrying only the original exception's class name plus the `job_id` and
+  `execution_id` needed for correlation.
+
+The job's own function still receives its full arguments, and the stored result keeps the
+unredacted value. Public views are opt-in per accessor:
+
+```python
+job.return_value()          # full value — trusted, in-process code
+job.public_return_value()   # redacted value
+job.public_result()         # JSON-friendly, redacted result view
+```
+
+### Approved internal diagnostics
+
+Reading the unredacted result and traceback requires an `InternalObserver`, an explicit
+capability for trusted diagnostics code (incident response, audit tooling). Constructing one is
+the approval step:
+
+```python
+from rq import InternalObserver
+
+observer = InternalObserver(name='incident-response', approved_by='oncall')
+details = job.internal_result(observer)     # full return value, traceback, callback outcomes
+```
+
+`job.internal_result()` raises `TypeError` for anything that is not an `InternalObserver`.
+
+### Callback and result correlation
+
+Every execution writes one `Result`, tagged with its `execution_id`. The result also records
+the callback outcome for that execution (`callback_outcomes`), so a public consumer can tell
+"the function returned" apart from "the public callback succeeded". When a success callback
+raises, the job is marked `FAILED` (and retried if `retry` is configured), the computed value
+is still stored internally, and the callback's traceback is kept in `callback_exc_string` for
+approved observers. The same correlation applies to failure callbacks and to synchronous
+queues.
+
+
 ## Working with Queues
 
 Besides enqueuing jobs, Queues have a few useful methods:

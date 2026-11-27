@@ -39,6 +39,7 @@ from .scripts import save_unique_job, schedule_unique_job
 from .serializers import Serializer, resolve_serializer
 from .types import FunctionReferenceType, JobDependencyType
 from .utils import as_text, backend_class, compact, get_version, import_attribute, now, parse_timeout
+from .visibility import VisibilityPolicy, exception_type_name
 from .webhook import Webhook
 
 logger = logging.getLogger('rq.queue')
@@ -66,6 +67,7 @@ class EnqueueData(
             'on_stopped',
             'repeat',
             'webhooks',
+            'visibility',
         ],
     )
 ):
@@ -100,6 +102,7 @@ class EnqueueArgs(NamedTuple):
     args: tuple | list | None
     kwargs: dict | None
     webhooks: Sequence[Webhook] | None
+    visibility: VisibilityPolicy | Mapping[str, Any] | None
 
 
 @total_ordering
@@ -578,6 +581,7 @@ class Queue:
         webhooks: Sequence[Webhook] | None = None,
         group_id: str | None = None,
         rate_limit: RateLimit | None = None,
+        visibility: VisibilityPolicy | Mapping[str, Any] | None = None,
     ) -> Job:
         """Creates a job based on parameters given
 
@@ -605,6 +609,8 @@ class Queue:
             webhooks (Optional[Sequence[Webhook]], optional): Webhooks to send on matching terminal job statuses.
                 Defaults to None.
             group_id (Optional[str], optional): A group ID that the job is being added to. Defaults to None.
+            visibility (Optional[VisibilityPolicy], optional): Policy restricting what external consumers
+                (callbacks, webhooks, public views) may see. Defaults to None.
 
         Raises:
             ValueError: If the timeout is 0
@@ -648,6 +654,7 @@ class Queue:
             on_stopped=on_stopped,
             webhooks=webhooks,
             group_id=group_id,
+            visibility=visibility,
         )
 
         if retry:
@@ -752,6 +759,7 @@ class Queue:
         pipeline: Pipeline | None = None,
         unique: bool = False,
         webhooks: Sequence[Webhook] | None = None,
+        visibility: VisibilityPolicy | Mapping[str, Any] | None = None,
     ) -> Job:
         """Creates a job to represent the delayed function call and enqueues it.
 
@@ -784,6 +792,8 @@ class Queue:
                 Defaults to False.
             webhooks (Optional[Sequence[Webhook]], optional): Webhooks to send on matching terminal job statuses.
                 Defaults to None.
+            visibility (Optional[VisibilityPolicy], optional): Policy restricting what external consumers
+                (callbacks, webhooks, public views) may see. Defaults to None.
 
         Returns:
             Job: The enqueued Job
@@ -811,6 +821,7 @@ class Queue:
             on_stopped=on_stopped,
             rate_limit=rate_limit,
             webhooks=webhooks,
+            visibility=visibility,
         )
         return self.enqueue_job(job, pipeline=pipeline, at_front=at_front, unique=unique)
 
@@ -834,6 +845,7 @@ class Queue:
         on_stopped: Callback | Callable | None = None,
         repeat: Repeat | None = None,
         webhooks: Sequence[Webhook] | None = None,
+        visibility: VisibilityPolicy | Mapping[str, Any] | None = None,
     ) -> EnqueueData:
         """Need this till support dropped for python_version < 3.7, where defaults can be specified for named tuples
         And can keep this logic within EnqueueData
@@ -861,6 +873,8 @@ class Queue:
             repeat (Optional[Repeat], optional): Repeat object. Defaults to None.
             webhooks (Optional[Sequence[Webhook]], optional): Webhooks to send on matching terminal job statuses.
                 Defaults to None.
+            visibility (Optional[VisibilityPolicy], optional): Policy restricting what external consumers
+                (callbacks, webhooks, public views) may see. Defaults to None.
 
         Returns:
             EnqueueData: The EnqueueData
@@ -884,6 +898,7 @@ class Queue:
             on_stopped,
             repeat,
             webhooks,
+            visibility,
         )
 
     def enqueue_many(
@@ -925,6 +940,7 @@ class Queue:
                 'webhooks': job_data.webhooks,
                 'group_id': group_id,
                 'repeat': job_data.repeat,
+                'visibility': job_data.visibility,
             }
 
         # Partition in one pass so that job_datas can be a one-shot iterable.
@@ -992,11 +1008,14 @@ class Queue:
 
         return jobs_without_dependencies + jobs_with_unmet_dependencies + jobs_with_met_dependencies
 
-    def run_job(self, job: Job) -> Job:
+    def run_job(self, job: Job, callback_outcomes: dict | None = None, callback_exc_string: str | None = None) -> Job:
         """Run the job
 
         Args:
             job (Job): The job to run
+            callback_outcomes (Optional[dict]): Outcomes of any callbacks already run for this
+                execution, stored with the result for public/internal correlation.
+            callback_exc_string (Optional[str]): Internal traceback if a callback raised.
 
         Returns:
             Job: _description_
@@ -1005,7 +1024,13 @@ class Queue:
         job.ended_at = now()
         result_ttl = job.get_result_ttl(default_ttl=DEFAULT_RESULT_TTL)
         with self.connection.pipeline() as pipeline:
-            job._handle_success(result_ttl=result_ttl, pipeline=pipeline, worker_name='')
+            job._handle_success(
+                result_ttl=result_ttl,
+                pipeline=pipeline,
+                worker_name='',
+                callback_outcomes=callback_outcomes,
+                callback_exc_string=callback_exc_string,
+            )
             job.cleanup(result_ttl, pipeline=pipeline)
             pipeline.execute()
         return job
@@ -1048,6 +1073,7 @@ class Queue:
         on_stopped = kwargs.pop('on_stopped', None)
         rate_limit = kwargs.pop('rate_limit', None)
         webhooks = kwargs.pop('webhooks', None)
+        visibility = kwargs.pop('visibility', None)
         pipeline = kwargs.pop('pipeline', None)
         unique = kwargs.pop('unique', False)
 
@@ -1078,6 +1104,7 @@ class Queue:
             args,
             kwargs,
             webhooks,
+            visibility,
         )
 
     def enqueue(self, f: FunctionReferenceType, *args, **kwargs) -> Job:
@@ -1114,6 +1141,7 @@ class Queue:
             args,
             kwargs,
             webhooks,
+            visibility,
         ) = Queue.parse_args(f, *args, **kwargs)
 
         return self.enqueue_call(
@@ -1136,6 +1164,7 @@ class Queue:
             on_stopped=on_stopped,
             rate_limit=rate_limit,
             webhooks=webhooks,
+            visibility=visibility,
             pipeline=pipeline,
             unique=unique,
         )
@@ -1172,6 +1201,7 @@ class Queue:
             args,
             kwargs,
             webhooks,
+            visibility,
         ) = Queue.parse_args(f, *args, **kwargs)
         job = self.create_job(
             f,
@@ -1193,6 +1223,7 @@ class Queue:
             on_stopped=on_stopped,
             rate_limit=rate_limit,
             webhooks=webhooks,
+            visibility=visibility,
         )
         if at_front:
             job.enqueue_at_front = True
@@ -1499,13 +1530,48 @@ class Queue:
                 record_job_failure(job, exc_string, pipeline)
                 pipeline.execute()
 
-            execute_failure_callback(job, self.death_penalty_class, *sys.exc_info())
-            job.send_webhooks(JobStatus.FAILED, exc_string=exc_string)
+            try:
+                execute_failure_callback(job, self.death_penalty_class, *sys.exc_info())
+            except:  # noqa
+                # A raising sync failure callback still propagates, as before the refactor.
+                callback_exc_string = format_exc_info(sys.exc_info())
+                self._record_callback_failure(job, 'failure', callback_exc_string)
+                raise
+            webhook_exc_string = exc_string
+            if job.visibility is not None:
+                webhook_exc_string = job.visibility.public_exc_string(exc_string, job_id=job.id)
+            job.send_webhooks(JobStatus.FAILED, exc_string=webhook_exc_string)
         else:
-            execute_success_callback(job, self.death_penalty_class, job._result)
+            try:
+                execute_success_callback(job, self.death_penalty_class, job._result)
+            except:  # noqa
+                callback_exc_string = format_exc_info(sys.exc_info())
+                self._record_callback_failure(job, 'success', callback_exc_string)
+                raise
             job.send_webhooks(JobStatus.FINISHED)
 
         return job
+
+    def _record_callback_failure(self, job: Job, callback_type: str, callback_exc_string: str) -> None:
+        """Best-effort audit record of a sync callback that raised, without masking its exception."""
+        from .visibility import CallbackOutcome
+
+        try:
+            with self.connection.pipeline() as pipeline:
+                job._handle_failure(
+                    callback_exc_string,
+                    pipeline=pipeline,
+                    worker_name='',
+                    callback_outcomes={
+                        callback_type: CallbackOutcome(
+                            callback_type, 'failed', error_type=exception_type_name(callback_exc_string)
+                        )
+                    },
+                    callback_exc_string=callback_exc_string,
+                )
+                pipeline.execute()
+        except Exception:
+            self.log.exception('Queue: failed to record %s callback failure of job %s', callback_type, job.id)
 
     def move_dependents_to_ready(
         self,

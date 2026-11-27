@@ -30,12 +30,75 @@ def find_empty_redis_database(ssl=False):
     assert False, 'No empty Redis database found to run tests in.'
 
 
+def get_redis_version() -> tuple[int, ...]:
+    if not redis_available():
+        return (7, 2, 0)
+    with Redis() as conn:
+        return get_version(conn)
+
+
 def min_redis_version(ver: tuple[int, ...]):
     ver_str = '.'.join(map(str, ver))
-    with Redis() as conn:
-        redis_version = get_version(conn)
+    return unittest.skipIf(get_redis_version() < ver, f'Skip if Redis server < {ver_str}')
 
-    return unittest.skipIf(redis_version < ver, f'Skip if Redis server < {ver_str}')
+
+def _redis_is_reachable() -> bool:
+    try:
+        with Redis(socket_connect_timeout=0.5, socket_timeout=0.5) as conn:
+            conn.ping()
+        return True
+    except Exception:
+        return False
+
+
+REDIS_AVAILABLE = None
+
+
+def redis_available() -> bool:
+    """Whether a real Redis server is reachable.
+
+    Tests default to a real Redis server. When none is configured (e.g. a locked-down
+    sandbox), they fall back to an in-memory `fakeredis` server so the suite is still
+    runnable. `fakeredis` is only an optional test dependency.
+    """
+    global REDIS_AVAILABLE
+    if REDIS_AVAILABLE is None:
+        REDIS_AVAILABLE = _redis_is_reachable()
+    return REDIS_AVAILABLE
+
+
+def _fake_connection(ssl: bool = False):
+    import fakeredis
+
+    kwargs = {}
+    if ssl:
+        kwargs.update({'ssl': True, 'ssl_cert_reqs': None})
+    conn = fakeredis.FakeStrictRedis(server=fakeredis.FakeServer(), **kwargs)
+    # fakeredis does not implement INFO; cache a modern version so RQ takes the
+    # LMOVE / intermediate-queue code paths instead of the legacy fallback.
+    setattr(conn, '__rq_redis_server_version', (7, 2, 0))
+    return conn
+
+
+def find_empty_redis_database(ssl=False):
+    """Tries to connect to a random Redis database (starting from 4), and
+    will use/connect it when no keys are in there.
+    """
+    if not redis_available():
+        return _fake_connection(ssl=ssl)
+    for dbnum in range(4, 17):
+        connection_kwargs = {'db': dbnum}
+        if ssl:
+            connection_kwargs['port'] = 9736
+            connection_kwargs['ssl'] = True
+            # disable certificate validation
+            connection_kwargs['ssl_cert_reqs'] = None  # type: ignore
+        testconn = Redis(**connection_kwargs)  # type: ignore
+        empty = testconn.dbsize() == 0
+        if empty:
+            return testconn
+        testconn.close()
+    assert False, 'No empty Redis database found to run tests in.'
 
 
 def slow(f):
