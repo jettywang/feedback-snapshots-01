@@ -70,6 +70,7 @@ if defined?(Curl)
           build_curb_response(webmock_response)
           WebMock::CallbackRegistry.invoke_callbacks(
             {lib: :curb}, request_signature, webmock_response)
+          webmock_response.record_full_delivery!
           invoke_curb_callbacks
           true
         elsif WebMock.net_connect_allowed?(request_signature.uri)

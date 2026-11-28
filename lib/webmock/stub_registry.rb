@@ -64,7 +64,7 @@ module WebMock
 
     def response_for_request(request_signature)
       stub = request_stub_for(request_signature)
-      stub ? evaluate_response_for_request(stub.response, request_signature) : nil
+      stub ? evaluate_response_for_request(stub, request_signature) : nil
     end
 
     private
@@ -76,8 +76,11 @@ module WebMock
         }
     end
 
-    def evaluate_response_for_request(response, request_signature)
-      response.dup.evaluate(request_signature)
+    def evaluate_response_for_request(stub, request_signature)
+      response = stub.response.dup.evaluate(request_signature)
+      ReplayRegistry.instance.record_version(
+        response, request_signature: request_signature, stub: stub)
+      response
     end
 
   end

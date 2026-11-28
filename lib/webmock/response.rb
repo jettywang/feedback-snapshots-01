@@ -15,6 +15,18 @@ module WebMock
   end
 
   class Response
+    # Splits a stubbed body into the segments a client can receive. An Array
+    # body keeps one segment per entry; any other body is one segment.
+    def self.delivery_segments_for(body)
+      case body
+      when nil then []
+      when Array then body.map(&:to_s)
+      else [body.to_s]
+      end
+    end
+
+    attr_accessor :replay_version, :replay_receipt, :replay_source
+
     def initialize(options = {})
       case options
       when IO, StringIO
@@ -24,6 +36,26 @@ module WebMock
       else
         self.options = options
       end
+    end
+
+    # The segments this response delivers. Rack responses set them from the
+    # body chunks the app yielded.
+    def delivery_segments
+      @delivery_segments || self.class.delivery_segments_for(body)
+    end
+
+    def delivery_segments=(segments)
+      @delivery_segments = segments && segments.map { |segment| segment.to_s }
+    end
+
+    # Records that this response's whole body was handed to the client. Used
+    # by adapters that pass the body on in one piece; adapters that stream
+    # segments report them one at a time as the client reads.
+    def record_full_delivery!
+      segments = delivery_segments
+      segments.each { |segment| replay_receipt&.record(segment) }
+      replay_receipt&.complete!
+      self
     end
 
     def headers
@@ -43,6 +75,7 @@ module WebMock
 
     def body=(body)
       @body = body
+      @delivery_segments = nil
       assert_valid_body!
       stringify_body!
     end
@@ -155,7 +188,9 @@ module WebMock
 
     def evaluate(request_signature)
       options = @responder.call(request_signature)
-      Response.new(options)
+      response = Response.new(options)
+      response.replay_source = replay_source
+      response
     end
   end
 end

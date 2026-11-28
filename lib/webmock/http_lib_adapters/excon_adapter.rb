@@ -58,6 +58,7 @@ if defined?(Excon)
           if mock_response = WebMock::StubRegistry.instance.response_for_request(mock_request)
             self.perform_callbacks(mock_request, mock_response, real_request: false)
             response = self.real_response(mock_response)
+            mock_response.record_full_delivery!
             response
           elsif WebMock.net_connect_allowed?(mock_request.uri)
             conn = new_excon_connection(params)

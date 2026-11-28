@@ -31,6 +31,7 @@ require_relative 'webmock/request_pattern'
 require_relative 'webmock/request_signature'
 require_relative 'webmock/responses_sequence'
 require_relative 'webmock/request_stub'
+require_relative 'webmock/replay_evidence'
 require_relative 'webmock/response'
 require_relative 'webmock/rack_response'
 

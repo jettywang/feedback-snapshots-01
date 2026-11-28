@@ -471,6 +471,39 @@ RestClient.post('www.example.com')    # ===> "Hello"
 
 WebMock does not set `rack.session` in the Rack env, just as a real server would not. If your app needs a session, include session middleware in the app you pass to `to_rack`.
 
+### Replay evidence for stubbed responses
+
+Each time a stub is selected, WebMock records a **version** of the response it served, and each delivery records a **receipt** of what the client actually received. This is meant for security regressions that need to trace a replayed response back to the stub that produced it, including responses assembled by a Rack app or written directly in the stub.
+
+```ruby
+stub = stub_request(:get, "www.example.com/stream").
+  to_rack(MyRackApp)
+
+body = Net::HTTP.start("www.example.com", 80) do |http|
+  http.request_get("/stream") do |response|
+    response.read_body { |chunk| body << chunk; break }  # stop after the first chunk
+  end
+end
+
+receipt = WebMock.replay_receipts.last
+receipt.version_id          # => 1
+receipt.stub_id             # => "stub-1"
+receipt.stub_pattern        # => "GET http://www.example.com/stream"
+receipt.request_signature   # => "GET http://www.example.com/stream with headers {...}"
+receipt.source              # => :rack (or :direct for to_return bodies)
+receipt.state               # => :partial
+receipt.delivered_bytes     # => 6
+receipt.body_bytesize       # => 11
+receipt.delivered_sha256    # digest of the bytes the client received
+```
+
+- A version is created before any bytes are delivered. It stores the original request signature, the selected stub (its `stub_id` and pattern), the response status, a digest of the whole body, and the size of each delivered segment. For `to_rack`, the segments are the chunks the Rack app yielded.
+- A receipt is `:pending` until delivery starts, `:complete` only when the client received every segment, and `:partial` when the client stopped early (for example `break` out of `read_body`) or its block raised. A partial receipt records only the delivered prefix, never bytes the client did not receive.
+- The Net::HTTP adapter delivers replayed bodies segment by segment, so stopped reads are visible. Adapters that hand the body to the client in one piece record a complete delivery.
+- Versions and receipts are reset by `WebMock.reset!` together with the request and stub registries. Stub ids and patterns are copied into versions, so a receipt can still name the stub after that stub was removed.
+
+Use `WebMock.replay_evidence` to query the registry: `versions`, `receipts`, `receipts_for_version(id)`, `receipts_for_stub(stub)`, and `pending_receipts`. Records expose `to_h` as plain data for offline review.
+
 ### Raising errors
 
 #### Exception declared by class

@@ -72,6 +72,20 @@ module WebMock
       WebMock::RequestRegistry.instance.reset!
     end
 
+    # Response versions and delivery receipts for stubbed responses. See
+    # WebMock::ReplayRegistry.
+    def replay_evidence
+      WebMock::ReplayRegistry.instance
+    end
+
+    def replay_versions
+      replay_evidence.versions
+    end
+
+    def replay_receipts
+      replay_evidence.receipts
+    end
+
     private
 
     def convert_uri_method_and_options_to_request_and_options(method, uri, options, &block)

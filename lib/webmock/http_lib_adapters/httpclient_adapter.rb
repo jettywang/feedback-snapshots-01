@@ -136,6 +136,7 @@ if defined?(::HTTPClient)
       webmock_response.raise_error_if_any
 
       block.call(response, body) if block && body && body.bytesize > 0
+      webmock_response.record_full_delivery!
 
       response
     end

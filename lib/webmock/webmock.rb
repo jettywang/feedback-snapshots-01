@@ -149,6 +149,21 @@ module WebMock
   def self.reset!
     WebMock::RequestRegistry.instance.reset!
     WebMock::StubRegistry.instance.reset!
+    WebMock::ReplayRegistry.instance.reset!
+  end
+
+  # Response versions and delivery receipts recorded for the current test.
+  # See WebMock::ReplayRegistry.
+  def self.replay_evidence
+    WebMock::ReplayRegistry.instance
+  end
+
+  def self.replay_versions
+    replay_evidence.versions
+  end
+
+  def self.replay_receipts
+    replay_evidence.receipts
   end
 
   def self.reset_webmock

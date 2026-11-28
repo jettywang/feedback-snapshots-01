@@ -1,5 +1,15 @@
 # Changelog
 
+# Unreleased
+
+* Record replay evidence for stubbed responses
+
+    Every time a stub is selected, WebMock now records a version: the request signature it replayed, the selected stub's id and pattern, and a digest of the response body and its segments. Each delivery records a receipt of what the client actually received: `complete` when every segment reached it, `partial` when it stopped early or its block raised, and `pending` when delivery never began. Partial receipts keep only the delivered prefix.
+
+    This covers responses built from a Rack app with `to_rack`, including its body chunks, and bodies written directly in the stub. The Net::HTTP adapter now hands replayed bodies over segment by segment, so a stopped `read_body` is visible; adapters that pass the whole body on record a complete delivery.
+
+    Read the records from `WebMock.replay_evidence`, or through `WebMock.replay_versions` and `WebMock.replay_receipts`. They are reset by `WebMock.reset!`, and a receipt still names its stub after that stub is removed.
+
 # 3.35.0
 
 * Fix `get_file` with Patron 1.1 (#1147)

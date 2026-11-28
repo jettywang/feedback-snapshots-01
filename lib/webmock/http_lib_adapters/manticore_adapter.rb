@@ -117,6 +117,7 @@ if defined?(Manticore)
             if webmock_response.should_timeout
               StubbedTimeoutResponse.new
             else
+              webmock_response.record_full_delivery!
               Manticore::StubbedResponse.stub(
                 code: webmock_response.status[0],
                 body: webmock_response.body,

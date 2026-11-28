@@ -64,13 +64,16 @@ module HTTP
       end
 
       def build_http_rb_response_body_from_webmock_response(webmock_response)
+        receipt = webmock_response.replay_receipt
         if HTTP::VERSION < "1.0.0"
-          Body.new(Streamer.new(webmock_response.body))
+          Body.new(Streamer.new(webmock_response.body, receipt: receipt))
         elsif HTTP::VERSION < "3.0.0"
-          Body.new(Streamer.new(webmock_response.body), webmock_response.body.encoding)
+          Body.new(Streamer.new(webmock_response.body, receipt: receipt),
+            webmock_response.body.encoding)
         else
           Body.new(
-            Streamer.new(webmock_response.body, encoding: webmock_response.body.encoding),
+            Streamer.new(webmock_response.body,
+              encoding: webmock_response.body.encoding, receipt: receipt),
             encoding: webmock_response.body.encoding
           )
         end

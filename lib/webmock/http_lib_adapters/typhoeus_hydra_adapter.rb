@@ -204,6 +204,7 @@ if defined?(Typhoeus)
                 request.on_body.each { |callback| callback.call(webmock_response.body, response) }
               end
               request.finish(response)
+              webmock_response.record_full_delivery!
               webmock_response.raise_error_if_any
               res = false
             elsif !WebMock.net_connect_allowed?(request_signature.uri)

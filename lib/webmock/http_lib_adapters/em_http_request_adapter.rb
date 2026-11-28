@@ -111,6 +111,7 @@ if defined?(EventMachine::HttpClient)
 
         if stubbed_webmock_response
           WebMock::CallbackRegistry.invoke_callbacks({lib: :em_http_request}, request_signature, stubbed_webmock_response)
+          stubbed_webmock_response.record_full_delivery!
           @uri ||= nil
           EM.next_tick {
             setup(make_raw_response(stubbed_webmock_response), @uri,

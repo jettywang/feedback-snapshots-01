@@ -10,19 +10,34 @@ module WebMock
       env = build_rack_env(request)
 
       status, headers, response = @app.call(env)
+      segments = segments_from_rack_response(response)
 
-      Response.new(
-        body: body_from_rack_response(response),
+      evaluated = Response.new(
+        body: join_segments(segments),
         headers: headers,
         status: [status, Rack::Utils::HTTP_STATUS_CODES[status]]
       )
+      evaluated.delivery_segments = segments
+      evaluated.replay_source = :rack
+      evaluated
     end
 
     def body_from_rack_response(response)
-      body = "".dup
-      response.each { |line| body << line }
+      join_segments(segments_from_rack_response(response))
+    end
+
+    def join_segments(segments)
+      segments.inject("".dup) { |body, segment| body << segment }
+    end
+
+    # Keeps the body chunks the Rack app yielded, so a replay version can
+    # record what the app produced and a receipt can record which of those
+    # chunks the client actually received.
+    def segments_from_rack_response(response)
+      segments = []
+      response.each { |line| segments << line.to_s }
       response.close if response.respond_to?(:close)
-      return body
+      segments
     end
 
     def build_rack_env(request)

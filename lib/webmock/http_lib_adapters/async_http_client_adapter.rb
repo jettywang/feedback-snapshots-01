@@ -244,6 +244,7 @@ if defined?(Async::HTTP)
               end
             end
 
+            webmock_response.record_full_delivery!
             ::Protocol::HTTP::Response[
               webmock_response.status[0],
               headers,

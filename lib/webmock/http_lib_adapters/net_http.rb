@@ -108,7 +108,7 @@ module WebMock
             @socket = self.class.socket_type.new
             WebMock::CallbackRegistry.invoke_callbacks(
               {lib: :net_http}, request_signature, webmock_response)
-            build_net_http_response(webmock_response, request.uri, &block)
+            build_net_http_response(webmock_response, request.uri, request.method, &block)
           elsif WebMock.net_connect_allowed?(request_signature.uri)
             check_right_http_connection
             after_request = lambda do |response|
@@ -176,7 +176,7 @@ module WebMock
           end
         end
 
-        def build_net_http_response(webmock_response, request_uri, &block)
+        def build_net_http_response(webmock_response, request_uri, http_method = nil, &block)
           response = Net::HTTPResponse.send(:response_class, webmock_response.status[0].to_s).new("1.0", webmock_response.status[0].to_s, webmock_response.status[1])
           body = webmock_response.body
           body = nil if webmock_response.status[0].to_s == '204'
@@ -194,6 +194,14 @@ module WebMock
           response.uri = request_uri
 
           response.extend Net::WebMockHTTPResponse
+          # HEAD responses and statuses without a body deliver no version
+          # bytes, just as on the wire.
+          if response.class.body_permitted? && http_method.to_s.casecmp('HEAD') != 0
+            response.webmock_replay_body!(
+              webmock_response.delivery_segments, webmock_response.replay_receipt)
+          else
+            response.webmock_replay_body!([], webmock_response.replay_receipt)
+          end
 
           if webmock_response.should_timeout
             raise Net::OpenTimeout, "execution expired"

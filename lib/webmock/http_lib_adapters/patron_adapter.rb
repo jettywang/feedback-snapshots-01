@@ -28,6 +28,7 @@ if defined?(::Patron::Session)
               PatronAdapter.handle_file_name(req, webmock_response)
               res = PatronAdapter.build_patron_response(webmock_response, default_response_charset)
               PatronAdapter.invoke_callbacks(request_signature, webmock_response)
+              webmock_response.record_full_delivery!
               res
             else
               res = super
@@ -91,26 +92,32 @@ if defined?(::Patron::Session)
             define_method(name) { @head.public_send(name) }
           end
 
-          def initialize(head, body)
+          def initialize(head, body, receipt = nil)
             @head = head
             @body = body
+            @receipt = receipt
             @closed = false
           end
 
           def read(length = nil, outbuf = nil)
             ensure_open!
-            @body.read(length, outbuf)
+            chunk = @body.read(length, outbuf)
+            record_chunk(chunk)
+            chunk
           end
 
           def readpartial(maxlen, outbuf = nil)
             ensure_open!
-            @body.readpartial(maxlen, outbuf)
+            chunk = @body.readpartial(maxlen, outbuf)
+            record_chunk(chunk)
+            chunk
           end
 
           def each
             return enum_for(:each) unless block_given?
             ensure_open!
             while (chunk = @body.read(CHUNK_SIZE))
+              record_chunk(chunk)
               yield chunk
             end
             self
@@ -119,13 +126,18 @@ if defined?(::Patron::Session)
           def each_line(&block)
             return enum_for(:each_line) unless block
             ensure_open!
-            @body.each_line(&block)
+            @body.each_line do |line|
+              record_chunk(line)
+              block.call(line)
+            end
             self
           end
 
           def drain!
             ensure_open!
-            @body.read.bytesize
+            chunk = @body.read
+            record_chunk(chunk)
+            chunk.bytesize
           end
 
           def eof?
@@ -151,6 +163,10 @@ if defined?(::Patron::Session)
 
           def ensure_open!
             raise IOError, "closed stream" if @closed
+          end
+
+          def record_chunk(chunk)
+            @receipt&.record(chunk) if chunk && !chunk.empty?
           end
         end
 
@@ -272,10 +288,19 @@ if defined?(::Patron::Session)
           # Kept out of the stream, so the stream has only the methods of
           # Patron::ResponseStream
           body = StringIO.new(webmock_response.body.to_s.b)
-          stream = StubbedResponseStream.new(head, body)
+          stream = StubbedResponseStream.new(head, body, webmock_response.replay_receipt)
+          completed = false
           begin
             yield stream
+            completed = true
           ensure
+            # The receipt is complete only when the block returned normally
+            # after reading every byte. A block that left early leaves only
+            # the bytes it read.
+            receipt = webmock_response.replay_receipt
+            if receipt
+              completed && body.eof? ? receipt.complete! : receipt.abort!
+            end
             stream.close
           end
 

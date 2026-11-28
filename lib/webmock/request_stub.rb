@@ -4,11 +4,19 @@ module WebMock
   class RequestStub
 
     attr_accessor :request_pattern
+    attr_reader :stub_id
 
     def initialize(method, uri)
       @request_pattern = RequestPattern.new(method, uri)
       @responses_sequences = []
+      @stub_id = "stub-#{self.class.next_stub_number}"
       self
+    end
+
+    # Identifies this stub in replay versions, so a receipt can be traced
+    # back to the stub that served it even after the stub was removed.
+    def self.next_stub_number
+      @stub_number = (@stub_number || 0) + 1
     end
 
     def with(params = {}, &block)
@@ -57,6 +65,7 @@ module WebMock
 
     def to_rack(app, options={})
       @responses_sequences << ResponsesSequence.new([RackResponse.new(app)])
+      self
     end
 
     def to_raise(*exceptions)
