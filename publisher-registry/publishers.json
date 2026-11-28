@@ -1,0 +1,140 @@
+{
+  "version": 1,
+  "entries": [
+    {
+      "id": "gh-trailofbits-pypi-attestation-models",
+      "provider": {
+        "kind": "GitHub",
+        "issuer": "https://token.actions.githubusercontent.com"
+      },
+      "workflow_boundary": {
+        "repository": "trailofbits/pypi-attestation-models",
+        "workflow": "release.yml"
+      },
+      "vendor_extensions": {
+        "runner_environment": "github-hosted"
+      },
+      "status": "approved",
+      "pending_reasons": [],
+      "offline_sample": {
+        "format": "sigstore-bundle",
+        "attestation": "pypi_attestation_models-0.0.4a2.tar.gz.sigstore",
+        "distribution": "pypi_attestation_models-0.0.4a2.tar.gz"
+      }
+    },
+    {
+      "id": "gl-facutuesca-gitlab-oidc-project",
+      "provider": {
+        "kind": "GitLab",
+        "issuer": "https://gitlab.com"
+      },
+      "workflow_boundary": {
+        "repository": "facutuesca/gitlab-oidc-project",
+        "workflow_filepath": ".gitlab-ci.yml"
+      },
+      "vendor_extensions": {
+        "runner_environment": "gitlab-hosted"
+      },
+      "status": "approved",
+      "pending_reasons": [],
+      "offline_sample": {
+        "format": "pep740-attestation",
+        "attestation": "gitlab_oidc_project-0.0.3.tar.gz.publish.attestation",
+        "distribution": "gitlab_oidc_project-0.0.3.tar.gz"
+      }
+    },
+    {
+      "id": "cci-sign-and-publish-examples",
+      "provider": {
+        "kind": "CircleCI",
+        "issuer": "https://oidc.circleci.com"
+      },
+      "workflow_boundary": {
+        "project_id": "fdd9283f-e619-46af-8f9c-851f7d3e8b2b",
+        "pipeline_definition_id": "8e4f8ab2-8d7c-4827-9f15-de076d6d647f"
+      },
+      "vendor_extensions": {},
+      "status": "pending",
+      "pending_reasons": [
+        {
+          "code": "optional-claim-absent",
+          "field": "vcs_origin",
+          "detail": "触发仓库未固定,任何 VCS 来源只要复用同一 pipeline definition 即可发布"
+        },
+        {
+          "code": "optional-claim-absent",
+          "field": "vcs_ref",
+          "detail": "触发 ref 未固定,无法限定仅从受保护分支/标签发布"
+        }
+      ],
+      "offline_sample": {
+        "format": "x509-certificate",
+        "certificate": "circleci-oidc.pem"
+      }
+    },
+    {
+      "id": "gcb-attestation-test",
+      "provider": {
+        "kind": "Google",
+        "issuer": "https://accounts.google.com"
+      },
+      "workflow_boundary": {
+        "email": "919436158236-compute@developer.gserviceaccount.com"
+      },
+      "vendor_extensions": {},
+      "status": "approved",
+      "pending_reasons": [],
+      "offline_sample": {
+        "format": "pep740-provenance",
+        "attestation": "gcb_attestation_test-0.0.0.tar.gz.provenance",
+        "distribution": "gcb_attestation_test-0.0.0.tar.gz"
+      }
+    },
+    {
+      "id": "gh-environment-gated-release",
+      "provider": {
+        "kind": "GitHub",
+        "issuer": "https://token.actions.githubusercontent.com"
+      },
+      "workflow_boundary": {
+        "repository": "trailofbits/pypi-attestation-models",
+        "workflow": "release.yml",
+        "environment": "release"
+      },
+      "vendor_extensions": {},
+      "status": "pending",
+      "pending_reasons": [
+        {
+          "code": "unenforced-declared-field",
+          "field": "environment",
+          "detail": "库模型声明了 environment 但 _as_policy() 未将其纳入验签,登记不能依赖它做准入"
+        }
+      ],
+      "offline_sample": {
+        "format": "sigstore-bundle",
+        "attestation": "pypi_attestation_models-0.0.4a2.tar.gz.sigstore",
+        "distribution": "pypi_attestation_models-0.0.4a2.tar.gz"
+      }
+    },
+    {
+      "id": "azure-devops-example",
+      "provider": {
+        "kind": "AzureDevOps",
+        "issuer": "https://stsonline.visualstudio.com"
+      },
+      "workflow_boundary": {
+        "organization": "example-org",
+        "pipeline": "release"
+      },
+      "vendor_extensions": {},
+      "status": "pending",
+      "pending_reasons": [
+        {
+          "code": "unsupported-provider",
+          "field": "provider.kind",
+          "detail": "库尚未实现该提供方的验签策略,边界字段无法被证明"
+        }
+      ]
+    }
+  ]
+}
