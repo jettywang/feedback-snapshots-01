@@ -4,6 +4,7 @@
 
 ### User-facing changes
 - [BUGFIX] avoid duplicating the wheel component in SBOMs ([#750](https://github.com/pypa/auditwheel/issues/750))
+- [FEATURE] add opt-in repair provenance evidence (`--provenance`) that links input members, per-referrer library resolution and output members, plus `auditwheel provenance` to verify or explain it
 
 ## 6.8.2
 

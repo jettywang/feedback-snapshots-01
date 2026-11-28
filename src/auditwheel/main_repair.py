@@ -125,6 +125,18 @@ wheel will abort processing of subsequent wheels.
     options.allow_pure_python_wheel(parser)
     options.ldpaths(parser)
     parser.add_argument(
+        "--provenance",
+        dest="PROVENANCE",
+        metavar="PATH",
+        type=Path,
+        default=None,
+        help=(
+            "Write optional repair evidence. If PATH ends in .json it is used as the "
+            "document filename, otherwise a <wheel>.provenance.json file is written "
+            "inside PATH. Paths inside the document are relative and relocatable."
+        ),
+    )
+    parser.add_argument(
         "--patcher",
         action=EnvironmentDefault,
         metavar="PATCHER",
@@ -291,6 +303,7 @@ def execute(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
             patcher=patcher,
             strip=args.STRIP,
             zip_compression_level=args.ZIP_COMPRESSION_LEVEL,
+            provenance_path=getattr(args, "PROVENANCE", None),
         )
 
         if out_wheel is not None:

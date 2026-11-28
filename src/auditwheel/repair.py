@@ -15,6 +15,7 @@ from auditwheel.elfutils import elf_read_dt_needed
 from auditwheel.hashfile import hashfile
 from auditwheel.lddtree import LIBPYTHON_RE
 from auditwheel.policy import get_replace_platforms
+from auditwheel.provenance import ProvenanceRecorder
 from auditwheel.sboms import create_sbom_for_wheel
 from auditwheel.tools import is_subdir, unique_by_index
 from auditwheel.wheeltools import WHEEL_INFO_RE, InWheelCtx, add_platforms
@@ -39,6 +40,7 @@ def repair_wheel(
     patcher: ElfPatcher,
     strip: bool,
     zip_compression_level: int,
+    provenance_path: Path | None = None,
 ) -> Path | None:
     external_refs_by_fn = wheel_abi.full_external_refs
     # Do not repair a pure wheel, i.e. has no external refs
@@ -50,10 +52,25 @@ def repair_wheel(
     out_dir = out_dir.resolve(strict=True)
     wheel_fname = wheel_path.name
 
+    recorder: ProvenanceRecorder | None = None
+    if provenance_path is not None:
+        recorder = ProvenanceRecorder(
+            wheel_path=wheel_path,
+            abis=abis,
+            lib_sdir=lib_sdir,
+            strip=strip,
+            update_tags=update_tags,
+            workspace_root=None,
+        )
+        patcher = recorder.wrap_patcher(patcher)
+
     output_wheel = out_dir / wheel_fname
     with InWheelCtx(wheel_path) as ctx:
         ctx.out_wheel = output_wheel
         ctx.zip_compression_level = zip_compression_level
+        if recorder is not None:
+            assert ctx.path is not None  # noqa: S101
+            recorder.bind(ctx.path)
 
         match = WHEEL_INFO_RE(wheel_fname)
         if not match:
@@ -61,6 +78,8 @@ def repair_wheel(
             raise ValueError(msg)
 
         dest_dir = Path(match.group("name") + lib_sdir)
+        if recorder is not None:
+            recorder.set_graft_directory(dest_dir)
         dist_info_dirs = list(ctx.path.glob("*.dist-info"))
         assert len(dist_info_dirs) == 1, (  # noqa: S101
             "Expected exactly one .dist-info directory, "
@@ -75,6 +94,15 @@ def repair_wheel(
             ext_libs = v[abis[0]].libs
             replacements: list[tuple[str, str]] = []
             for soname, src_path in ext_libs.items():
+                reference_id = None
+                if recorder is not None:
+                    reference_id = recorder.reference(
+                        fn,
+                        soname,
+                        src_path,
+                        status="resolved" if src_path is not None else "not_found",
+                        policy=abis[0],
+                    )
                 # Handle libpython dependencies by removing them
                 if LIBPYTHON_RE.match(soname):
                     logger.warning(
@@ -83,6 +111,8 @@ def repair_wheel(
                         soname,
                         str(fn),
                     )
+                    if recorder is not None and reference_id is not None:
+                        recorder.set_reference_status(reference_id, "removed_libpython")
                     patcher.remove_needed(fn, soname)
                     continue
 
@@ -96,7 +126,17 @@ def repair_wheel(
                 if not dest_dir.exists():
                     dest_dir.mkdir()
                 sbom_filepaths.append(src_path)
-                new_soname, new_path = copylib(src_path, dest_dir, patcher)
+                new_soname, new_path, created = _copylib(src_path, dest_dir, patcher)
+                if recorder is not None and reference_id is not None:
+                    recorder.graft(
+                        reference_id=reference_id,
+                        referrer=fn,
+                        soname=soname,
+                        source_path=src_path,
+                        new_soname=new_soname,
+                        new_path=new_path,
+                        created=created,
+                    )
                 soname_map[soname] = (new_soname, new_path)
                 replacements.append((soname, new_soname))
             if replacements:
@@ -107,6 +147,8 @@ def repair_wheel(
                 if _path_is_script(fn):
                     new_fn = _replace_elf_script_with_shim(match.group("name"), fn)
                     patcher.update_elf_path(fn, new_fn)
+                    if recorder is not None:
+                        recorder.record_shim(fn, new_fn)
                     script_shims[fn] = new_fn
                 new_rpath = Path("$ORIGIN") / os.path.relpath(dest_dir, new_fn.parent)
                 append_rpath_within_wheel(new_fn, str(new_rpath), ctx.name, patcher)
@@ -133,12 +175,24 @@ def repair_wheel(
         if strip:
             libs_to_strip = [path for (_, path) in soname_map.values()]
             extensions = [script_shims.get(path, path) for path in external_refs_by_fn]
+            if recorder is not None:
+                for member in itertools.chain(libs_to_strip, extensions):
+                    recorder.record_step("strip_symbols", member)
             strip_symbols(itertools.chain(libs_to_strip, extensions))
 
         patcher.apply_updates()
 
         if update_tags:
+            previous_name = output_wheel.name
             output_wheel = add_platforms(ctx, abis, get_replace_platforms(abis[0]))
+            if recorder is not None:
+                recorder.record_tag_update(
+                    before=previous_name,
+                    after=output_wheel.name,
+                    abis=abis,
+                    removed_platforms=get_replace_platforms(abis[0]),
+                    update_tags=update_tags,
+                )
 
         # If we grafted packages with identities we add an SBOM to the wheel.
         # We recalculate the checksum at this point because there can be
@@ -150,7 +204,14 @@ def repair_wheel(
         if sbom_data:
             sbom_dir = Path(dist_info_dirs[0], "sboms")
             sbom_dir.mkdir(exist_ok=True)
-            (sbom_dir / "auditwheel.cdx.json").write_text(json.dumps(sbom_data))
+            sbom_file = sbom_dir / "auditwheel.cdx.json"
+            sbom_file.write_text(json.dumps(sbom_data))
+            if recorder is not None:
+                recorder.record_sbom(str(sbom_file.relative_to(ctx.path).as_posix()))
+
+    if recorder is not None and provenance_path is not None:
+        written = recorder.write(output_wheel, provenance_path)
+        logger.info("Provenance evidence written to %s", written)
 
     return output_wheel
 
@@ -168,6 +229,16 @@ def copylib(src_path: Path, dest_dir: Path, patcher: ElfPatcher) -> tuple[str, P
     1) Copy the file from src_path to dest_dir/
     2) Rename the shared object from soname to soname.<unique>
     """
+    new_soname, dest_path, _created = _copylib(src_path, dest_dir, patcher)
+    return new_soname, dest_path
+
+
+def _copylib(
+    src_path: Path,
+    dest_dir: Path,
+    patcher: ElfPatcher,
+) -> tuple[str, Path, bool]:
+    """Like :func:`copylib`, additionally reporting whether a copy was made."""
     # Copy the a shared library from the system (src_path) into the wheel
 
     with src_path.open("rb") as f:
@@ -179,7 +250,7 @@ def copylib(src_path: Path, dest_dir: Path, patcher: ElfPatcher) -> tuple[str, P
 
     dest_path = dest_dir / new_soname
     if dest_path.exists():
-        return new_soname, dest_path
+        return new_soname, dest_path, False
 
     logger.debug("Grafting: %s -> %s", src_path, dest_path)
     shutil.copy2(src_path, dest_path)
@@ -189,7 +260,7 @@ def copylib(src_path: Path, dest_dir: Path, patcher: ElfPatcher) -> tuple[str, P
 
     patcher.set_soname(dest_path, new_soname)
 
-    return new_soname, dest_path
+    return new_soname, dest_path, True
 
 
 def append_rpath_within_wheel(

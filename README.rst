@@ -100,6 +100,34 @@ Repairing a wheel. ::
     Fixed-up wheel written to /wheelhouse/cffi-1.5.2-cp35-cp35m-manylinux1_x86_64.whl
 
 
+Repair provenance
+-----------------
+
+``auditwheel repair --provenance PATH`` optionally writes a JSON evidence
+document for the repair. The document maps every input wheel member to its
+SHA-256 digest, records each ``DT_NEEDED`` reference with the exact source file
+that was resolved for that referrer, and lists the output wheel members together
+with the ELF rewrite steps (rename, ``DT_NEEDED`` replacement, RPATH change,
+strip and retag). When two members reference the same external library, the
+library is grafted once but each referrer keeps its own reference record.
+
+Paths in the document are relative to the document directory; files outside the
+workspace are recorded by basename and digest. The input wheel, the output wheel
+and the staged source libraries can therefore be moved together with the
+workspace without rewriting the evidence. ``PATH`` may name a ``.json`` file
+directly or a directory, in which case ``<output wheel>.provenance.json`` is
+created inside it.
+
+The evidence can be checked offline: ::
+
+    $ auditwheel provenance wheelhouse/foo.whl.provenance.json
+    $ auditwheel provenance --member foo.libs/libbar-1234abcd.so.1 wheelhouse/foo.whl.provenance.json
+
+The first command recomputes the input and output wheel digests, the full
+member inventories and any workspace-relative source digests. The second
+resolves one repaired member back to its input members, the concrete source
+file, and the recorded rewrite steps.
+
 Limitations
 -----------
 
