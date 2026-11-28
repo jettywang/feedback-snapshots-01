@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `Provenance.report(...)` verifies each attestation bundle independently
+  and returns a `ProvenanceReport` describing, per bundle, the declared
+  publisher, verification results, and whether the bundle was approved.
+- `pypi-attestations verify pypi` now supports multiple publisher selections
+  and `--approve-bundle INDEX`, reports every bundle even when another bundle
+  fails, and can write the report with `--report-json`.
+
 ### Changed
 
 - The minimum Python version required is now `3.11`.

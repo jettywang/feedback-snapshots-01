@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import argparse
+import base64
+import json
 import logging
 import os
 import shutil
@@ -1128,3 +1130,268 @@ def test_verify_pypi_command_github_no_repository(caplog: pytest.LogCaptureFixtu
             ]
         )
     assert "Provenance signed by a repository, but no repository URL provided" in caplog.text
+
+
+# Two independently signed bundles for the same distribution, both by the
+# same publisher identity. Bundle 0 carries the publish attestation and
+# bundle 1 carries the SLSA provenance.
+multi_provenance_path = _ASSETS / "pypi_attestations-0.0.19.tar.gz.multi-provenance"
+
+
+def test_verify_pypi_multi_select_one_publisher(caplog: pytest.LogCaptureFixture) -> None:
+    run_main_with_command(
+        [
+            "verify",
+            "pypi",
+            "--offline",
+            "--repository",
+            "https://github.com/trailofbits/pypi-attestations",
+            "--provenance-file",
+            multi_provenance_path.as_posix(),
+            pypi_sdist_path.as_posix(),
+        ]
+    )
+
+    assert "bundle 0 (GitHub trailofbits/pypi-attestations)" in caplog.text
+    assert "bundle 1 (GitHub trailofbits/pypi-attestations)" in caplog.text
+    assert "approved publishers: GitHub:trailofbits/pypi-attestations" in caplog.text
+    assert caplog.text.count("verified=True approved=True") == 2
+    assert "admitted: True" in caplog.text
+    assert f"OK: {pypi_sdist_filename}" in caplog.text
+
+
+def test_verify_pypi_multi_select_two_publishers(caplog: pytest.LogCaptureFixture) -> None:
+    run_main_with_command(
+        [
+            "verify",
+            "pypi",
+            "--offline",
+            "--repository",
+            "https://github.com/trailofbits/pypi-attestations",
+            "--repository",
+            "https://github.com/other/repo",
+            "--provenance-file",
+            multi_provenance_path.as_posix(),
+            pypi_sdist_path.as_posix(),
+        ]
+    )
+
+    assert (
+        "approved publishers: GitHub:trailofbits/pypi-attestations, GitHub:other/repo"
+        in caplog.text
+    )
+    assert caplog.text.count("approved_by=['publisher']") == 2
+    assert "unmatched selection: publisher[1]:GitHub:other/repo" in caplog.text
+    assert "admitted: True" in caplog.text
+
+
+def test_verify_pypi_multi_select_bundle(caplog: pytest.LogCaptureFixture) -> None:
+    run_main_with_command(
+        [
+            "verify",
+            "pypi",
+            "--offline",
+            "--approve-bundle",
+            "1",
+            "--provenance-file",
+            multi_provenance_path.as_posix(),
+            pypi_sdist_path.as_posix(),
+        ]
+    )
+
+    assert "approved bundles: [1]" in caplog.text
+    assert "bundle 0 (GitHub trailofbits/pypi-attestations): verified=True approved=False" in (
+        caplog.text
+    )
+    assert "bundle 1 (GitHub trailofbits/pypi-attestations): verified=True approved=True" in (
+        caplog.text
+    )
+    assert "admitted: True" in caplog.text
+
+
+def test_verify_pypi_multi_select_unregistered_publisher(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    with pytest.raises(SystemExit) as exc_info:
+        run_main_with_command(
+            [
+                "verify",
+                "pypi",
+                "--offline",
+                "--repository",
+                "https://github.com/other/repo",
+                "--provenance-file",
+                multi_provenance_path.as_posix(),
+                pypi_sdist_path.as_posix(),
+            ]
+        )
+
+    assert exc_info.value.code == 1
+    # Verification facts for both bundles survive even though approval failed.
+    assert caplog.text.count("verified=True approved=False") == 2
+    assert "unmatched selection: publisher[0]:GitHub:other/repo" in caplog.text
+    assert "admitted: False" in caplog.text
+    assert "no approved bundle was found" in caplog.text
+    assert "OK:" not in caplog.text
+
+
+def test_verify_pypi_multi_requires_a_selection(caplog: pytest.LogCaptureFixture) -> None:
+    with pytest.raises(SystemExit):
+        run_main_with_command(
+            [
+                "verify",
+                "pypi",
+                "--offline",
+                "--provenance-file",
+                multi_provenance_path.as_posix(),
+                pypi_sdist_path.as_posix(),
+            ]
+        )
+
+    assert "no approved publisher or bundle was selected" in caplog.text
+
+
+def test_verify_pypi_multi_report_json(
+    caplog: pytest.LogCaptureFixture, tmp_path: Path
+) -> None:
+    report_path = tmp_path / "report.json"
+    run_main_with_command(
+        [
+            "verify",
+            "pypi",
+            "--offline",
+            "--approve-bundle",
+            "0",
+            "--report-json",
+            report_path.as_posix(),
+            "--provenance-file",
+            multi_provenance_path.as_posix(),
+            pypi_sdist_path.as_posix(),
+        ]
+    )
+
+    report = json.loads(report_path.read_text())
+    assert report["admitted"] is True
+    assert [bundle["approved_by"] for bundle in report["bundles"]] == [["bundle"], []]
+    assert [bundle["verified"] for bundle in report["bundles"]] == [True, True]
+    assert [bundle["admitted"] for bundle in report["bundles"]] == [True, False]
+    assert report["bundles"][0]["attestation_results"][0]["predicate_type"] == (
+        "https://docs.pypi.org/attestations/publish/v1"
+    )
+
+
+def test_verify_pypi_multi_broken_bundle_is_not_borrowed(
+    caplog: pytest.LogCaptureFixture, tmp_path: Path
+) -> None:
+    provenance = json.loads(multi_provenance_path.read_text())
+    broken = provenance["attestation_bundles"][1]["attestations"][0]
+    statement = json.loads(base64.b64decode(broken["envelope"]["statement"]))
+    statement["subject"][0]["digest"]["sha256"] = "0" * 64
+    broken["envelope"]["statement"] = base64.b64encode(
+        json.dumps(statement).encode()
+    ).decode()
+    broken_path = tmp_path / "broken.provenance"
+    broken_path.write_text(json.dumps(provenance))
+
+    # Selecting the broken bundle cannot borrow the intact bundle's result.
+    with pytest.raises(SystemExit):
+        run_main_with_command(
+            [
+                "verify",
+                "pypi",
+                "--offline",
+                "--approve-bundle",
+                "1",
+                "--provenance-file",
+                broken_path.as_posix(),
+                pypi_sdist_path.as_posix(),
+            ]
+        )
+    assert "bundle 0 (GitHub trailofbits/pypi-attestations): verified=True" in caplog.text
+    assert "attestation 0: failed:" in caplog.text
+    assert "admitted: False" in caplog.text
+
+    caplog.clear()
+
+    # Selecting the intact bundle admits while still reporting the failure.
+    run_main_with_command(
+        [
+            "verify",
+            "pypi",
+            "--offline",
+            "--approve-bundle",
+            "0",
+            "--provenance-file",
+            broken_path.as_posix(),
+            pypi_sdist_path.as_posix(),
+        ]
+    )
+    assert "bundle 1 (GitHub trailofbits/pypi-attestations): verified=False" in caplog.text
+    assert "admitted: True" in caplog.text
+    assert f"OK: {pypi_sdist_filename}" in caplog.text
+
+
+def test_verify_pypi_multi_circleci_bundle_without_options_is_unapproved(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # A bundle with a publisher type that has no selection option is still
+    # verified against its own declared publisher. It cannot be approved, but
+    # it does not force options for another bundle or block the approved one.
+    provenance = json.loads(multi_provenance_path.read_text())
+    provenance["attestation_bundles"][1]["publisher"] = {
+        "kind": "CircleCI",
+        "project_id": cci_project_id,
+        "pipeline_definition_id": cci_pipeline_definition_id,
+    }
+    with tempfile.NamedTemporaryFile(suffix=".provenance") as f:
+        f.write(json.dumps(provenance).encode())
+        f.flush()
+        run_main_with_command(
+            [
+                "verify",
+                "pypi",
+                "--offline",
+                "--repository",
+                "https://github.com/trailofbits/pypi-attestations",
+                "--provenance-file",
+                f.name,
+                pypi_sdist_path.as_posix(),
+            ]
+        )
+
+    assert "bundle 0 (GitHub trailofbits/pypi-attestations): verified=True approved=True" in (
+        caplog.text
+    )
+    assert "bundle 1 (CircleCI" in caplog.text
+    assert "approved_by=none" in caplog.text
+    assert "admitted: True" in caplog.text
+
+
+def test_verify_pypi_single_circleci_no_project_id(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # The single-bundle diagnostic is preserved for selections made through
+    # the per-bundle report path as well.
+    provenance = json.loads(multi_provenance_path.read_text())
+    provenance["attestation_bundles"] = provenance["attestation_bundles"][:1]
+    provenance["attestation_bundles"][0]["publisher"] = {
+        "kind": "CircleCI",
+        "project_id": cci_project_id,
+        "pipeline_definition_id": cci_pipeline_definition_id,
+    }
+    with tempfile.NamedTemporaryFile(suffix=".provenance") as f:
+        f.write(json.dumps(provenance).encode())
+        f.flush()
+        with pytest.raises(SystemExit):
+            run_main_with_command(
+                [
+                    "verify",
+                    "pypi",
+                    "--offline",
+                    "--provenance-file",
+                    f.name,
+                    pypi_sdist_path.as_posix(),
+                ]
+            )
+
+    assert "Provenance signed by CircleCI, but no project ID provided" in caplog.text

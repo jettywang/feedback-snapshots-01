@@ -28,6 +28,7 @@ from sigstore.verify import policy
 
 from pypi_attestations import Attestation, AttestationError, VerificationError, __version__
 from pypi_attestations._impl import (
+    BundleReport,
     CircleCIPublisher,
     ConversionError,
     Distribution,
@@ -35,6 +36,8 @@ from pypi_attestations._impl import (
     GitLabPublisher,
     GooglePublisher,
     Provenance,
+    ProvenanceReport,
+    Publisher,
 )
 
 if typing.TYPE_CHECKING:  # pragma: no cover
@@ -158,26 +161,48 @@ def _parser() -> argparse.ArgumentParser:
 
     verify_pypi_command.add_argument(
         "--repository",
+        action="append",
         type=str,
-        help="URL of the publishing GitHub or GitLab repository",
+        help="URL of an approved publishing GitHub or GitLab repository; "
+        "supply once per approved publisher",
     )
 
     verify_pypi_command.add_argument(
         "--gcp-service-account",
+        action="append",
         type=str,
-        help="Email of the Google Cloud service account",
+        help="Email of an approved Google Cloud service account; "
+        "supply once per approved publisher",
     )
 
     verify_pypi_command.add_argument(
         "--circleci-project-id",
+        action="append",
         type=str,
-        help="CircleCI project ID (UUID)",
+        help="CircleCI project ID (UUID) of an approved publisher",
     )
 
     verify_pypi_command.add_argument(
         "--circleci-pipeline-definition-id",
+        action="append",
         type=str,
-        help="CircleCI pipeline definition ID (UUID)",
+        help="CircleCI pipeline definition ID (UUID) of an approved publisher",
+    )
+
+    verify_pypi_command.add_argument(
+        "--approve-bundle",
+        action="append",
+        type=int,
+        metavar="INDEX",
+        help="Approve the attestation bundle at this zero-based position, "
+        "in addition to any publisher selections",
+    )
+
+    verify_pypi_command.add_argument(
+        "--report-json",
+        type=Path,
+        metavar="FILE",
+        help="Write the per-bundle verification and approval report as JSON",
     )
 
     verify_pypi_command.add_argument(
@@ -402,10 +427,13 @@ def _get_provenance_from_pypi(dist: Distribution) -> Provenance:
         _die(f"Invalid provenance: {validation_error}")
 
 
-def _check_repository_identity(
+def _repository_identity_matches(
     expected_repository_url: str, publisher: GitHubPublisher | GitLabPublisher
-) -> None:
-    """Check that a repository url matches the given publisher's identity."""
+) -> tuple[bool, str]:
+    """Check whether a repository URL matches the given publisher's identity.
+
+    Returns `(matches, reason)`, where `reason` explains a mismatch.
+    """
     validator = (
         validators.Validator()
         .allow_schemes("https")
@@ -421,19 +449,160 @@ def _check_repository_identity(
     actual_host = "github.com" if isinstance(publisher, GitHubPublisher) else "gitlab.com"
     expected_host = expected_uri.host
     if actual_host != expected_host:
-        _die(
-            f"Verification failed: provenance was signed by a {actual_host} repository, but "
-            f"expected a {expected_host} repository"
+        return (
+            False,
+            f"provenance was signed by a {actual_host} repository, but "
+            f"expected a {expected_host} repository",
         )
 
     actual_repository = publisher.repository
     # '/owner/repo' -> 'owner/repo'
     expected_repository = expected_uri.path.lstrip("/")
     if actual_repository != expected_repository:
-        _die(
-            f'Verification failed: provenance was signed by repository "{actual_repository}", '
-            f'expected "{expected_repository}"'
+        return (
+            False,
+            f'provenance was signed by repository "{actual_repository}", '
+            f'expected "{expected_repository}"',
         )
+
+    return True, ""
+
+
+def _approved_publishers(
+    args: argparse.Namespace, provenance: Provenance
+) -> tuple[list[Publisher], list[str]]:
+    """Build the approved publisher identities selected on the command line.
+
+    Returns `(publishers, errors)`. Errors describe selections that were
+    supplied with incomplete options, such as a CircleCI project without a
+    pipeline definition, or a single-bundle legacy selection that does not
+    match the bundle's declared publisher.
+    """
+    publishers: list[Publisher] = []
+    errors: list[str] = []
+
+    repositories = args.repository or []
+    service_accounts = args.gcp_service_account or []
+    project_ids = args.circleci_project_id or []
+    pipeline_ids = args.circleci_pipeline_definition_id or []
+
+    if project_ids and not pipeline_ids:
+        errors.append(
+            "Provenance signed by CircleCI, but no pipeline definition ID provided; "
+            "use '--circleci-pipeline-definition-id'"
+        )
+    elif pipeline_ids and not project_ids:
+        errors.append(
+            "Provenance signed by CircleCI, but no project ID provided; "
+            "use '--circleci-project-id'"
+        )
+    else:
+        for project_id, pipeline_id in zip(project_ids, pipeline_ids, strict=False):
+            publishers.append(
+                CircleCIPublisher(
+                    project_id=project_id,
+                    pipeline_definition_id=pipeline_id,
+                )
+            )
+
+    for repository in repositories:
+        publishers.append(_repository_publisher(repository))
+
+    for service_account in service_accounts:
+        publishers.append(GooglePublisher(email=service_account))
+
+    if errors:
+        return publishers, errors
+
+    errors.extend(_single_bundle_selection_errors(args, provenance, publishers))
+
+    return publishers, errors
+
+
+def _single_bundle_selection_errors(
+    args: argparse.Namespace, provenance: Provenance, publishers: list[Publisher]
+) -> list[str]:
+    """Preserve the historical single-bundle selection diagnostics.
+
+    With multiple bundles, approval is per bundle: a bundle whose publisher
+    type has no selection option is simply unapproved, and the remaining
+    bundles can still be verified and admitted.
+    """
+    bundles = provenance.attestation_bundles
+    if len(bundles) != 1:
+        return []
+
+    declared = bundles[0].publisher
+    if isinstance(declared, GooglePublisher):
+        if not (args.gcp_service_account or []):
+            return [
+                "Provenance signed by a Google Cloud account, but no service account "
+                "provided; use '--gcp-service-account'"
+            ]
+        selected = args.gcp_service_account[0]
+        if declared.email != selected:
+            return [
+                "Verification failed: provenance was signed by service account "
+                f'"{declared.email}", expected "{selected}"'
+            ]
+        return []
+
+    if isinstance(declared, CircleCIPublisher):
+        if not (args.circleci_project_id or []):
+            return [
+                "Provenance signed by CircleCI, but no project ID provided; "
+                "use '--circleci-project-id'"
+            ]
+        selected_project = args.circleci_project_id[0]
+        selected_pipeline = (args.circleci_pipeline_definition_id or [""])[0]
+        if declared.project_id != selected_project:
+            return [
+                "Verification failed: provenance was signed by CircleCI project "
+                f'"{declared.project_id}", expected "{selected_project}"'
+            ]
+        if declared.pipeline_definition_id != selected_pipeline:
+            return [
+                "Verification failed: provenance was signed by CircleCI pipeline "
+                f'definition "{declared.pipeline_definition_id}", expected '
+                f'"{selected_pipeline}"'
+            ]
+        return []
+
+    if isinstance(declared, (GitHubPublisher, GitLabPublisher)):
+        if not (args.repository or []):
+            return [
+                "Provenance signed by a repository, but no repository URL provided; "
+                "use '--repository'"
+            ]
+        for repository_url in args.repository:
+            matches, reason = _repository_identity_matches(repository_url, declared)
+            if matches:
+                return []
+        # Preserve the historical diagnostic for the first selection.
+        _, reason = _repository_identity_matches(args.repository[0], declared)
+        return [f"Verification failed: {reason}"]
+
+    return []
+
+
+def _repository_publisher(url: str) -> GitHubPublisher | GitLabPublisher:
+    """Build a publisher selection from an approved repository URL."""
+    validator = (
+        validators.Validator()
+        .allow_schemes("https")
+        .allow_hosts("github.com", "gitlab.com")
+        .require_presence_of("scheme", "host")
+    )
+    try:
+        uri = uri_reference(url)
+        validator.validate(uri)
+    except exceptions.RFC3986Exception as e:
+        _die(f"Unsupported/invalid URL: {e}")
+
+    repository = uri.path.lstrip("/")
+    if uri.host == "github.com":
+        return GitHubPublisher(repository=repository, workflow="")
+    return GitLabPublisher(repository=repository, workflow_filepath="")
 
 
 def _sign(args: argparse.Namespace) -> None:
@@ -570,10 +739,14 @@ def _verify_attestation(args: argparse.Namespace) -> None:
 def _verify_pypi(args: argparse.Namespace) -> None:
     """Verify a distribution hosted on PyPI.
 
-    The distribution is downloaded (if needed) and verified. The verification is against
-    the provenance file (passed using the `--provenance-file` option, or downloaded
-    from PyPI if not provided), and against the repository URL passed by the user
-    as a CLI argument.
+    The distribution is downloaded (if needed) and verified against the
+    provenance file (passed using the `--provenance-file` option, or
+    downloaded from PyPI if not provided).
+
+    Every attestation bundle is verified independently using its own declared
+    publisher. The publisher selection options identify which bundle(s) the
+    caller approves for this admission; bundles that were not approved are
+    still verified and reported but do not contribute to admission.
     """
     dist = _get_distribution_from_arg(args.distribution_file, offline=args.offline)
 
@@ -589,59 +762,96 @@ def _verify_pypi(args: argparse.Namespace) -> None:
         except ValidationError as validation_error:
             _die(f"Invalid provenance: {validation_error}")
 
-    try:
-        for attestation_bundle in provenance.attestation_bundles:
-            publisher = attestation_bundle.publisher
-            if isinstance(publisher, GooglePublisher):
-                if not args.gcp_service_account:
-                    _die(
-                        "Provenance signed by a Google Cloud account, but no service account "
-                        "provided; use '--gcp-service-account'"
-                    )
-                if publisher.email != args.gcp_service_account:
-                    _die(
-                        f"Verification failed: provenance was signed by service account "
-                        f'"{publisher.email}", expected "{args.gcp_service_account}"'
-                    )
-            elif isinstance(publisher, CircleCIPublisher):
-                if not args.circleci_project_id:
-                    _die(
-                        "Provenance signed by CircleCI, but no project ID provided; "
-                        "use '--circleci-project-id'"
-                    )
-                if not args.circleci_pipeline_definition_id:
-                    _die(
-                        "Provenance signed by CircleCI, but no pipeline definition ID provided; "
-                        "use '--circleci-pipeline-definition-id'"
-                    )
-                if publisher.project_id != args.circleci_project_id:
-                    _die(
-                        f"Verification failed: provenance was signed by CircleCI project "
-                        f'"{publisher.project_id}", expected "{args.circleci_project_id}"'
-                    )
-                if publisher.pipeline_definition_id != args.circleci_pipeline_definition_id:
-                    _die(
-                        f"Verification failed: provenance was signed by CircleCI pipeline "
-                        f'definition "{publisher.pipeline_definition_id}", expected '
-                        f'"{args.circleci_pipeline_definition_id}"'
-                    )
-            else:
-                if not args.repository:
-                    _die(
-                        "Provenance signed by a repository, but no repository URL provided; "
-                        "use '--repository'"
-                    )
-                _check_repository_identity(
-                    expected_repository_url=args.repository, publisher=publisher
-                )
+    approved_publishers, selection_errors = _approved_publishers(args, provenance)
+    if selection_errors:
+        _die("\n".join(selection_errors))
 
-            policy = publisher._as_policy()  # noqa: SLF001
-            for attestation in attestation_bundle.attestations:
-                attestation.verify(policy, dist, staging=args.staging, offline=args.offline)
-    except VerificationError as verification_error:
-        _die(f"Verification failed for {dist.name}: {verification_error}")
+    if not approved_publishers and not args.approve_bundle:
+        _die(
+            f"Verification failed for {dist.name}: no approved publisher or bundle "
+            "was selected"
+        )
+
+    try:
+        report = provenance.report(
+            dist,
+            approved_publishers,
+            approved_bundles=args.approve_bundle,
+            staging=args.staging,
+            offline=args.offline,
+        )
+    except AttestationError as attestation_error:
+        _die(str(attestation_error))
+
+    _log_report(report)
+
+    if args.report_json is not None:
+        args.report_json.write_text(report.model_dump_json(indent=2))
+
+    if not report.admitted:
+        failed = [
+            bundle
+            for bundle in report.bundles
+            if bundle.approved and not bundle.admitted
+        ]
+        if failed:
+            details = "; ".join(
+                f"bundle {bundle.index} ({bundle.publisher.kind}) failed verification"
+                for bundle in failed
+            )
+            _die(f"Verification failed for {dist.name}: {details}")
+        _die(
+            f"Verification failed for {dist.name}: no approved bundle was found "
+            f"(selections: {', '.join(report.unmatched_selections) or 'none'})"
+        )
 
     _logger.info(f"OK: {dist.name}")
+
+
+def _log_report(report: ProvenanceReport) -> None:
+    """Log a per-bundle verification and approval report."""
+    _logger.info(f"Report for {report.distribution}:")
+    _logger.info(f"  approved bundles: {report.approved_bundles or 'none'}")
+    if report.approved_publishers:
+        _logger.info(
+            "  approved publishers: "
+            + ", ".join(
+                f"{publisher.kind}:{_publisher_detail(publisher)}"
+                for publisher in report.approved_publishers
+            )
+        )
+    for bundle in report.bundles:
+        _logger.info(
+            f"  bundle {bundle.index} ({_publisher_summary(bundle)}): "
+            f"verified={bundle.verified} approved={bundle.approved} "
+            f"approved_by={bundle.approved_by or 'none'} "
+            f"admitted={bundle.admitted}"
+        )
+        for result in bundle.attestation_results:
+            if result.verified:
+                _logger.info(
+                    f"    attestation {result.index}: verified "
+                    f"({result.predicate_type})"
+                )
+            else:
+                _logger.info(f"    attestation {result.index}: failed: {result.error}")
+    for selection in report.unmatched_selections:
+        _logger.info(f"  unmatched selection: {selection}")
+    _logger.info(f"  admitted: {report.admitted}")
+
+
+def _publisher_summary(bundle: BundleReport) -> str:
+    """Summarize a bundle's declared publisher identity."""
+    return f"{bundle.publisher.kind} {_publisher_detail(bundle.publisher)}"
+
+
+def _publisher_detail(publisher: Publisher) -> str:
+    """Return the identity detail used in reports."""
+    if isinstance(publisher, (GitHubPublisher, GitLabPublisher)):
+        return publisher.repository
+    if isinstance(publisher, GooglePublisher):
+        return publisher.email
+    return f"{publisher.project_id}/{publisher.pipeline_definition_id}"
 
 
 def _convert(args: argparse.Namespace) -> None:

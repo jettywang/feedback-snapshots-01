@@ -49,6 +49,11 @@ gcb_signed_dist_path = _ASSETS / "gcb_attestation_test-0.0.0.tar.gz"
 gcb_signed_dist = impl.Distribution.from_file(gcb_signed_dist_path)
 gcb_attestation_path = _ASSETS / "gcb_attestation_test-0.0.0.tar.gz.provenance"
 
+pypi_attestations_dist = impl.Distribution.from_file(
+    _ASSETS / "pypi_attestations-0.0.19.tar.gz"
+)
+multi_provenance_path = _ASSETS / "pypi_attestations-0.0.19.tar.gz.multi-provenance"
+
 
 class TestDistribution:
     def test_from_file_nonexistent(self, tmp_path: Path) -> None:
@@ -745,6 +750,88 @@ class TestProvenance:
                     )
                 ],
             )
+
+
+class TestProvenanceReport:
+    def _provenance(self) -> impl.Provenance:
+        return impl.Provenance.model_validate_json(multi_provenance_path.read_bytes())
+
+    def test_select_one_publisher_verifies_both_bundles(self) -> None:
+        report = self._provenance().report(
+            pypi_attestations_dist,
+            [
+                impl.GitHubPublisher(
+                    repository="trailofbits/pypi-attestations", workflow="release.yml"
+                )
+            ],
+            offline=True,
+        )
+
+        assert report.admitted
+        assert [bundle.verified for bundle in report.bundles] == [True, True]
+        assert [bundle.approved_by for bundle in report.bundles] == [
+            ["publisher"],
+            ["publisher"],
+        ]
+        assert report.unmatched_selections == []
+
+    def test_select_one_bundle_leaves_other_reporting(self) -> None:
+        report = self._provenance().report(
+            pypi_attestations_dist, approved_bundles=[1], offline=True
+        )
+
+        assert report.admitted
+        assert report.bundles[0].verified
+        assert not report.bundles[0].approved
+        assert report.bundles[1].approved_by == ["bundle"]
+        assert report.bundles[1].attestation_results[0].predicate_type == (
+            "https://slsa.dev/provenance/v1"
+        )
+
+    def test_select_unregistered_publisher_still_reports_verification(self) -> None:
+        report = self._provenance().report(
+            pypi_attestations_dist,
+            [impl.GitHubPublisher(repository="other/repo", workflow="release.yml")],
+            offline=True,
+        )
+
+        assert not report.admitted
+        assert all(bundle.verified for bundle in report.bundles)
+        assert not any(bundle.approved for bundle in report.bundles)
+        assert report.unmatched_selections == [
+            "publisher[0]:GitHub:other/repo"
+        ]
+
+    def test_one_bundle_failure_does_not_erase_the_other(self) -> None:
+        provenance = self._provenance()
+        broken = provenance.attestation_bundles[1].attestations[0]
+        statement = json.loads(broken.envelope.statement)
+        statement["subject"][0]["digest"]["sha256"] = "0" * 64
+        provenance.attestation_bundles[1].attestations[0] = broken.model_copy(
+            update={
+                "envelope": broken.envelope.model_copy(
+                    update={"statement": json.dumps(statement).encode()}
+                )
+            }
+        )
+
+        # Approving only the intact bundle admits the distribution while the
+        # broken bundle is still shown as failed.
+        report = provenance.report(pypi_attestations_dist, approved_bundles=[0], offline=True)
+        assert report.admitted
+        assert report.bundles[0].verified
+        assert not report.bundles[1].verified
+        assert "invalid signature" in (report.bundles[1].attestation_results[0].error or "")
+
+        # Approving only the broken bundle does not borrow the intact result.
+        report = provenance.report(pypi_attestations_dist, approved_bundles=[1], offline=True)
+        assert not report.admitted
+        assert report.bundles[0].verified
+
+    def test_empty_provenance_raises(self) -> None:
+        provenance = impl.Provenance(attestation_bundles=[])
+        with pytest.raises(impl.AttestationError, match="no attestation bundles"):
+            provenance.report(pypi_attestations_dist, approved_bundles=[0])
 
 
 class DummyModel(BaseModel):

@@ -21,7 +21,7 @@ from cryptography import x509
 from cryptography.hazmat import asn1
 from cryptography.hazmat.primitives import serialization
 from packaging.utils import parse_sdist_filename, parse_wheel_filename
-from pydantic import Base64Bytes, BaseModel, ConfigDict, Field, field_validator
+from pydantic import Base64Bytes, BaseModel, ConfigDict, Field, computed_field, field_validator
 from pydantic.alias_generators import to_snake
 from pydantic_core import ValidationError
 from sigstore.dsse import DigestSet, StatementBuilder, Subject, _Statement
@@ -36,6 +36,7 @@ from sigstore_models.intoto import Signature as _Signature
 from sigstore_models.rekor.v1 import TransparencyLogEntry as _TransparencyLogEntryInner
 
 if TYPE_CHECKING:  # pragma: no cover
+    from collections.abc import Iterable
     from pathlib import Path
 
     from cryptography.x509 import Certificate
@@ -780,3 +781,218 @@ class Provenance(BaseModel):
     """
     One or more attestation "bundles".
     """
+
+    def report(
+        self,
+        dist: Distribution,
+        approved_publishers: Iterable[Publisher] | None = None,
+        *,
+        approved_bundles: Iterable[int] | None = None,
+        staging: bool = False,
+        offline: bool = False,
+    ) -> ProvenanceReport:
+        """Verify every bundle independently and report on each one.
+
+        A bundle is *approved* when its publisher matches one of
+        `approved_publishers` or when its (zero-based) position is listed in
+        `approved_bundles`. Verification always runs within each bundle using
+        the publisher declared by that bundle, so one bundle's failure can
+        never stand in for another bundle's success.
+
+        Bundles that were not selected are still verified and reported; they
+        neither contribute to admission nor block it.
+
+        Raises `AttestationError` only if the provenance itself cannot be used.
+        """
+        publishers = list(approved_publishers or [])
+        bundle_indexes = list(approved_bundles or [])
+        if not self.attestation_bundles:
+            raise AttestationError("provenance contains no attestation bundles")
+
+        selected = set(bundle_indexes)
+        reports = []
+        matched_publishers = set()
+        for index, bundle in enumerate(self.attestation_bundles):
+            approved_by: list[Literal["publisher", "bundle"]] = []
+            for publisher_number, publisher in enumerate(publishers):
+                if _publisher_matches_selection(bundle.publisher, publisher):
+                    approved_by.append("publisher")
+                    matched_publishers.add(publisher_number)
+                    break
+            if index in selected:
+                approved_by.append("bundle")
+
+            reports.append(
+                _verify_bundle(
+                    bundle,
+                    dist,
+                    index=index,
+                    approved_by=approved_by,
+                    staging=staging,
+                    offline=offline,
+                )
+            )
+
+        approved_reports = [report for report in reports if report.approved]
+        return ProvenanceReport(
+            distribution=dist.name,
+            approved_publishers=publishers,
+            approved_bundles=bundle_indexes,
+            unmatched_selections=[
+                _describe_publisher(publisher, number)
+                for number, publisher in enumerate(publishers)
+                if number not in matched_publishers
+            ]
+            + [f"bundle:{index}" for index in bundle_indexes if index not in range(len(reports))],
+            bundles=reports,
+            admitted=bool(approved_reports)
+            and all(report.admitted for report in approved_reports),
+        )
+
+
+def _describe_publisher(publisher: Publisher, number: int) -> str:
+    """Render a publisher selection for a human-readable report."""
+    if isinstance(publisher, (GitHubPublisher, GitLabPublisher)):
+        detail = publisher.repository
+    elif isinstance(publisher, GooglePublisher):
+        detail = publisher.email
+    else:
+        detail = f"{publisher.project_id}/{publisher.pipeline_definition_id}"
+    return f"publisher[{number}]:{publisher.kind}:{detail}"
+
+
+def _publisher_matches_selection(declared: Publisher, selected: Publisher) -> bool:
+    """Return whether a declared publisher satisfies an approval selection.
+
+    Approvals use the same identity fields that the current verification
+    entrypoints expose: the repository for GitHub/GitLab, the service account
+    email for Google, and the project plus pipeline definition for CircleCI.
+    Fields the CLI cannot select (such as a GitLab workflow path) are not
+    treated as part of the approval identity.
+    """
+    if type(declared) is not type(selected):
+        return False
+    if isinstance(declared, (GitHubPublisher, GitLabPublisher)):
+        return declared.repository == selected.repository
+    if isinstance(declared, GooglePublisher):
+        return declared.email == selected.email
+    if isinstance(declared, CircleCIPublisher):
+        return (
+            declared.project_id == selected.project_id
+            and declared.pipeline_definition_id == selected.pipeline_definition_id
+        )
+    return False  # pragma: no cover
+
+
+class AttestationResult(BaseModel):
+    """The verification result for one attestation within a bundle."""
+
+    index: int
+    """The zero-based position of this attestation within its bundle."""
+
+    verified: bool
+    """Whether the attestation verified against the distribution."""
+
+    predicate_type: str | None = None
+    """The verified predicate type, when verification succeeded."""
+
+    error: str | None = None
+    """The reason verification failed, when it did."""
+
+
+class BundleReport(BaseModel):
+    """The verification and approval result for a single attestation bundle."""
+
+    index: int
+    """The zero-based position of this bundle in the provenance."""
+
+    publisher: Publisher
+    """The publisher declared by this bundle."""
+
+    approved_by: list[Literal["publisher", "bundle"]]
+    """Why this bundle was (or was not) selected for approval."""
+
+    verified: bool
+    """Whether every attestation in this bundle verified against the distribution."""
+
+    approved: bool
+    """Whether this bundle was selected for approval."""
+
+    attestation_results: list[AttestationResult]
+    """The per-attestation verification results within this bundle."""
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def admitted(self) -> bool:
+        """Whether this bundle both verified and was approved."""
+        return self.verified and self.approved
+
+
+class ProvenanceReport(BaseModel):
+    """A per-bundle verification and approval report for a distribution."""
+
+    distribution: str
+    """The distribution filename that was verified."""
+
+    approved_publishers: list[Publisher]
+    """The publisher identities selected for approval."""
+
+    approved_bundles: list[int]
+    """The bundle positions selected for approval."""
+
+    unmatched_selections: list[str]
+    """Approval selections that matched no bundle's declared publisher."""
+
+    bundles: list[BundleReport]
+    """The result for each bundle, whether approved or not."""
+
+    admitted: bool
+    """Whether the selection admits this distribution.
+
+    Admission requires at least one approved bundle, and every approved
+    bundle must verify in full. A bundle that was not approved remains
+    visible in `bundles`, but neither contributes to admission nor blocks it.
+    """
+
+
+def _verify_bundle(
+    bundle: AttestationBundle,
+    dist: Distribution,
+    *,
+    index: int,
+    approved_by: list[Literal["publisher", "bundle"]],
+    staging: bool,
+    offline: bool,
+) -> BundleReport:
+    """Verify every attestation in one bundle, capturing rather than raising failures."""
+    results = []
+    for attestation_index, attestation in enumerate(bundle.attestations):
+        try:
+            predicate_type, _ = attestation.verify(
+                bundle.publisher, dist, staging=staging, offline=offline
+            )
+        except (AttestationError, SigstoreError) as error:
+            results.append(
+                AttestationResult(
+                    index=attestation_index,
+                    verified=False,
+                    error=str(error),
+                )
+            )
+        else:
+            results.append(
+                AttestationResult(
+                    index=attestation_index,
+                    verified=True,
+                    predicate_type=predicate_type,
+                )
+            )
+
+    return BundleReport(
+        index=index,
+        publisher=bundle.publisher,
+        approved_by=approved_by,
+        approved=bool(approved_by),
+        verified=bool(results) and all(result.verified for result in results),
+        attestation_results=results,
+    )

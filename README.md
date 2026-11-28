@@ -168,6 +168,25 @@ This command downloads the artifact, if needed, and its provenance from PyPI. Th
 is then verified against the provenance, while also checking that the provenance's
 signing identity matches the repository specified by the user.
 
+A provenance may contain multiple attestation bundles, each with its own publisher.
+Every bundle is verified independently against the distribution using the publisher
+declared by that bundle. The selection options (`--repository`, `--gcp-service-account`,
+`--circleci-project-id`/`--circleci-pipeline-definition-id`, or `--approve-bundle INDEX`)
+identify which bundle(s) are approved for this admission. Unapproved bundles are still
+verified and reported, but they neither contribute to admission nor block it.
+
+```bash
+# Approve the bundle at position 1; keep the other bundle's result visible
+pypi-attestations verify pypi --offline --approve-bundle 1 \
+  --provenance-file ~/Downloads/sample-1.0.0.tar.gz.provenance \
+  --report-json report.json \
+  ~/Downloads/sample-1.0.0.tar.gz
+```
+
+The report lists, per bundle, whether it verified, whether it was approved (and why),
+and the outcome of each enclosed attestation. Its exit status is non-zero unless every
+approved bundle verified.
+
 ### Converting a Sigstore bundle into a PEP 740 Attestation
 
 ```bash
