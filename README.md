@@ -981,6 +981,41 @@ WebMock.after_request(except: [:patron],
 end
 ```
 
+## Request evidence (optional, opt-in)
+
+For compliance checks you can collect verifiable evidence about how each
+request was handled. Collection is disabled by default, so enabling it does not
+change stubbing or the existing request-count assertions.
+
+```ruby
+WebMock.enable_request_evidence!
+
+WebMock.request_evidence.evidence.each do |entry|
+  entry.outcome            # :stubbed, :policy_denied, :real or :incomplete
+  entry.lib                # the adapter that handled the request, e.g. :net_http
+  entry.sent?              # true only when a real network send happened
+  entry.request            # allow-listed request content (method, uri, body, headers)
+  entry.signature          # SHA-256 signature of the actual request signature
+  entry.diagnostics        # diagnostic chain, e.g. ["stub_response"]
+end
+```
+
+The four outcomes distinguish a stubbed response (`:stubbed`), a request refused
+by the net-connect policy (`:policy_denied`), an allowed real request
+(`:real`), and a request whose handling was interrupted, for example by a
+callback raising (`:incomplete`). Each entry stores only an allow-listed
+projection of the request and a signature that can be re-checked against a
+`RequestSignature`:
+
+```ruby
+WebMock.request_evidence.for_outcome(:policy_denied)
+WebMock.request_evidence.for_lib(:patron)
+WebMock.request_evidence.matching(request_signature)
+```
+
+Turn collection off again with `WebMock.disable_request_evidence!`. Evidence is
+cleared by `WebMock.reset!` alongside the stubs and request history.
+
 ## Bugs and Issues
 
 Please submit them here [http://github.com/bblimke/webmock/issues](http://github.com/bblimke/webmock/issues)

@@ -134,6 +134,22 @@ module WebMock
     Config.instance.show_body_diff
   end
 
+  def self.enable_request_evidence!
+    RequestEvidenceRegistry.instance.enable!
+  end
+
+  def self.disable_request_evidence!
+    RequestEvidenceRegistry.instance.disable!
+  end
+
+  def self.request_evidence_enabled?
+    RequestEvidenceRegistry.instance.enabled?
+  end
+
+  def self.request_evidence
+    RequestEvidenceRegistry.instance
+  end
+
   def self.hide_stubbing_instructions!
     Config.instance.show_stubbing_instructions = false
   end
@@ -149,6 +165,7 @@ module WebMock
   def self.reset!
     WebMock::RequestRegistry.instance.reset!
     WebMock::StubRegistry.instance.reset!
+    WebMock::RequestEvidenceRegistry.instance.reset!
   end
 
   def self.reset_webmock

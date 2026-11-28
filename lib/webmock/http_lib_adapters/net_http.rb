@@ -102,14 +102,19 @@ module WebMock
 
           WebMock::RequestRegistry.instance.requested_signatures.put(request_signature)
 
+          evidence_registry = WebMock::RequestEvidenceRegistry.instance
+          evidence_context = evidence_registry.start_request(request_signature, :net_http)
+
           if webmock_response = WebMock::StubRegistry.instance.response_for_request(request_signature)
             # Close the real connection left by an earlier request, if any.
             @socket&.close
             @socket = self.class.socket_type.new
+            evidence_registry.record(evidence_context, :stubbed, false, "stub_response")
             WebMock::CallbackRegistry.invoke_callbacks(
               {lib: :net_http}, request_signature, webmock_response)
             build_net_http_response(webmock_response, request.uri, &block)
           elsif WebMock.net_connect_allowed?(request_signature.uri)
+            evidence_registry.record(evidence_context, :real, true, "net_connect_allowed")
             check_right_http_connection
             after_request = lambda do |response|
               if WebMock::CallbackRegistry.any_callbacks?
@@ -134,6 +139,7 @@ module WebMock
               }
             end
           else
+            evidence_registry.record(evidence_context, :policy_denied, false, "net_connect_disabled")
             raise WebMock::NetConnectNotAllowedError.new(request_signature)
           end
         end

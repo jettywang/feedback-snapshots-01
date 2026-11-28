@@ -1,5 +1,23 @@
 # Changelog
 
+# Unreleased
+
+* Add optional, opt-in request evidence for compliance auditing
+
+    `WebMock.enable_request_evidence!` starts collecting verifiable evidence
+    about how each request was handled. Each record distinguishes a stubbed
+    response (`:stubbed`), a net-connect policy refusal (`:policy_denied`), an
+    allowed real request (`:real`), and a request interrupted before it
+    completed (`:incomplete`).
+
+    Records are built from the adapter's actual action, retain only an
+    allow-listed projection of the request (`method`, `uri`, `body`, `headers`)
+    plus a SHA-256 signature that can be re-checked against a
+    `RequestSignature`, and report the handling adapter and a diagnostic chain.
+    Collection is disabled by default, so stubbing and the existing
+    request-count assertions are unchanged. Evidence is cleared by
+    `WebMock.reset!`.
+
 # 3.35.0
 
 * Fix `get_file` with Patron 1.1 (#1147)

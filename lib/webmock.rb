@@ -44,6 +44,8 @@ require_relative 'webmock/request_execution_verifier'
 require_relative 'webmock/config'
 require_relative 'webmock/callback_registry'
 require_relative 'webmock/request_registry'
+require_relative 'webmock/request_evidence'
+require_relative 'webmock/request_evidence_registry'
 require_relative 'webmock/stub_registry'
 require_relative 'webmock/api'
 
