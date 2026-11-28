@@ -2431,6 +2431,38 @@ add another line; a substitution occupying a whole line can supply several pairs
     A flag controlling if each call to the build backend should be done in a fresh subprocess or not (especially older
     build backends such as ``setuptools`` might require this to discover newly provisioned dependencies).
 
+.. conf::
+    :keys: reuse_built_package
+    :version_added: 4.68
+    :default: false
+
+    Reuse a package that was built from the same source for the same target, instead of building it again. A package is
+    only reused when its recorded build dependency versions and approval records still match the current build inputs;
+    any change rebuilds it. The previous package stays in the provenance directory for comparison. See
+    :ref:`reuse-built-package` for the full rules.
+
+    This is a setting of a PEP-517 packaging environment, such as ``.pkg`` or ``.pkg-cpython313``.
+
+.. conf::
+    :keys: build_approvals_file
+    :version_added: 4.68
+    :default: ""
+
+    Path to a JSON file with the approved revisions of the build dependencies, relative to :ref:`tox_root` when not
+    absolute. When set, a build whose resolved build requirements do not meet their approval records fails, and the
+    provenance document written for the artifact lists the approval behind each dependency. When left empty, the build
+    proceeds without checking approvals and records the resolved versions only.
+
+.. conf::
+    :keys: build_provenance_dir
+    :version_added: 4.68
+    :default: {work_dir}/build-provenance
+
+    Directory that keeps the build provenance ledger (``ledger.json``), the :ref:`reuse_built_package` decisions, and a
+    copy of every built package under ``artifacts/<sha256>/``. It lives outside the packaging environment, so recreating
+    that environment still leaves earlier packages available for comparison. Each artifact also gets a
+    ``<name>.provenance.json`` sidecar with the same information.
+
 Pip installer
 =============
 

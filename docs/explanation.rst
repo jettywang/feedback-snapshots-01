@@ -253,6 +253,56 @@ the next run. When a dependency is removed the entire environment is automatical
 ``requirements`` files within :ref:`deps`. In most cases you should never need to use the ``--recreate`` flag -- tox
 detects changes and applies them automatically.
 
+.. _reuse-built-package:
+
+Built package reuse and build provenance
+========================================
+
+By default tox builds a fresh package on every run, even when neither the source nor the target changed. Setting
+:ref:`reuse_built_package` on a PEP-517 packaging environment lets tox reuse a package it built earlier from the same
+source for the same target. Because a reused package ships as a release artifact, the decision also records the build
+dependencies the package was built with.
+
+A package identity hashes the package type, the build backend, a digest of the source tree, and the target environment
+(the packaging interpreter's implementation, version, free-threading and debug flags, and the platform). Source files
+that tox writes itself, such as the work directory and the provenance directory, are left out of the digest, and a
+symbolic link contributes its target text rather than the content it points at.
+
+Reuse only happens when the identity matches **and** every build dependency still resolves to an approved revision. A
+package is rebuilt when:
+
+- the source digest or the target environment changed;
+- a declared or backend-provided build requirement was added, removed, or resolves to another version;
+- the approval records changed, or a resolved version no longer satisfies its approval; or
+- the archived artifact is missing or its SHA-256 no longer matches the ledger.
+
+Approvals come from :ref:`build_approvals_file`, a JSON document with an ``approvals`` list. Each entry names the
+project, a :pep:`440` specifier, who approved it, and when:
+
+.. code-block:: json
+
+    {
+      "approvals": [
+        {
+          "name": "setuptools",
+          "specifier": "==81.0.0",
+          "approved_by": "security-review",
+          "approved_at": "2026-11-20",
+          "ticket": "SEC-1234"
+        }
+      ]
+    }
+
+When the file is configured, a build whose resolved build requirements do not meet their records fails before the
+package is archived, so a release only ever ships with approved build dependencies.
+
+Every build leaves two kinds of evidence. The provenance directory keeps a ``ledger.json`` with one entry per build and
+the reuse or rebuild decisions, and copies each artifact under ``artifacts/<sha256>/``. Each artifact also gets a
+``<name>.provenance.json`` sidecar stating the source digest, the target, the declared build dependencies with the
+version each resolved to and the approval that covered it, and the artifact digest. The same document and the per-run
+decisions are written to the ``--result-json`` journal under ``build_provenance`` and ``build_reuse``. The existing
+package stays in the provenance directory after a rebuild, so the two revisions can be compared.
+
 .. _pylock-explanation:
 
 Lock file installation (PEP 751)

@@ -50,6 +50,14 @@ def test_env_journal_enabled(base_info: dict[str, str | dict[str, dict[str, int]
     assert journal.content == base_info
 
 
+def test_env_journal_insert_puts_newest_first() -> None:
+    journal = Journal(enabled=True)
+    env = journal.get_env_journal("a")
+    env.insert("build_reuse", {"mode": "reuse"})
+    env.insert("build_reuse", {"mode": "rebuild"})
+    assert env.content["build_reuse"] == [{"mode": "rebuild"}, {"mode": "reuse"}]
+
+
 def test_env_journal_disabled() -> None:
     journal = Journal(enabled=False)
     env = journal.get_env_journal("a")

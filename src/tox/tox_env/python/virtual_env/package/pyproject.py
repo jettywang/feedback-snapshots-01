@@ -12,6 +12,7 @@ __lazy_modules__ = [
     "threading",
     "tox.execute.pep517_backend",
     "tox.execute.request",
+    "tox.tox_env.python.build_reuse",
     "tox.tox_env.python.extras",
     "tox.util.file_view",
     f"{__spec__.parent}.util",  # ty: ignore[missing-union-attribute]  # imported modules have a spec
@@ -25,6 +26,7 @@ import tarfile
 from abc import ABC
 from collections import defaultdict
 from contextlib import contextmanager
+from datetime import datetime, timezone
 from itertools import chain
 from pathlib import Path
 from threading import RLock
@@ -44,6 +46,25 @@ from tox.execute.pep517_backend import LocalSubProcessPep517Executor
 from tox.execute.request import StdinSource
 from tox.plugin import impl
 from tox.tox_env.errors import Fail
+from tox.tox_env.python.build_reuse import (
+    BuildApprovalError,
+    BuildReuseStore,
+    decision,
+    dependency_records,
+    diff_record,
+    evaluate_approvals,
+    file_sha256,
+    installed_versions,
+    load_approvals,
+    provenance_path,
+    read_wheel_metadata,
+    restrict_resolved,
+    reuse_key,
+    source_change_reasons,
+    source_digest,
+    target_change_reasons,
+    write_json,
+)
 from tox.tox_env.python.extras import resolve_extras_static
 from tox.tox_env.python.package import (
     EditableLegacyPackage,
@@ -61,6 +82,7 @@ from .util import dependencies_with_extras, safe_extractall
 if TYPE_CHECKING:
     from collections.abc import Callable, Generator, Sequence
 
+    from tox.config.main import Config
     from tox.config.sets import EnvConfigSet
     from tox.execute.api import ExecuteStatus
     from tox.tox_env.api import ToxEnvCreateArgs
@@ -112,6 +134,17 @@ def _rebuild_backend_failed(result: dict[str, int | str | None], out: str, err: 
     return ToxBackendFailed(BackendFailed(result, out, err))
 
 
+def _candidate(
+    declared: list[str], resolved: dict[str, str], approvals: list[dict[str, object]], unmet: list[str]
+) -> dict[str, object]:
+    return {
+        "declared": list(declared),
+        "dependencies": dependency_records(declared, resolved, approvals),
+        "approvals": approvals,
+        "unmet": list(unmet),
+    }
+
+
 class _ToxCmdStatus(CmdStatus):
     def __init__(self, execute_status: ExecuteStatus) -> None:
         self._execute_status = execute_status
@@ -156,6 +189,8 @@ class Pep517VenvPackager(PythonPackageToxEnv, ABC):
         self._pkg_lock = RLock()  # can build only one package at a time
         self._package_paths: set[Path] = set()
         self._root: Path | None = None
+        self._reuse_store: BuildReuseStore | None = None
+        self._dynamic_requires: list[str] = []
 
     @contextmanager
     def root_at(self, value: Path) -> Generator[None, None, None]:
@@ -224,6 +259,37 @@ class Pep517VenvPackager(PythonPackageToxEnv, ABC):
             default=lambda conf, name: self._frontend.backend.split(".")[0] == "setuptools",  # ruff:ignore[unused-lambda-argument]
             desc="create a fresh subprocess for every backend request",
         )
+        self._add_reuse_config()
+
+    def _default_provenance_dir(  # override signature
+        self,
+        conf: Config,  # ruff:ignore[unused-function-argument]  # override signature
+        name: str | None,  # ruff:ignore[unused-function-argument]  # override signature
+    ) -> Path:
+        return conf.core["work_dir"] / "build-provenance"
+
+    def _add_reuse_config(self) -> None:
+        # only the PEP-517 packager reuses a built package, so these settings live here and not on every package env
+        self.conf.add_config(
+            keys=["reuse_built_package"],
+            of_type=bool,
+            default=False,
+            desc="reuse a package built from the same source for the same target, together with its build provenance",
+        )
+        self.conf.add_config(
+            keys=["build_approvals_file"],
+            of_type=str,
+            default="",
+            desc="path to a JSON file listing the approved revisions of the build dependencies",
+        )
+        self.conf.add_config(
+            keys=["build_provenance_dir"],
+            of_type=Path,
+            # lazy: the default reads the work directory, which is not resolved during config registration
+            default=self._default_provenance_dir,
+            post_process=self._relative_to_tox_root,
+            desc="directory that keeps the build provenance ledger and the archived package artifacts",
+        )
 
     def _add_config_settings(self, build_type: str) -> None:
         # config settings passed to PEP-517-compliant build backend https://peps.python.org/pep-0517/#config-settings
@@ -239,6 +305,79 @@ class Pep517VenvPackager(PythonPackageToxEnv, ABC):
                 default=None,
                 desc=f"config settings passed to the {key} backend API endpoint",
             )
+
+    @property
+    def _store(self) -> BuildReuseStore | None:
+        # the ledger is only opened when the feature is on: either to reuse a package or to record one whose build
+        # dependencies are approved through an approval file
+        if not (self.conf.get("reuse_built_package", bool) or self.conf.get("build_approvals_file", str).strip()):
+            return None
+        if self._reuse_store is None:
+            self._reuse_store = BuildReuseStore(self.conf["build_provenance_dir"])
+        return self._reuse_store
+
+    @property
+    def _reuse_enabled(self) -> bool:
+        return self.conf.get("reuse_built_package", bool)
+
+    def _approval_file(self) -> Path | None:
+        value = self.conf.get("build_approvals_file", str).strip()
+        return self._resolve_conf_path(Path(value)) if value else None
+
+    def _resolve_conf_path(self, value: Path) -> Path:
+        return value if value.is_absolute() else self.core["tox_root"] / value
+
+    def _target_versions(self) -> dict[str, object]:
+        base = self.base_python
+        return {
+            "implementation": base.impl_lower,
+            "version": base.version,
+            "version_no_dot": base.version_no_dot,
+            "free_threaded": base.free_threaded,
+            "debug": base.debug,
+            "platform": sys.platform,
+        }
+
+    def _build_source_digest(self) -> str:
+        return source_digest(self.root, exclude=[self.conf["build_provenance_dir"], self.core["work_dir"]])
+
+    def _declared_requires(self) -> list[str]:
+        declared = sorted(dict.fromkeys(str(item) for item in self.requires()))
+        for item in sorted(dict.fromkeys(self._dynamic_requires)):
+            if item not in declared:
+                declared.append(item)
+        return declared
+
+    def _build_approvals(self) -> tuple[list[dict[str, object]], bool]:
+        path = self._approval_file()
+        if path is None:
+            return [], False
+        try:
+            return load_approvals(path), True
+        except BuildApprovalError as exception:
+            raise Fail(str(exception)) from exception
+
+    def _build_resolved(self) -> dict[str, str]:
+        return installed_versions([self.env_site_package_dir(), self.env_site_package_dir_plat()])
+
+    def _current_identity(self, package_type: str) -> tuple[str, str, dict[str, object]]:
+        digest = self._build_source_digest()
+        target = self._target_versions()
+        return reuse_key(package_type, self._frontend.backend, digest, target), digest, target
+
+    def _journal_provenance(self, record: dict[str, object]) -> None:
+        if self.journal:
+            self.journal["build_provenance"] = record
+
+    def _journal_decision(self, item: dict[str, object]) -> None:
+        if self.journal:
+            # newest first, so the final outcome of the run is the first entry a reader sees
+            self.journal.insert("build_reuse", item)  # type: ignore[arg-type]  # JSON-compatible mapping
+
+    def _record_decision(self, store: BuildReuseStore, item: dict[str, object]) -> None:
+        store.add_decision(item)
+        store.save()
+        self._journal_decision(item)
 
     @property
     def _frontend(self) -> Pep517VirtualEnvFrontend:
@@ -280,6 +419,7 @@ class Pep517VenvPackager(PythonPackageToxEnv, ABC):
     def _setup_build_requires(self, of_type: str) -> None:
         settings = self.conf.get_optional(f"config_settings_get_requires_for_build_{of_type}", dict[str, Any])
         requires = getattr(self._frontend, f"get_requires_for_build_{of_type}")(config_settings=settings).requires
+        self._dynamic_requires.extend(str(item) for item in requires)
         self._install(requires, PythonPackageToxEnv.__name__, f"requires_for_build_{of_type}")
 
     @override
@@ -334,6 +474,8 @@ class Pep517VenvPackager(PythonPackageToxEnv, ABC):
                 with w_env.display_context(self._has_display_suspended):
                     return w_env.perform_packaging(for_env)
             else:
+                if (reused := self._reuse_package(of_type, deps)) is not None:
+                    return [reused]
                 try:
                     self.setup()
                 except _BuildEditableNotSupportedError:
@@ -341,6 +483,7 @@ class Pep517VenvPackager(PythonPackageToxEnv, ABC):
                     # surfaces only at setup - fall back and re-dispatch as editable-legacy
                     self._fallback_to_editable_legacy()
                     return self.perform_packaging(for_env)
+                self._assert_build_approvals()
                 method = "build_editable" if of_type == "editable" else "build_wheel"
                 config_settings = self.conf[f"config_settings_{method}"]
                 with self._pkg_lock:
@@ -351,11 +494,117 @@ class Pep517VenvPackager(PythonPackageToxEnv, ABC):
                     ).wheel
                     wheel = create_session_view(wheel, self._package_temp_path, self.core["tox_root"])
                     self._package_paths.add(wheel)
+                self._record_built_package(of_type, wheel)
                 package = (EditablePackage if of_type == "editable" else WheelPackage)(wheel, deps)
         else:  # pragma: no cover # for when we introduce new packaging types and don't implement
             msg = f"cannot handle package type {of_type}"
             raise TypeError(msg)  # pragma: no cover  # untested error path
         return [package]
+
+    def _reuse_package(self, package_type: str, deps: list[Requirement]) -> Package | None:
+        store = self._store
+        if store is None or not self._reuse_enabled:
+            return None
+        try:
+            self.setup()
+        except _BuildEditableNotSupportedError:
+            return None
+        key, digest, target = self._current_identity(package_type)
+        declared = self._declared_requires()
+        approvals, configured = self._build_approvals()
+        resolved = restrict_resolved(declared, self._build_resolved())
+        _, unmet, applied = evaluate_approvals(approvals, declared, resolved, configured=configured)
+        record = store.latest(key)
+        artifact = self._recorded_artifact(store, record) if record is not None else None
+        candidate = _candidate(declared, resolved, applied, unmet)
+        if record is None or artifact is None:
+            reasons = list(unmet)
+            if record is not None:
+                reasons.append("recorded package artifact is missing or was changed")
+            records = list(store.all_records())
+            reasons.extend(
+                target_change_reasons(
+                    records, source=digest, package_type=package_type, backend=self._frontend.backend, target=target
+                )
+            )
+            reasons.extend(
+                source_change_reasons(
+                    records, source=digest, package_type=package_type, backend=self._frontend.backend
+                )
+            )
+            if reasons:
+                # a first build has nothing to decide: it only writes provenance once the package exists
+                self._record_decision(
+                    store, decision(mode="rebuild", key=key, reasons=reasons, artifact=None, record=candidate)
+                )
+            return None
+        reasons = diff_record(record, declared=declared, resolved=resolved, approvals=applied, unmet=unmet)
+        if reasons:
+            self._record_decision(
+                store, decision(mode="rebuild", key=key, reasons=reasons, artifact=None, record=candidate)
+            )
+            return None
+        view = create_session_view(artifact, self._package_temp_path, self.core["tox_root"])
+        self._package_paths.add(view)
+        artifact_name = str(record.get("artifact_name") or artifact.name)
+        self._record_decision(
+            store, decision(mode="reuse", key=key, reasons=[], artifact=artifact_name, record=record)
+        )
+        self._journal_provenance(record)
+        package_cls = {"wheel": WheelPackage, "editable": EditablePackage}[package_type]
+        return package_cls(view, deps)
+
+    @staticmethod
+    def _recorded_artifact(store: BuildReuseStore, record: dict[str, object]) -> Path | None:
+        return store.artifact_path(record)
+
+    def _assert_build_approvals(self) -> None:
+        if self._approval_file() is None:
+            return
+        declared = self._declared_requires()
+        approvals, configured = self._build_approvals()
+        resolved = restrict_resolved(declared, self._build_resolved())
+        approved, unmet, _ = evaluate_approvals(approvals, declared, resolved, configured=configured)
+        if not approved:
+            msg = f"build dependencies do not meet their approval records: {', '.join(unmet)}"
+            raise Fail(msg)
+
+    def _record_built_package(self, package_type: str, wheel: Path) -> None:
+        store = self._store
+        if store is None:
+            return
+        key, digest, target = self._current_identity(package_type)
+        declared = self._declared_requires()
+        approvals, configured = self._build_approvals()
+        resolved = restrict_resolved(declared, self._build_resolved())
+        approved, unmet, applied = evaluate_approvals(approvals, declared, resolved, configured=configured)
+        if configured and not approved:
+            msg = f"build dependencies do not meet their approval records: {', '.join(unmet)}"
+            raise Fail(msg)
+        archived = store.archive(wheel)
+        name, version = read_wheel_metadata(wheel)
+        record: dict[str, object] = {
+            "version": 1,
+            "created": datetime.now(timezone.utc).isoformat(),
+            "key": key,
+            "package_type": package_type,
+            "backend": self._frontend.backend,
+            "source": digest,
+            "target": target,
+            "declared": declared,
+            "dependencies": dependency_records(declared, resolved, applied),
+            "approvals": applied,
+            "unmet": unmet,
+            "artifact": archived.name,
+            "artifact_sha256": file_sha256(archived),
+            "artifact_name": wheel.name,
+            "project": {"name": name, "version": version},
+        }
+        write_json(provenance_path(archived), record)
+        store.add_entry(key, record)
+        store.save()
+        # the first build sets the baseline, so it is not a rebuild decision: only the provenance is recorded
+        self._journal_provenance(record)
 
     def _load_deps(self, for_env: EnvConfigSet) -> list[Requirement]:
         # first check if this is statically available via PEP-621

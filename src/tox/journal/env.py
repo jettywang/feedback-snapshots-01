@@ -40,6 +40,16 @@ class EnvJournal:
         """
         self._content[key] = value
 
+    def insert(self, key: str, value: JsonValue) -> None:
+        """Add an entry at the front of a list held under a key, creating the list when needed.
+
+        :param key: the key that holds a list
+        :param value: the entry to add in front
+
+        """
+        existing = self._content.get(key)
+        self._content[key] = [value, *existing] if isinstance(existing, list) else [value]
+
     def __bool__(self) -> bool:
         """:returns: a flag indicating if the event journal is on or not"""
         return self._enabled
