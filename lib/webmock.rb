@@ -38,6 +38,8 @@ require_relative 'webmock/stub_request_snippet'
 require_relative 'webmock/request_signature_snippet'
 require_relative 'webmock/request_body_diff'
 require_relative 'webmock/json_body_hint'
+require_relative 'webmock/redaction_policy'
+require_relative 'webmock/redacted_request_signature'
 
 require_relative 'webmock/assertion_failure'
 require_relative 'webmock/request_execution_verifier'

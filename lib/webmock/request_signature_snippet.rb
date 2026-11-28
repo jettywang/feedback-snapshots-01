@@ -5,10 +5,11 @@ require "pp"
 module WebMock
   class RequestSignatureSnippet
 
-    attr_reader :request_signature, :request_stub
+    attr_reader :request_signature, :request_stub, :policy
 
-    def initialize(request_signature)
+    def initialize(request_signature, policy: RedactionPolicy.from_config)
       @request_signature = request_signature
+      @policy = policy
       @request_stub = RequestStub.from_request_signature(request_signature)
     end
 
@@ -16,7 +17,7 @@ module WebMock
       return unless WebMock.show_stubbing_instructions?
 
       "You can stub this request with the following snippet:\n\n" +
-        WebMock::StubRequestSnippet.new(request_stub).to_s
+        WebMock::StubRequestSnippet.new(request_stub, policy: policy).to_s
     end
 
     def request_stubs
@@ -24,7 +25,7 @@ module WebMock
 
       text = "registered request stubs:\n".dup
       WebMock::StubRegistry.instance.request_stubs.each do |stub|
-        text << "\n#{WebMock::StubRequestSnippet.new(stub).to_s(false)}"
+        text << "\n#{WebMock::StubRequestSnippet.new(stub, policy: policy).to_s(false)}"
         if WebMock.show_body_diff?
           add_body_diff(stub, text)
           add_json_body_hint(stub, text)
@@ -47,7 +48,7 @@ module WebMock
     end
 
     def signature_stub_body_diff(stub)
-      diff = RequestBodyDiff.new(request_signature, stub).body_diff
+      diff = RequestBodyDiff.new(request_signature, stub, policy: policy).redacted_body_diff
       diff.empty? ? "" : "Body diff:\n #{pretty_print_to_string(diff)}"
     end
 

@@ -2,6 +2,20 @@
 
 # 3.35.0
 
+* Add redaction for request data shown in failure output
+
+    When a request does not match a stub, the exception message, the suggested
+    stub snippet, the body diff and the "requests were made" list can contain
+    sensitive API parameters that must not reach shared CI logs.
+
+    `WebMock.redact_request_data!` hides all of it behind `[REDACTED]`, and the
+    three axes can be controlled independently with
+    `hide_redacted_structures!`, `hide_redacted_field_names!` and
+    `hide_redacted_values!` (and the matching `show_*` / `*?` helpers). The
+    policy only changes rendering: stub matching and callbacks keep using the
+    real, unredacted request, so the full internal representation is still
+    available locally. The default, fully visible output is unchanged.
+
 * Fix `get_file` with Patron 1.1 (#1147)
 
     Previously, with Patron 1.1, `get_file` ignored stubs: it made a real request and wrote the real response to the file, even when real connections were disabled.

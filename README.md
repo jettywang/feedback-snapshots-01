@@ -840,6 +840,35 @@ expect(stub).not_to have_been_requested
 expect(stub2).not_to have_been_requested
 ```
 
+## Redacting request data from failure output
+
+When a request does not match a stub, WebMock prints the request signature, a
+suggested stub snippet and a body diff. That output can end up in shared CI
+logs, so it can be redacted along three independent axes:
+
+* **structures** — nested hashes and arrays collapse to a single `[REDACTED]` marker, hiding their shape.
+* **field names** — the names of JSON fields, headers and query parameters are hidden while their presence is still shown.
+* **values** — concrete values are replaced with `[REDACTED]`.
+
+```ruby
+# Hide everything shareable. Matching still uses the real request.
+WebMock.redact_request_data!
+
+# Or control each axis independently:
+WebMock.hide_redacted_values!        # keep structure and field names, hide values
+WebMock.hide_redacted_field_names!   # keep structure and values, hide names
+WebMock.hide_redacted_structures!    # collapse nested hashes and arrays
+
+WebMock.show_request_data!           # restore the default, fully visible output
+```
+
+Redaction only changes what is rendered in the exception message, the suggested
+stub snippet, the body diff and the "requests were made" list. Stub matching and
+request callbacks always run against the real, unredacted `RequestSignature`, so
+a redaction policy can neither make a request match nor stop it matching, and the
+full internal representation stays available for debugging on the machine that
+ran the test. With every axis left visible (the default), output is unchanged.
+
 ## Disabling and enabling WebMock or only some http client adapters
 
 ```ruby

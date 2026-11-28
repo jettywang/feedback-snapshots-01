@@ -404,6 +404,8 @@ module WebMock
   end
 
   class HeadersPattern
+    attr_reader :pattern
+
     def initialize(pattern)
       @pattern = WebMock::Util::Headers.normalize_headers(pattern) || {}
     end

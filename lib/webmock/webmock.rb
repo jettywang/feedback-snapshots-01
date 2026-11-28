@@ -134,6 +134,60 @@ module WebMock
     Config.instance.show_body_diff
   end
 
+  # Diagnostic output can leave the machine in shared CI logs, so request data
+  # can be redacted along three independent axes. These switches only change
+  # what is rendered in failure messages, snippets and body diffs; stub
+  # matching still uses the real, unredacted request.
+
+  def self.show_redacted_structures!
+    Config.instance.show_redacted_structures = true
+  end
+
+  def self.hide_redacted_structures!
+    Config.instance.show_redacted_structures = false
+  end
+
+  def self.show_redacted_structures?
+    Config.instance.show_redacted_structures
+  end
+
+  def self.show_redacted_field_names!
+    Config.instance.show_redacted_field_names = true
+  end
+
+  def self.hide_redacted_field_names!
+    Config.instance.show_redacted_field_names = false
+  end
+
+  def self.show_redacted_field_names?
+    Config.instance.show_redacted_field_names
+  end
+
+  def self.show_redacted_values!
+    Config.instance.show_redacted_values = true
+  end
+
+  def self.hide_redacted_values!
+    Config.instance.show_redacted_values = false
+  end
+
+  def self.show_redacted_values?
+    Config.instance.show_redacted_values
+  end
+
+  # Hide every shareable part of request data. Matching is unaffected.
+  def self.redact_request_data!
+    Config.instance.show_redacted_structures = false
+    Config.instance.show_redacted_field_names = false
+    Config.instance.show_redacted_values = false
+  end
+
+  def self.show_request_data!
+    Config.instance.show_redacted_structures = true
+    Config.instance.show_redacted_field_names = true
+    Config.instance.show_redacted_values = true
+  end
+
   def self.hide_stubbing_instructions!
     Config.instance.show_stubbing_instructions = false
   end

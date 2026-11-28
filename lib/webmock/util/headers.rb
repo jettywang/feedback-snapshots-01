@@ -40,16 +40,30 @@ module WebMock
       def self.pp_headers_string(headers)
         headers = WebMock::Util::Headers.normalize_headers(headers)
         seperator = "\n\t "
-        str = "{#{seperator} ".dup
-        str << headers.map do |k,v|
+        reshow_normalized_headers(headers, seperator)
+      end
+
+      # Renders an already normalized header hash without normalizing the names
+      # again, so a redacted name keeps its exact marker rather than being
+      # reformatted as a conventional header name.
+      def self.reshow_normalized_headers(headers, seperator)
+        inline = seperator == ", "
+        if inline
+          str = "{".dup
+          join_separator = ", "
+        else
+          str = "{#{seperator} ".dup
+          join_separator = ",#{seperator} "
+        end
+        str << headers.map do |k, v|
           v = case v
             when Regexp then v.inspect
-            when Array then "["+v.map{|w| "'#{w.to_s}'"}.join(", ")+"]"
+            when Array then "[" + v.map { |w| "'#{w.to_s}'" }.join(", ") + "]"
             else "'#{v.to_s}'"
           end
           "'#{k}'=>#{v}"
-        end.sort.join(",#{seperator} ")
-        str << "\n    }"
+        end.sort.join(join_separator)
+        str << (inline ? "}" : "\n    }")
       end
 
       def self.decode_userinfo_from_header(header)
