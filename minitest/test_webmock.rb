@@ -7,3 +7,5 @@ test_class = defined?(Minitest::Test) ? Minitest::Test : MiniTest::Unit::TestCas
 class MiniTestWebMock < test_class
   include SharedTest
 end
+
+require_relative 'request_surface_regression'

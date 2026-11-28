@@ -58,3 +58,4 @@ require File.expand_path(File.dirname(__FILE__) + '/test_helper')
     end
   end
 
+require_relative 'request_surface_regression'
