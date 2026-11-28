@@ -19,6 +19,7 @@ __lazy_modules__ = [
 
 import logging
 import os
+import re
 import stat
 import sys
 import tarfile
@@ -28,7 +29,7 @@ from contextlib import contextmanager
 from itertools import chain
 from pathlib import Path
 from threading import RLock
-from typing import TYPE_CHECKING, Any, Literal, NoReturn, SupportsIndex, cast
+from typing import TYPE_CHECKING, Any, Final, Literal, NoReturn, SupportsIndex, cast
 
 from cachetools import cached
 from packaging.requirements import Requirement
@@ -55,6 +56,9 @@ from tox.tox_env.python.package import (
 from tox.tox_env.python.virtual_env.api import VirtualEnv
 from tox.util.file_view import PACKAGE_STAGING_DIR, create_session_view
 from tox.util.typing_compat import override
+
+_BACKEND_RESPONSE_FILE: Final[re.Pattern[str]] = re.compile(r"pep517_[\w-]+-[\w.-]+\.json")
+"""The per-call file the build frontend creates for a backend response, named in its streamed output."""
 
 from .util import dependencies_with_extras, safe_extractall
 
@@ -255,6 +259,7 @@ class Pep517VenvPackager(PythonPackageToxEnv, ABC):
 
     @override
     def _setup_env(self) -> None:
+        self._restrict_build_stage()
         # Only reject deps for standard PEP-517 build types (sdist, wheel, editable).
         # Non-standard types like editable-legacy legitimately need deps (e.g. the wheel package)
         # since they run setup.py directly in the packaging environment rather than through
@@ -320,12 +325,17 @@ class Pep517VenvPackager(PythonPackageToxEnv, ABC):
             with self._pkg_lock:
                 config_settings = self.conf["config_settings_build_sdist"]
                 sdist = self._frontend.build_sdist(sdist_directory=self.pkg_dir, config_settings=config_settings).sdist
-                sdist = create_session_view(sdist, self._package_temp_path, self.core["tox_root"])
+                sdist = create_session_view(
+                    sdist, self._package_temp_path, self.core["tox_root"], self.shared_output
+                )
                 self._package_paths.add(sdist)
                 package = SdistPackage(sdist, deps, config_settings=self.conf["config_settings_build_wheel"])
         elif of_type == "sdist-wheel":
             wheel = create_session_view(
-                self._build_wheel_via_sdist(for_env), self._package_temp_path, self.core["tox_root"]
+                self._build_wheel_via_sdist(for_env),
+                self._package_temp_path,
+                self.core["tox_root"],
+                self.shared_output,
             )
             self._package_paths.add(wheel)
             package = WheelPackage(wheel, deps)
@@ -349,7 +359,9 @@ class Pep517VenvPackager(PythonPackageToxEnv, ABC):
                         metadata_directory=self.meta_folder_if_populated,
                         config_settings=config_settings,
                     ).wheel
-                    wheel = create_session_view(wheel, self._package_temp_path, self.core["tox_root"])
+                    wheel = create_session_view(
+                        wheel, self._package_temp_path, self.core["tox_root"], self.shared_output
+                    )
                     self._package_paths.add(wheel)
                 package = (EditablePackage if of_type == "editable" else WheelPackage)(wheel, deps)
         else:  # pragma: no cover # for when we introduce new packaging types and don't implement
@@ -509,6 +521,20 @@ class Pep517VenvPackager(PythonPackageToxEnv, ABC):
     @property
     def _package_temp_path(self) -> Path:
         return self.core.get("temp_dir", Path) / PACKAGE_STAGING_DIR
+
+    def _restrict_build_stage(self) -> None:
+        # The staging view and the extracted source distribution hold paths that mean nothing outside the build. The
+        # backend response file is created per call, so it is restricted by pattern and scrubbed while it is streamed.
+        temp_dir = self.core.get("temp_dir", Path)
+        self.add_restricted_values(
+            temp_dir,
+            temp_dir / "package",
+            self._package_temp_path,
+            self.pkg_dir,
+            self.meta_folder,
+            self.env_tmp_dir / "sdist-extract",
+        )
+        self.shared_output.add_pattern(_BACKEND_RESPONSE_FILE)
 
     def _build_wheel_via_sdist(self, for_env: EnvConfigSet) -> Path:
         # Build a wheel by first building an sdist, then building a wheel from it.

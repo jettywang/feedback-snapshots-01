@@ -811,6 +811,10 @@ Optional structured JSON output is enabled by ``--result-json <path>``:
 - `EnvJournal <https://github.com/tox-dev/tox/blob/main/src/tox/journal/env.py>`_ (per-environment) records metadata and
   execution outcomes (command, stdout, stderr, exit code, elapsed time).
 
+``Journal.content`` and ``EnvJournal.content`` are the internal record and keep restricted build-stage values.
+``Journal.shared_content``, written by ``write_journal``, is the copy that may leave the run: it masks values
+registered with the ``SharedOutput`` policy that the terminal handler, the execution streams, and the journal share.
+
 *****************************
  Part 4: Reference Materials
 *****************************

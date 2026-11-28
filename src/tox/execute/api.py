@@ -4,6 +4,7 @@ from __future__ import annotations
 
 __lazy_modules__ = [
     "colorama",
+    "tox.util.shared_output",
     f"{__spec__.parent}.stream",  # ty: ignore[missing-union-attribute]  # imported modules have a spec
 ]
 
@@ -17,6 +18,7 @@ from typing import IO, TYPE_CHECKING, Final, NoReturn, cast
 
 from colorama import Fore
 
+from tox.util.shared_output import SharedOutput
 from tox.util.typing_compat import override
 
 from .request import ExecuteRequest, StdinSource
@@ -266,6 +268,8 @@ class Execute(ABC):
         err = cast("IO[bytes]", out_err[1].buffer)
         out_sync = SyncWrite(out.name, out if show else None)
         err_sync = SyncWrite(err.name, err if show else None, str(stderr_color) if stderr_color is not None else None)
+        policy = env.shared_output
+        out_sync.shared_output = err_sync.shared_output = policy
         try:
             with out_sync, err_sync:
                 instance = self.build_instance(request, self._option_class(env), out_sync, err_sync)
@@ -286,6 +290,7 @@ class Execute(ABC):
             status.metadata,
             status.start_error,
         )
+        status.outcome.set_shared_output(policy)
 
     @abstractmethod
     def build_instance(
@@ -364,6 +369,7 @@ class Outcome:
         self.cmd = cmd  #: the command as executed
         self.metadata = metadata  #: additional metadata attached to the execution
         self.start_error = start_error  #: the error that kept the command from starting, ``None`` once it started
+        self.shared_output: SharedOutput = SharedOutput()  #: policy for the output when it is shared
 
     def __bool__(self) -> bool:
         return self.exit_code == self.OK
@@ -389,17 +395,25 @@ class Outcome:
     def _assert_fail(self, code: int) -> NoReturn:
         if self.show_on_standard is False:
             if self.out:
-                sys.stdout.write(self.out)
+                sys.stdout.write(self.shared_output.scrub_text(self.out))
                 if not self.out.endswith("\n"):
                     sys.stdout.write("\n")
             if self.err:
                 sys.stderr.write(str(Fore.RED))
-                sys.stderr.write(self.err)
+                sys.stderr.write(self.shared_output.scrub_text(self.err))
                 sys.stderr.write(str(Fore.RESET))
                 if not self.err.endswith("\n"):
                     sys.stderr.write("\n")
         self.log_run_done(logging.CRITICAL)
         raise SystemExit(code)
+
+    def set_shared_output(self, policy: SharedOutput) -> None:
+        """Set the policy that keeps restricted values out of the shared output.
+
+        :param policy: the policy of the run
+
+        """
+        self.shared_output = policy
 
     def log_run_done(self, lvl: int) -> None:
         """Log that the run was done.

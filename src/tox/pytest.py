@@ -602,11 +602,17 @@ def pypi_server(tmp_path_factory: pytest.TempPathFactory) -> Iterator[IndexServe
         yield server
 
 
+_DEFAULT_FAKE_PORT: Final[int] = 39181
+
+
 @pytest.fixture(scope="session")
 def _invalid_index_fake_port() -> int:
-    with closing(socket.socket(socket.AF_INET, socket.SOCK_STREAM)) as socket_handler:
-        socket_handler.bind(("", 0))
-        return cast("int", socket_handler.getsockname()[1])
+    try:
+        with closing(socket.socket(socket.AF_INET, socket.SOCK_STREAM)) as socket_handler:
+            socket_handler.bind(("", 0))
+            return cast("int", socket_handler.getsockname()[1])
+    except PermissionError:  # a sandbox may not allow binding a local port
+        return _DEFAULT_FAKE_PORT
 
 
 @pytest.fixture(autouse=True)

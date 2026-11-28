@@ -1820,6 +1820,12 @@ Environment variables with names containing sensitive words (``access``, ``api``
 ``key``, ``passwd``, ``password``, ``private``, ``pwd``, ``secret``, ``token``) are logged with their values redacted to
 prevent accidental secret leaking. tox also masks URL userinfo in logged commands.
 
+Paths that build stages create, such as the package staging view under ``.tox/.tmp/package`` and the per-call build
+backend response file, mean nothing outside the run. They stay in the environment log private to the run, but are
+masked with ``<restricted>`` wherever the run shares output: the terminal, the ``--result-json`` document, and lines a
+parallel run replays after the environment finishes. The mask covers stdout and stderr alike, including a restricted
+value split across output chunks and an interrupt summary that names one.
+
 ***************************************
  Understand InvocationError exit codes
 ***************************************

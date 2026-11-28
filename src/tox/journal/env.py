@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
-__lazy_modules__ = ["tox.util.redact"]
+__lazy_modules__ = [
+    "tox.util.redact",
+    "tox.util.shared_output",
+]
 
 from typing import TYPE_CHECKING
 
 from tox.util.redact import redact_argv
+from tox.util.shared_output import SharedOutput, scrub_json
 
 if TYPE_CHECKING:
     from tox.execute import Outcome
@@ -18,6 +22,7 @@ class EnvJournal:
 
     :param enabled: whether the journal records anything
     :param name: the name of the tox environment
+    :param shared_output: the policy that keeps restricted values out of the shared document
 
     """
 
@@ -25,9 +30,11 @@ class EnvJournal:
         self,
         enabled: bool,  # ruff:ignore[boolean-type-hint-positional-argument]  # keeps the signature
         name: str,  # keeps the signature
+        shared_output: SharedOutput | None = None,
     ) -> None:
         self._enabled = enabled
         self.name = name
+        self._shared_output = shared_output
         self._content: dict[str, JsonValue] = {}
         self._executes: list[tuple[str, Outcome]] = []
 
@@ -66,10 +73,20 @@ class EnvJournal:
             else:
                 setup.append(one)
         if tests:
-            self["test"] = tests
+            self._content["test"] = tests
         if setup:
-            self["setup"] = setup
+            self._content["setup"] = setup
         return self._content
+
+    @property
+    def shared_content(self) -> dict[str, JsonValue]:
+        """The env journal content that may be shared, with restricted values masked."""
+        content = self.content
+        if self._shared_output is None:
+            return content
+        scrubbed = scrub_json(content, self._shared_output)
+        assert isinstance(scrubbed, dict)  # ruff:ignore[assert]  # the input is a mapping, so is the copy
+        return scrubbed
 
     def add_execute(self, outcome: Outcome, run_id: str) -> None:
         """Add a command execution to the journal.

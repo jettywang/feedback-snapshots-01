@@ -523,7 +523,8 @@ class EnvSelector:
                 raise HandledError(msg) from exc
             raise RunnerUnavailable(runner_name) from exc
         journal = self._journal.get_env_journal(name)
-        args = ToxEnvCreateArgs(env_conf, self._state.conf.core, self._state.conf.options, journal, self._log_handler)
+        base = self._state.conf.core, self._state.conf.options, journal, self._log_handler, self._state.shared_output
+        args = ToxEnvCreateArgs(env_conf, *base)
         run_env = runner(args)
         run_env.register_config()
         self._manager.tox_add_env_config(env_conf, self._state)
@@ -622,7 +623,8 @@ class EnvSelector:
         package_type = REGISTER.package(packager)
         pkg_conf = self._state.conf.get_env(name, package=True)
         journal = self._journal.get_env_journal(name)
-        args = ToxEnvCreateArgs(pkg_conf, self._state.conf.core, self._state.conf.options, journal, self._log_handler)
+        base = self._state.conf.core, self._state.conf.options, journal, self._log_handler, self._state.shared_output
+        args = ToxEnvCreateArgs(pkg_conf, *base)
         try:
             pkg_env: PackageToxEnv = package_type(args)
             pkg_env.register_config()

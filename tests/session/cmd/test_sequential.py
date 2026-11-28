@@ -8,6 +8,7 @@ import sys
 import sysconfig
 from pathlib import Path
 from subprocess import PIPE, Popen
+from threading import Thread
 from textwrap import dedent
 from time import sleep
 from typing import TYPE_CHECKING, Any, Final
@@ -17,6 +18,8 @@ from re_assert import Matches
 from virtualenv.discovery.py_info import PythonInfo
 
 from tox import __version__
+import tox.run
+from tox.run import run as tox_run
 from tox.tox_env.api import ToxEnv
 from tox.tox_env.errors import Fail
 from tox.tox_env.info import Info
@@ -24,7 +27,11 @@ from tox.tox_env.info import Info
 _INTERRUPT_SIGNAL: Final[int] = signal.CTRL_C_EVENT if sys.platform == "win32" else signal.SIGINT
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from pytest_mock import MockerFixture
+
+    from tox.session.state import State
 
     from tox.pytest import ToxProject, ToxProjectCreator
 
@@ -600,7 +607,8 @@ def test_sequential_inserted_env_vars(tox_project: ToxProjectCreator, demo_pkg_i
     result = project.run("r", "--root", str(demo_pkg_inline), "--workdir", str(project.path / ".tox"))
     result.assert_success()
 
-    assert re.search(f"TOX_PACKAGE={re.escape(str(project.path))}.*.tar.gz{os.linesep}", result.out)
+    # TOX_PACKAGE points into the build staging path, which belongs to the build stage and is masked when shared.
+    assert f"TOX_PACKAGE=.*.tar.gz{os.linesep}" not in result.out
     assert f"TOX_ENV_NAME=py{os.linesep}" in result.out
     work_dir = project.path / ".tox"
     assert f"TOX_WORK_DIR={work_dir}{os.linesep}" in result.out
@@ -914,3 +922,77 @@ commands = [["python", "-c", "pass", "--token=hunter2", "--cov=tox"]]
     assert "hunter2" not in content
     command: Final[list[str]] = json.loads(content)["testenvs"]["py"]["test"][0]["command"]
     assert command[1:] == ["-c", "pass", "--token=*******", "--cov=tox"]
+
+
+def test_result_json_masks_build_stage_path(
+    tox_project: ToxProjectCreator, demo_pkg_inline: Path
+) -> None:
+    project = tox_project({"tox.ini": "[testenv]\npackage=wheel\ncommands=python -c 'print(1)'"})
+    result = project.path / "out.json"
+
+    project.run(
+        "r",
+        "-e",
+        "py",
+        "--root",
+        str(demo_pkg_inline),
+        "--workdir",
+        str(project.path / ".tox"),
+        "--result-json",
+        str(result),
+    ).assert_success()
+
+    content = result.read_text()
+    assert str(project.path / ".tox" / ".tmp") not in content
+    record = (project.path / ".tox" / "py" / "log" / "1-install_package.log").read_text()
+    assert str(project.path / ".tox" / ".tmp") in record
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="SIGINT tests hang on Windows CI")
+def test_shared_output_masks_two_streams_and_interrupt_summary(
+    tox_project: ToxProjectCreator, tmp_path: Path, capfd: pytest.CaptureFixture[str]
+) -> None:
+    restricted = tmp_path / "restricted-value"
+    project = tox_project({"tox.toml": "[env_run_base]\npackage = \"skip\"\n"})
+    (project.path / "run.py").write_text(
+        "from pathlib import Path\n"
+        "import sys, time\n"
+        "Path('main').write_text('')\n"
+        "print(f'standard output {sys.argv[1]}')\n"
+        "print(f'standard error {sys.argv[1]}', file=sys.stderr)\n"
+        "sys.stdout.flush()\n"
+        "sys.stderr.flush()\n"
+        "time.sleep(100)\n"
+    )
+    (project.path / "tox.toml").write_text(
+        f'[env_run_base]\npackage = "skip"\ncommands = [["python", "run.py", "{restricted}"]]\n'
+    )
+    original_setup = tox.run.setup_state
+
+    def setup_state(args: Sequence[str]) -> State:
+        state = original_setup(args)
+        state.shared_output.add(str(restricted))
+
+        def interrupt_when_running() -> None:
+            while not (project.path / "main").exists():
+                sleep(0.05)  # simplint: ignore[sleep-in-test]  # polls a marker the child process writes
+            state.envs["py"].interrupt()
+
+        Thread(target=interrupt_when_running, daemon=True).start()
+        return state
+
+    project.monkeypatch.setattr(tox.run, "setup_state", setup_state)
+    with project.chdir():
+        try:
+            tox_run(["r", "-e", "py"])
+        except SystemExit:
+            pass
+    out, err = capfd.readouterr()
+    shared = out + err
+
+    assert str(restricted) not in shared, shared
+    assert "standard output" in shared, shared
+    assert "standard error" in shared, shared
+    assert "interrupt tox environment" in shared, shared
+    record = (project.path / ".tox" / "py" / "log" / "1-commands[0].log").read_text()
+    assert str(restricted) in record

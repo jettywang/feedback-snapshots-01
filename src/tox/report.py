@@ -8,6 +8,7 @@ __lazy_modules__ = [
     "pathlib",
     "virtualenv.util.subprocess",
     f"{__spec__.parent}.util.redact",  # ty: ignore[missing-union-attribute]  # imported modules have a spec
+    f"{__spec__.parent}.util.shared_output",  # ty: ignore[missing-union-attribute]  # imported modules have a spec
 ]
 
 import locale
@@ -26,6 +27,7 @@ from colorama import Fore, Style, init
 from virtualenv.util.subprocess import LogCmd
 
 from .util.redact import redact_value
+from .util.shared_output import SharedOutput
 from .util.typing_compat import override
 
 if TYPE_CHECKING:
@@ -105,6 +107,7 @@ class ToxHandler(_STREAM_HANDLER_BASE):
         is_colored: bool,  # ruff:ignore[boolean-type-hint-positional-argument]  # keeps the signature
         out_err: OutErr,  # keeps the signature
     ) -> None:
+        self.shared_output = SharedOutput()
         self._local = _LogThreadLocal(out_err)
         super().__init__(stream=self.stdout)
         if is_colored:
@@ -220,8 +223,8 @@ class ToxHandler(_STREAM_HANDLER_BASE):
         :param out_err: the standard output and standard error to write
 
         """
-        self.stdout.buffer.write(out_err[0])
-        self.stderr.buffer.write(out_err[1])
+        self.stdout.buffer.write(self.shared_output.scrub_bytes(out_err[0]))
+        self.stderr.buffer.write(self.shared_output.scrub_bytes(out_err[1]))
 
     @property
     def stderr(self) -> TextIOWrapper:
@@ -230,6 +233,17 @@ class ToxHandler(_STREAM_HANDLER_BASE):
 
     @override
     def format(self, record: logging.LogRecord) -> str:
+        rendered = self._format(record)
+        return self.shared_output.scrub_text(rendered)
+
+    def _format(self, record: logging.LogRecord) -> str:
+        """Format one record, before the shared output policy masks restricted values.
+
+        :param record: the record to format
+
+        :returns: the rendered record
+
+        """
         if record.name == "virtualenv.seed.embed.pip_invoke" and isinstance(record.args, tuple):
             record.args = tuple(
                 LogCmd(arg.cmd, {name: redact_value(name, value) for name, value in arg.env.items()})

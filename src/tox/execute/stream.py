@@ -18,6 +18,8 @@ if TYPE_CHECKING:
     from types import TracebackType
     from typing import Self
 
+    from tox.util.shared_output import SharedOutput, StreamScrubber
+
 
 class SyncWrite:
     """Make sure data collected is synced in-memory and to the target stream on every newline and time period.
@@ -44,6 +46,8 @@ class SyncWrite:
         self._at: int = 0
         self._color: str | None = color
         self.name = name
+        self.shared_output: SharedOutput | None = None
+        self._scrubber: StreamScrubber | None = None
 
     @override
     def __repr__(self) -> str:
@@ -51,6 +55,7 @@ class SyncWrite:
 
     def __enter__(self) -> Self:
         if self._target_enabled:
+            self._scrubber = self.shared_output.stream_scrubber() if self.shared_output is not None else None
             self._start()
         return self
 
@@ -70,10 +75,25 @@ class SyncWrite:
             if at > self._at:  # pragma: no branch  # other outcome untested
                 try:
                     with self.colored():
-                        self._target.write(self._content[self._at : at])
+                        self._target.write(self._visible(self._content[self._at : at]))
                     self._target.flush()
                 finally:
                     self._at = at
+
+    def _visible(self, data: bytes) -> bytes:
+        return data if self._scrubber is None else self._scrubber.feed(data)
+
+    def _write_completed(self) -> None:
+        with self._content_lock:
+            at = len(self._content)
+        self._write(at)
+        with self._lock:
+            scrubbed = self._scrubber.finish() if self._scrubber is not None else b""
+            if scrubbed:  # pragma: no branch  # may be empty when the last chunk ended a restricted value
+                assert self._target is not None  # ruff:ignore[assert]
+                with self.colored():
+                    self._target.write(scrubbed)
+                self._target.flush()
 
     @contextmanager
     def colored(self) -> Generator[None, None, None]:
@@ -99,7 +119,10 @@ class SyncWrite:
     ) -> None:
         if self._target_enabled:
             self.timer.cancel()
-            self._write(len(self._content))
+            if self._scrubber is None:
+                self._write(len(self._content))
+            else:
+                self._write_completed()
 
     @property
     def text(self) -> str:

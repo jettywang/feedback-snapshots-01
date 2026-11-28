@@ -5,6 +5,7 @@ __lazy_modules__ = [
     "tox.config.main",
     "tox.journal",
     "tox.plugin.manager",
+    "tox.util.shared_output",
     f"{__spec__.parent}.env_select",  # ty: ignore[missing-union-attribute]  # imported modules have a spec
 ]
 
@@ -16,6 +17,7 @@ from tox.config.main import Config
 from tox.journal import Journal
 from tox.plugin import impl
 from tox.plugin.manager import MANAGER
+from tox.util.shared_output import SharedOutput
 
 from .env_select import EnvSelector
 
@@ -46,7 +48,8 @@ class State:
         )
         self._options = options
         self.args = args
-        self._journal: Journal = Journal(options.parsed.result_json is not None)
+        self.shared_output: SharedOutput = options.log_handler.shared_output
+        self._journal: Journal = Journal(options.parsed.result_json is not None, self.shared_output)
         self._selector: EnvSelector | None = None
 
     @property

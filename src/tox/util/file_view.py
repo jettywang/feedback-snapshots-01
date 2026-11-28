@@ -20,20 +20,29 @@ from contextlib import ExitStack, suppress
 from dataclasses import dataclass
 from os.path import commonpath
 from pathlib import Path
-from typing import Final
+from typing import TYPE_CHECKING, Final
 
 from .path import ensure_empty_dir, ensure_private_dir
+
+if TYPE_CHECKING:
+    from .shared_output import SharedOutput
 
 PACKAGE_STAGING_DIR: Final[str] = "package"
 """Name of the directory that holds the staged copy of the package."""
 
 
-def create_session_view(package: Path, temp_path: Path, trust_root: Path) -> Path:
+def create_session_view(
+    package: Path,
+    temp_path: Path,
+    trust_root: Path,
+    shared_output: SharedOutput | None = None,
+) -> Path:
     """Create the view of the package that a session installs from, which lives in the temporary path.
 
     :param package: the package to view
     :param temp_path: the temporary directory the view is created in
     :param trust_root: the directory the view is restricted to
+    :param shared_output: the policy that keeps this temporary path out of shared output
 
     :returns: the path of the view
 
@@ -50,6 +59,9 @@ def create_session_view(package: Path, temp_path: Path, trust_root: Path) -> Pat
 
     with package.open("rb") as source, session_package.open("xb") as target:
         shutil.copyfileobj(source, target)
+    if shared_output is not None:
+        # Register before the debug line below names the path, so streaming that line is masked as well.
+        shared_output.add_relative(session_package, trust_root)
     try:
         common = commonpath((session_package, package))
     except ValueError:  # no shared base (e.g. different Windows drives); only the debug log needs it

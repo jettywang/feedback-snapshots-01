@@ -124,6 +124,13 @@ environments
 journal
 =======
 
+.. py:currentmodule:: tox.journal
+
+.. autoclass:: tox.journal.Journal
+    :members: get_env_journal, shared_content, content
+
+.. py:currentmodule:: tox.journal.env
+
 .. autoclass:: tox.journal.env.EnvJournal
     :members:
     :exclude-members: __init__

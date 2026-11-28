@@ -10,6 +10,7 @@ import pytest
 from tox import __version__
 from tox.journal import write_journal
 from tox.journal.main import Journal
+from tox.util.shared_output import SharedOutput
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -75,3 +76,29 @@ def test_write_journal_round_trips_output(tmp_path: Path, mocker: MockerFixture,
     write_journal(path, journal)
 
     assert json.loads(path.read_text(encoding="utf-8"))["testenvs"]["py"]["output"] == output
+
+
+def test_journal_shared_content_masks_restricted_values(tmp_path: Path) -> None:
+    policy = SharedOutput()
+    policy.add("/tmp/build-dir")
+    journal = Journal(enabled=True, shared_output=policy)
+    env = journal.get_env_journal("py")
+    env["output"] = "at /tmp/build-dir/wheel.whl"
+
+    assert env.content["output"] == "at /tmp/build-dir/wheel.whl"
+    assert env.shared_content["output"] == "at <restricted>/wheel.whl"
+    assert journal.shared_content["testenvs"]["py"]["output"] == "at <restricted>/wheel.whl"
+
+
+def test_write_journal_uses_shared_content(tmp_path: Path) -> None:
+    policy = SharedOutput()
+    policy.add("hunter2-restricted")
+    journal = Journal(enabled=True, shared_output=policy)
+    journal.get_env_journal("py")["output"] = "value hunter2-restricted"
+    path = tmp_path / "out.json"
+
+    write_journal(path, journal)
+
+    content = path.read_text(encoding="utf-8")
+    assert "hunter2-restricted" not in content
+    assert "value <restricted>" in content

@@ -12,6 +12,7 @@ __lazy_modules__ = [
     "tox.report",
     "tox.util.path",
     "tox.util.redact",
+    "tox.util.shared_output",
     "tox.util.venv_redirect",
     f"{__spec__.parent}.errors",  # ty: ignore[missing-union-attribute]  # imported modules have a spec
     f"{__spec__.parent}.info",  # ty: ignore[missing-union-attribute]  # imported modules have a spec
@@ -34,6 +35,7 @@ from tox.execute.request import ExecuteRequest
 from tox.report import HandledError
 from tox.util.path import ensure_cachedir_tag, ensure_empty_dir, ensure_gitignore, ensure_private_dir, is_junction
 from tox.util.redact import redact_value
+from tox.util.shared_output import SharedOutput
 from tox.util.typing_compat import override
 from tox.util.venv_redirect import forget_venv_redirect, release_venv_redirect
 
@@ -64,6 +66,7 @@ class ToxEnvCreateArgs(NamedTuple):
     :param options: the parsed command line options
     :param journal: the journal the environment records its results in
     :param log_handler: the handler that reports the output of the environment
+    :param shared_output: the values that must stay out of the output shared outside the run
 
     """
 
@@ -72,6 +75,7 @@ class ToxEnvCreateArgs(NamedTuple):
     options: Parsed
     journal: EnvJournal
     log_handler: ToxHandler
+    shared_output: SharedOutput | None = None
 
 
 class ToxEnv(ABC):  # ruff:ignore[too-many-public-methods]  # public facade
@@ -88,6 +92,10 @@ class ToxEnv(ABC):  # ruff:ignore[too-many-public-methods]  # public facade
         self.core: CoreConfigSet = create_args.core  #: the core tox config set
         self.options: Parsed = create_args.options  #: CLI options
         self.log_handler: ToxHandler = create_args.log_handler  #: handler to the tox reporting system
+        #: the values kept out of the output that leaves the run
+        self.shared_output: SharedOutput = (
+            create_args.shared_output if create_args.shared_output is not None else SharedOutput()
+        )
 
         #: encode the run state of various methods (setup/clean/etc)
         self._run_state = {"setup": False, "clean": False, "teardown": False}
@@ -97,6 +105,16 @@ class ToxEnv(ABC):  # ruff:ignore[too-many-public-methods]  # public facade
         self._suspended_out_err: OutErr | None = None
         self._interruption = _Interruption()
         self._log_id = 0
+
+    def add_restricted_values(self, *values: str | Path) -> None:
+        """Keep values out of the output shared outside the run.
+
+        Values stay restricted for the rest of the run, because output collected before the call may be shared later.
+
+        :param values: the values to keep out of shared output
+
+        """
+        self.shared_output.add(*values)
 
     @override
     def __repr__(self) -> str:
