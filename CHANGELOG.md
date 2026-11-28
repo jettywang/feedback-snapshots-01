@@ -15,6 +15,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Converting an `AttestationType` member to a string now returns its predicate
   URL instead of its enum name.
+- `Attestation.sign` now reports expired signing certificates and expired
+  identity tokens with distinct, recognizable error messages, and preserves
+  the original exception as the cause.
 
 ## [0.0.31]
 

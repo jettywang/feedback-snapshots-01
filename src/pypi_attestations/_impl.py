@@ -202,8 +202,12 @@ class Attestation(BaseModel):
 
         try:
             bundle = signer.sign_dsse(stmt)
-        except (ExpiredCertificate, ExpiredIdentity) as e:
-            raise AttestationError(str(e))
+        except ExpiredCertificate as e:
+            detail = f": {e}" if str(e) else ""
+            raise AttestationError(f"signing certificate expired{detail}") from e
+        except ExpiredIdentity as e:
+            detail = f": {e}" if str(e) else ""
+            raise AttestationError(f"identity token expired{detail}") from e
 
         try:
             return Attestation.from_bundle(bundle)
