@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import os
 import shutil
@@ -9,13 +10,11 @@ import tempfile
 from contextlib import nullcontext
 from pathlib import Path
 
+import pypi_attestations._cli
 import pytest
 import sigstore.oidc
 import urllib3
 from pretend import raiser, stub
-from sigstore.oidc import IdentityError, IdentityToken
-
-import pypi_attestations._cli
 from pypi_attestations._cli import (
     _logger,
     _validate_files,
@@ -23,6 +22,7 @@ from pypi_attestations._cli import (
     main,
 )
 from pypi_attestations._impl import Attestation, AttestationError, ConversionError, Distribution
+from sigstore.oidc import IdentityError, IdentityToken
 
 ONLINE_TESTS = "CI" in os.environ and "TEST_OFFLINE" not in os.environ
 
@@ -958,6 +958,244 @@ def test_convert_command_existent_output_file(caplog: pytest.LogCaptureFixture) 
             )
 
     assert "Output file already exists" in caplog.text
+
+
+def _write_repository_response(path: Path, payload: dict[str, object]) -> Path:
+    path.write_text(json.dumps(payload))
+    return path
+
+
+def test_review_command_success(caplog: pytest.LogCaptureFixture, tmp_path: Path) -> None:
+    response = _write_repository_response(
+        tmp_path / "response.json",
+        {
+            "observed_at": "2026-11-29T09:05:00Z",
+            "source": "test",
+            "outcome": "observed",
+            "http_status": 200,
+            "observed_repository": {
+                "host": "github.com",
+                "repository": "trailofbits/pypi-attestations",
+            },
+        },
+    )
+    output = tmp_path / "review.json"
+
+    run_main_with_command(
+        [
+            "review",
+            artifact_path.as_posix(),
+            "--provenance-file",
+            pypi_sdist_provenance_path.as_posix(),
+            "--repository-response",
+            response.as_posix(),
+            "--output-file",
+            output.as_posix(),
+        ]
+    )
+
+    archive = json.loads(output.read_bytes())
+    assert archive["outcome"]["decision"] == "approved"
+    assert archive["outcome"]["release_gate"] == "clear"
+    assert archive["record"]["signing"]["approved_repository"]["repository"] == (
+        "trailofbits/pypi-attestations"
+    )
+    assert "Decision: approved" in caplog.text
+
+
+def test_review_command_quota_gap_then_recovery(
+    caplog: pytest.LogCaptureFixture, tmp_path: Path
+) -> None:
+    quota = _write_repository_response(
+        tmp_path / "quota.json",
+        {
+            "observed_at": "2026-11-29T09:10:00Z",
+            "source": "test",
+            "outcome": "quota_exhausted",
+            "http_status": 429,
+        },
+    )
+    gap_output = tmp_path / "gap.json"
+
+    run_main_with_command(
+        [
+            "review",
+            artifact_path.as_posix(),
+            "--provenance-file",
+            pypi_sdist_provenance_path.as_posix(),
+            "--repository-response",
+            quota.as_posix(),
+            "--output-file",
+            gap_output.as_posix(),
+        ]
+    )
+
+    gap = json.loads(gap_output.read_bytes())
+    assert gap["outcome"]["decision"] == "pending_repository_check"
+    assert gap["outcome"]["release_gate"] == "hold"
+    assert gap["outcome"]["reapproval_required"] is False
+    assert gap["outcome"]["missing_checks"] == ["current_repository_ownership"]
+
+    recovered = _write_repository_response(
+        tmp_path / "recovered.json",
+        {
+            "observed_at": "2026-11-29T09:12:00Z",
+            "source": "test",
+            "outcome": "observed",
+            "http_status": 200,
+            "observed_repository": {
+                "host": "github.com",
+                "repository": "pypi/pypi-attestations",
+            },
+            "redirects": ["https://github.com/trailofbits/pypi-attestations"],
+        },
+    )
+    recovered_output = tmp_path / "recovered.json.result"
+
+    run_main_with_command(
+        [
+            "review",
+            artifact_path.as_posix(),
+            "--provenance-file",
+            pypi_sdist_provenance_path.as_posix(),
+            "--record",
+            gap_output.as_posix(),
+            "--repository-response",
+            recovered.as_posix(),
+            "--output-file",
+            recovered_output.as_posix(),
+        ]
+    )
+
+    archive = json.loads(recovered_output.read_bytes())
+    assert archive["outcome"]["decision"] == "reapproval_required"
+    assert archive["outcome"]["release_gate"] == "blocked"
+    assert archive["outcome"]["reapproval_required"] is True
+
+    # The historical signing evidence is byte-for-byte unchanged.
+    assert archive["record"]["signing"] == gap["record"]["signing"]
+    assert [obs["outcome"] for obs in archive["record"]["observations"]] == [
+        "quota_exhausted",
+        "observed",
+    ]
+
+
+def test_review_command_refuses_to_overwrite_resolved_record(
+    caplog: pytest.LogCaptureFixture, tmp_path: Path
+) -> None:
+    success = _write_repository_response(
+        tmp_path / "success.json",
+        {
+            "observed_at": "2026-11-29T09:05:00Z",
+            "source": "test",
+            "outcome": "observed",
+            "observed_repository": {
+                "host": "github.com",
+                "repository": "trailofbits/pypi-attestations",
+            },
+        },
+    )
+    output = tmp_path / "review.json"
+
+    run_main_with_command(
+        [
+            "review",
+            artifact_path.as_posix(),
+            "--provenance-file",
+            pypi_sdist_provenance_path.as_posix(),
+            "--repository-response",
+            success.as_posix(),
+            "--output-file",
+            output.as_posix(),
+        ]
+    )
+
+    later = _write_repository_response(
+        tmp_path / "later.json",
+        {
+            "observed_at": "2026-11-29T09:30:00Z",
+            "source": "test",
+            "outcome": "observed",
+            "observed_repository": {
+                "host": "github.com",
+                "repository": "pypi/pypi-attestations",
+            },
+        },
+    )
+
+    with pytest.raises(SystemExit):
+        run_main_with_command(
+            [
+                "review",
+                artifact_path.as_posix(),
+                "--provenance-file",
+                pypi_sdist_provenance_path.as_posix(),
+                "--record",
+                output.as_posix(),
+                "--repository-response",
+                later.as_posix(),
+                "--output-file",
+                (tmp_path / "later-result.json").as_posix(),
+            ]
+        )
+
+    assert "no missing repository check" in caplog.text
+
+
+def test_review_command_existing_output(caplog: pytest.LogCaptureFixture, tmp_path: Path) -> None:
+    output = tmp_path / "review.json"
+    output.write_text("existing")
+
+    with pytest.raises(SystemExit):
+        run_main_with_command(
+            [
+                "review",
+                artifact_path.as_posix(),
+                "--provenance-file",
+                pypi_sdist_provenance_path.as_posix(),
+                "--output-file",
+                output.as_posix(),
+            ]
+        )
+
+    assert "Output file already exists" in caplog.text
+
+
+def test_review_command_rejects_tampered_archive(
+    caplog: pytest.LogCaptureFixture, tmp_path: Path
+) -> None:
+    output = tmp_path / "review.json"
+
+    run_main_with_command(
+        [
+            "review",
+            artifact_path.as_posix(),
+            "--provenance-file",
+            pypi_sdist_provenance_path.as_posix(),
+            "--output-file",
+            output.as_posix(),
+        ]
+    )
+
+    archive = json.loads(output.read_bytes())
+    archive["record_sha256"] = "0" * 64
+    output.write_text(json.dumps(archive))
+
+    with pytest.raises(SystemExit):
+        run_main_with_command(
+            [
+                "review",
+                artifact_path.as_posix(),
+                "--provenance-file",
+                pypi_sdist_provenance_path.as_posix(),
+                "--record",
+                output.as_posix(),
+                "--output-file",
+                (tmp_path / "next.json").as_posix(),
+            ]
+        )
+
+    assert "archive digest does not match" in caplog.text
 
 
 def test_verify_pypi_command_gcb_ok(caplog: pytest.LogCaptureFixture) -> None:

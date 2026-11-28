@@ -36,6 +36,13 @@ from pypi_attestations._impl import (
     GooglePublisher,
     Provenance,
 )
+from pypi_attestations._review import (
+    RepositoryObservation,
+    ReviewArchive,
+    ReviewError,
+    ReviewRecord,
+    build_review_record,
+)
 
 if typing.TYPE_CHECKING:  # pragma: no cover
     from collections.abc import Iterable
@@ -239,6 +246,52 @@ def _parser() -> argparse.ArgumentParser:
         required=True,
         type=Path,
         help="The output file to write the attestation to",
+    )
+
+    review_command = subcommands.add_parser(
+        name="review",
+        help="Review a local release when repository-query capability is degraded",
+        parents=[parent_parser],
+    )
+
+    review_command.add_argument(
+        "artifact",
+        metavar="ARTIFACT",
+        type=Path,
+        help="The local distribution file to review",
+    )
+
+    review_command.add_argument(
+        "--provenance-file",
+        required=True,
+        type=Path,
+        help="The local provenance file for the distribution",
+    )
+
+    review_command.add_argument(
+        "--record",
+        type=Path,
+        help="An existing review record to extend with a new repository observation",
+    )
+
+    review_command.add_argument(
+        "--repository-response",
+        type=Path,
+        help="A JSON file describing this review's repository query response",
+    )
+
+    review_command.add_argument(
+        "--output-file",
+        required=True,
+        type=Path,
+        help="The archive file to write the review result to",
+    )
+
+    review_command.add_argument(
+        "--force",
+        action="store_true",
+        default=False,
+        help="Overwrite the archive file if it already exists",
     )
     return parser
 
@@ -664,6 +717,76 @@ def _convert(args: argparse.Namespace) -> None:
     _logger.info(f"Converted Sigstore bundle to attestation: {args.output_file}")
 
 
+def _repository_observation_from_response(
+    response: object,
+) -> RepositoryObservation:
+    """Build a repository observation from a query-response JSON object."""
+    try:
+        return RepositoryObservation.model_validate(response)
+    except ValidationError as validation_error:
+        _die(f"Invalid repository response: {validation_error}")
+
+
+def _load_repository_response(path: Path) -> RepositoryObservation:
+    """Load a simulated repository query response from disk."""
+    if not path.is_file():
+        _die(f"Repository response file does not exist: {path}")
+    try:
+        payload = json.loads(path.read_bytes())
+    except json.JSONDecodeError as json_error:
+        _die(f"Invalid repository response ({path}): {json_error}")
+    return _repository_observation_from_response(payload)
+
+
+def _load_review_record(path: Path) -> ReviewRecord:
+    """Load a review record from a bare record or an archived result."""
+    if not path.is_file():
+        _die(f"Review record does not exist: {path}")
+    raw = path.read_bytes()
+    try:
+        archive = ReviewArchive.model_validate_json(raw)
+    except ValidationError:
+        try:
+            return ReviewRecord.model_validate_json(raw)
+        except ValidationError as validation_error:
+            _die(f"Invalid review record ({path}): {validation_error}")
+    if not archive.record_digest_matches():
+        _die(f"Review archive digest does not match its record: {path}")
+    return archive.record
+
+
+def _review(args: argparse.Namespace) -> None:
+    """Review a local release, preserving signing evidence across query gaps."""
+    if args.record is None:
+        try:
+            record = build_review_record(args.artifact, args.provenance_file)
+        except ReviewError as review_error:
+            _die(f"Review failed: {review_error}")
+    else:
+        record = _load_review_record(args.record)
+
+    if args.repository_response is not None:
+        observation = _load_repository_response(args.repository_response)
+        try:
+            record = record.append_observation(observation)
+        except ReviewError as review_error:
+            _die(f"Review failed: {review_error}")
+
+    if args.output_file.exists() and not args.force:
+        _die(f"Output file already exists: {args.output_file}")
+
+    archive = ReviewArchive.from_record(record)
+    args.output_file.write_text(archive.model_dump_json(indent=2))
+
+    outcome = archive.outcome
+    _logger.info(f"Decision: {outcome.decision}")
+    _logger.info(f"Release gate: {outcome.release_gate}")
+    _logger.info(f"Reapproval required: {outcome.reapproval_required}")
+    for reason in outcome.reasons:
+        _logger.info(f"  {reason}")
+    _logger.info(f"Archived review: {args.output_file}")
+
+
 def main() -> None:
     """Dispatch the CLI subcommand."""
     parser = _parser()
@@ -689,3 +812,5 @@ def main() -> None:
         _inspect(args)
     elif args.subcommand == "convert":
         _convert(args)
+    elif args.subcommand == "review":
+        _review(args)

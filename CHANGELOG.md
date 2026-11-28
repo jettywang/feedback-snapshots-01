@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- A `review` CLI command and review-record API for release review when
+  repository-query capability is degraded. Signing evidence is sealed at record
+  creation, repository observations are append-only, and a recovered observation
+  can fill a missing check without overwriting the signing-time publisher
+  identity.
+- A reproducible success/quota-gap/recovery drill under
+  `examples/release-review/`.
+
 ### Changed
 
 - The minimum Python version required is now `3.11`.

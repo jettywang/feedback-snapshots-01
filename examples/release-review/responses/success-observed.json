@@ -1,0 +1,13 @@
+{
+  "observed_at": "2026-11-29T09:05:00Z",
+  "source": "simulated GitHub repository query",
+  "outcome": "observed",
+  "http_status": 200,
+  "observed_repository": {
+    "host": "github.com",
+    "repository": "trailofbits/pypi-attestations"
+  },
+  "canonical_url": "https://github.com/trailofbits/pypi-attestations",
+  "redirects": [],
+  "note": "Query returned the same repository recorded at signing time."
+}

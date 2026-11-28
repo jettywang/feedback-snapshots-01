@@ -1,0 +1,7 @@
+{
+  "observed_at": "2026-11-29T09:10:00Z",
+  "source": "simulated GitHub repository query",
+  "outcome": "quota_exhausted",
+  "http_status": 429,
+  "note": "Repository query quota exhausted; retry window opens after 60 seconds."
+}

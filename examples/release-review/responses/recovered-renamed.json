@@ -1,0 +1,15 @@
+{
+  "observed_at": "2026-11-29T09:12:00Z",
+  "source": "simulated GitHub repository query after quota recovery",
+  "outcome": "observed",
+  "http_status": 200,
+  "observed_repository": {
+    "host": "github.com",
+    "repository": "pypi/pypi-attestations"
+  },
+  "canonical_url": "https://github.com/pypi/pypi-attestations",
+  "redirects": [
+    "https://github.com/trailofbits/pypi-attestations"
+  ],
+  "note": "Repository now resolves to a different owner/name than the signing-time record."
+}

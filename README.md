@@ -168,6 +168,35 @@ This command downloads the artifact, if needed, and its provenance from PyPI. Th
 is then verified against the provenance, while also checking that the provenance's
 signing identity matches the repository specified by the user.
 
+### Reviewing a release when repository queries are unavailable
+
+The `review` subcommand combines offline verification of local provenance with a
+separately-supplied repository observation. It is intended for release review in
+environments where repository-query quota may be briefly exhausted.
+
+```bash
+# Local evidence plus a simulated repository query response
+pypi-attestations review \
+  test/assets/pypi_attestations-0.0.19.tar.gz \
+  --provenance-file test/assets/pypi_attestations-0.0.19.tar.gz.provenance \
+  --repository-response examples/release-review/responses/success-observed.json \
+  --output-file review-result.json
+
+# Recovery: append a later observation without rewriting signing evidence
+pypi-attestations review \
+  test/assets/pypi_attestations-0.0.19.tar.gz \
+  --provenance-file test/assets/pypi_attestations-0.0.19.tar.gz.provenance \
+  --record review-result.json \
+  --repository-response examples/release-review/responses/recovered-renamed.json \
+  --output-file recovered-result.json
+```
+
+Signing evidence is sealed when the record is created. Repository observations
+are append-only, can only fill a missing repository check, and never overwrite
+the publisher identity approved at signing time. See
+[`examples/release-review/README.md`](examples/release-review/README.md) for a
+complete drill with success, quota-gap, and recovery archives.
+
 ### Converting a Sigstore bundle into a PEP 740 Attestation
 
 ```bash
