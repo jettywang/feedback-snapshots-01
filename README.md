@@ -82,6 +82,46 @@ bundle = attestation.to_bundle()
 print(bundle.to_json())
 ```
 
+### Merging offline attestation evidence
+
+When investigating a historical release, the available attestations often
+come from several independent backups. The offline merger consolidates
+standalone PEP 740 attestations, PEP 740 provenance objects and Sigstore
+bundles into a single indexed `MergeReceipt`, without any network access.
+
+Each record is indexed by the artifact digest it attests to, its publisher
+(when present), the signature and the source document it was loaded from.
+The same attestation collected more than once is recognized as a duplicate
+and folded into one record, while attestations from different publishers for
+the same package are kept as separate records. Data lost during a format
+conversion (for example the extra transparency log entries a Sigstore bundle
+carries but a PEP 740 attestation cannot represent) is reported in the
+record's `omitted` list, and any fields the merger does not model are kept
+verbatim in `unknown_fields`.
+
+```python
+from pypi_attestations import merge_evidence
+
+receipt = merge_evidence([
+    "backups/vault-a.provenance",
+    "backups/vault-b.provenance",  # a duplicate copy of the same evidence
+    "backups/vault-c.sigstore",
+])
+
+print(receipt.stats)
+# sources_seen=3 attestations_seen=3 records=2 duplicates=1 ...
+
+# Trace any receipt identity back to the original source file(s).
+record = receipt.get_record(receipt.records[0].evidence_id)
+for source in record.sources:
+    print(source.path, source.sha256, "duplicate:", source.duplicate)
+
+# Records whose log basis is incomplete independently surface unknown fields.
+for record in receipt.records:
+    if record.has_unknown_fields():
+        print(record.evidence_id, record.unknown_fields)
+```
+
 ## Usage as a command line tool
 
 > [!IMPORTANT]
@@ -103,6 +143,7 @@ positional arguments:
     verify       Verify one or more inputs
     inspect      Inspect one or more inputs
     convert      Convert a Sigstore bundle into a PEP 740 attestation
+    merge        Merge offline attestation evidence from several backup files
 
 options:
   -h, --help     show this help message and exit
@@ -173,6 +214,18 @@ signing identity matches the repository specified by the user.
 ```bash
 pypi-attestations convert --output-file /tmp/rfc8785-0.1.2-py3-none-any.whl.publish.attestation  \
   test/assets/rfc8785-0.1.2-py3-none-any.whl.sigstore
+```
+
+### Merging offline attestation evidence
+
+The `merge` command combines one or more attestation, provenance or Sigstore
+bundle files into a single merge receipt. Duplicate observations are folded
+together, distinct publishers are kept separate, and any conversion loss or
+unknown fields are recorded on the affected records.
+
+```bash
+pypi-attestations merge --output-file receipt.json  \
+  backups/vault-a.provenance backups/vault-b.provenance backups/vault-c.sigstore
 ```
 
 

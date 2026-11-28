@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Offline evidence merging: `OfflineEvidenceMerger`, `merge_evidence` and the
+  `merge` CLI command consolidate attestations from multiple backup files
+  (standalone attestations, provenance objects and Sigstore bundles) into an
+  indexed `MergeReceipt`. Records are keyed by artifact digest, publisher,
+  signature and source; duplicate observations are detected, distinct
+  publishers for the same package are retained, and conversion losses and
+  unknown fields are reported explicitly on each record.
+
 ### Changed
 
 - The minimum Python version required is now `3.11`.

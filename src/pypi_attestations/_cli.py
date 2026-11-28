@@ -36,6 +36,7 @@ from pypi_attestations._impl import (
     GooglePublisher,
     Provenance,
 )
+from pypi_attestations._merge import MergeError, OfflineEvidenceMerger
 
 if typing.TYPE_CHECKING:  # pragma: no cover
     from collections.abc import Iterable
@@ -239,6 +240,27 @@ def _parser() -> argparse.ArgumentParser:
         required=True,
         type=Path,
         help="The output file to write the attestation to",
+    )
+
+    merge_command = subcommands.add_parser(
+        name="merge",
+        help="Merge offline attestation evidence from several backup files",
+        parents=[parent_parser],
+    )
+
+    merge_command.add_argument(
+        "files",
+        metavar="FILE",
+        type=Path,
+        nargs="+",
+        help="An attestation, provenance or Sigstore bundle file to merge",
+    )
+
+    merge_command.add_argument(
+        "--output-file",
+        required=True,
+        type=Path,
+        help="The output file to write the merge receipt to",
     )
     return parser
 
@@ -664,6 +686,31 @@ def _convert(args: argparse.Namespace) -> None:
     _logger.info(f"Converted Sigstore bundle to attestation: {args.output_file}")
 
 
+def _merge(args: argparse.Namespace) -> None:
+    """Merge attestation evidence from several offline backup files."""
+    _validate_files(args.files, should_exist=True)
+
+    if args.output_file.exists():
+        _die(f"Output file already exists: {args.output_file}")
+
+    merger = OfflineEvidenceMerger()
+    for file_path in args.files:
+        try:
+            merger.merge_path(file_path)
+        except MergeError as e:
+            _die(f"Failed to merge evidence from {file_path}: {e}")
+
+    receipt = merger.build()
+    args.output_file.write_text(receipt.model_dump_json())
+
+    stats = receipt.stats
+    _logger.info(
+        f"Merged {stats.attestations_seen} attestation(s) from {stats.sources_seen} source(s) "
+        f"into {stats.records} record(s); {stats.duplicates} duplicate(s), "
+        f"{stats.records_with_unknown_fields} record(s) with unknown fields: {args.output_file}"
+    )
+
+
 def main() -> None:
     """Dispatch the CLI subcommand."""
     parser = _parser()
@@ -689,3 +736,5 @@ def main() -> None:
         _inspect(args)
     elif args.subcommand == "convert":
         _convert(args)
+    elif args.subcommand == "merge":
+        _merge(args)

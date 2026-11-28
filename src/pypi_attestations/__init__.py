@@ -20,6 +20,17 @@ from ._impl import (
     VerificationError,
     VerificationMaterial,
 )
+from ._merge import (
+    EvidenceRecord,
+    EvidenceSource,
+    MergeError,
+    MergeReceipt,
+    OfflineEvidenceMerger,
+    OmittedData,
+    SourceKind,
+    WarningCode,
+    merge_evidence,
+)
 
 __all__ = [
     "Attestation",
@@ -30,12 +41,21 @@ __all__ = [
     "ConversionError",
     "Distribution",
     "Envelope",
+    "EvidenceRecord",
+    "EvidenceSource",
     "GitHubPublisher",
     "GitLabPublisher",
     "GooglePublisher",
+    "MergeError",
+    "MergeReceipt",
+    "OfflineEvidenceMerger",
+    "OmittedData",
     "Provenance",
     "Publisher",
+    "SourceKind",
     "TransparencyLogEntry",
     "VerificationError",
     "VerificationMaterial",
+    "WarningCode",
+    "merge_evidence",
 ]

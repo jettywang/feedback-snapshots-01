@@ -23,6 +23,7 @@ from pypi_attestations._cli import (
     main,
 )
 from pypi_attestations._impl import Attestation, AttestationError, ConversionError, Distribution
+from pypi_attestations._merge import MergeReceipt
 
 ONLINE_TESTS = "CI" in os.environ and "TEST_OFFLINE" not in os.environ
 
@@ -1128,3 +1129,76 @@ def test_verify_pypi_command_github_no_repository(caplog: pytest.LogCaptureFixtu
             ]
         )
     assert "Provenance signed by a repository, but no repository URL provided" in caplog.text
+
+
+def test_merge_command(caplog: pytest.LogCaptureFixture) -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        first = Path(tmpdir) / "backup-a.provenance"
+        second = Path(tmpdir) / "backup-b.provenance"
+        first.write_bytes(pypi_sdist_provenance_path.read_bytes())
+        second.write_bytes(pypi_sdist_provenance_path.read_bytes())
+        receipt_path = Path(tmpdir) / "receipt.json"
+
+        run_main_with_command(
+            [
+                "merge",
+                "--output-file",
+                receipt_path.as_posix(),
+                first.as_posix(),
+                second.as_posix(),
+            ]
+        )
+
+        assert receipt_path.is_file()
+        receipt = MergeReceipt.model_validate_json(receipt_path.read_bytes())
+        assert receipt.stats.records == 1
+        assert receipt.stats.duplicates == 1
+        assert "1 duplicate(s)" in caplog.text
+
+
+def test_merge_command_missing_source(caplog: pytest.LogCaptureFixture) -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        receipt_path = Path(tmpdir) / "receipt.json"
+        with pytest.raises(SystemExit):
+            run_main_with_command(
+                [
+                    "merge",
+                    "--output-file",
+                    receipt_path.as_posix(),
+                    str(Path(tmpdir) / "missing.provenance"),
+                ]
+            )
+        assert not receipt_path.exists()
+        assert "is not a file" in caplog.text
+
+
+def test_merge_command_existent_output(caplog: pytest.LogCaptureFixture) -> None:
+    with tempfile.NamedTemporaryFile(suffix=".json") as f:
+        with pytest.raises(SystemExit):
+            run_main_with_command(
+                [
+                    "merge",
+                    "--output-file",
+                    f.name,
+                    pypi_sdist_provenance_path.as_posix(),
+                ]
+            )
+        assert "Output file already exists" in caplog.text
+
+
+def test_merge_command_invalid_source(caplog: pytest.LogCaptureFixture) -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        bad = Path(tmpdir) / "bad.attestation"
+        bad.write_text("not json")
+        receipt_path = Path(tmpdir) / "receipt.json"
+        with pytest.raises(SystemExit):
+            run_main_with_command(
+                [
+                    "merge",
+                    "--output-file",
+                    receipt_path.as_posix(),
+                    bad.as_posix(),
+                ]
+            )
+        assert not receipt_path.exists()
+        assert "Failed to merge evidence" in caplog.text
