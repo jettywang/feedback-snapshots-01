@@ -15,5 +15,7 @@
 # along with bundler-audit.  If not, see <https://www.gnu.org/licenses/>.
 #
 
+require 'bundler/audit/results/exempted_gem'
 require 'bundler/audit/results/insecure_source'
+require 'bundler/audit/results/source_assessment'
 require 'bundler/audit/results/unpatched_gem'

@@ -32,10 +32,22 @@ module Bundler
       # @return [Array<Results::InsecureSources>]
       attr_reader :insecure_sources
 
+      # The source assessment results.
+      #
+      # @return [Array<Results::SourceAssessment>]
+      attr_reader :source_assessments
+
       # The unpatched gems results.
       #
       # @return [Array<Results::UnpatchedGems>]
       attr_reader :unpatched_gems
+
+      # The version advisories approved through an exemption.
+      #
+      # @return [Array<Results::ExemptedGem>]
+      attr_reader :exemptions
+
+      alias exempted_gems exemptions
 
       #
       # Initializes the report.
@@ -48,7 +60,9 @@ module Bundler
 
         @results = []
         @insecure_sources = []
+        @source_assessments = []
         @unpatched_gems = []
+        @exemptions = []
 
         results.each { |result| self << result }
       end
@@ -69,7 +83,9 @@ module Bundler
       #
       # Appends a result to the report.
       #
-      # @param [InsecureSource, UnpatchedGem] result
+      # @param [Result] result
+      #
+      # @return [Report]
       #
       def <<(result)
         @results << result
@@ -77,6 +93,10 @@ module Bundler
         case result
         when Results::InsecureSource
           @insecure_sources << result
+        when Results::SourceAssessment
+          @source_assessments << result
+        when Results::ExemptedGem
+          @exemptions << result
         when Results::UnpatchedGem
           @unpatched_gems << result
         end
@@ -85,12 +105,69 @@ module Bundler
       end
 
       #
-      # Determines if there were vulnerabilities found.
+      # Determines if there are findings that were not approved for release.
       #
       # @return [Boolean]
       #
       def vulnerable?
-        !@results.empty?
+        !passes?
+      end
+
+      #
+      # The sources that explicitly block the release.
+      #
+      # @return [Array<Results::InsecureSource>]
+      #
+      def blocked_sources
+        @insecure_sources.select(&:blocked?)
+      end
+
+      #
+      # The sources whose identity could not be established.
+      #
+      # @return [Array<Results::SourceAssessment>]
+      #
+      def undetermined_sources
+        @source_assessments.select(&:undetermined?)
+      end
+
+      #
+      # The sources that matched the source policy.
+      #
+      # @return [Array<Results::SourceAssessment>]
+      #
+      def allowed_sources
+        @source_assessments.select(&:allowed?)
+      end
+
+      #
+      # Determines whether the release is permitted.
+      #
+      # Sources are evaluated independently of version results. An explicit
+      # version exemption cannot clear a blocked or undetermined source.
+      #
+      # @return [Boolean]
+      #
+      def passes?
+        @results.none?(&:blocks_release?)
+      end
+
+      #
+      # The results that block the release.
+      #
+      # @return [Array<Result>]
+      #
+      def blocking_results
+        @results.select(&:blocks_release?)
+      end
+
+      #
+      # The approved results.
+      #
+      # @return [Array<Result>]
+      #
+      def approved_results
+        @results.select(&:approved?)
       end
 
       #
@@ -140,6 +217,7 @@ module Bundler
         {
           version:    @version,
           created_at: @created_at,
+          passed:     passes?,
           results:    @results.map(&:to_h)
         }
       end

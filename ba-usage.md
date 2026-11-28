@@ -18,6 +18,8 @@ Options for `check`:
   --verbose, -v       # Show full advisory details.
   --quiet, -q         # Suppress normal output (exit codes only).
   --ignore FILE       # Ignore one or more advisory IDs (repeatable).
+                      # Time-limited version exemptions live in
+                      # .bundler-audit.yml under `exemptions:`.
   --only FILE         # Only check the specified advisory IDs.
   --gemfile PATH      # Use a specific Gemfile.lock.
   --format FORMAT     # Output format: text (default), json, yaml

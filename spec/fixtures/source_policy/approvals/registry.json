@@ -1,0 +1,24 @@
+{
+  "exemptions": [
+    {
+      "advisory": "CVE-2026-0001",
+      "gem": "testgem",
+      "reason": "vendor patch shipped in the application image",
+      "expires_on": "2026-12-31",
+      "approved_by": "security-team",
+      "approved_on": "2026-03-01",
+      "scope": "version-only",
+      "ticket": "SEC-2026-0042"
+    },
+    {
+      "advisory": "GHSA-aaaa-bbbb-0002",
+      "gem": "testgem",
+      "reason": "vendor patch shipped in the application image",
+      "expires_on": "2026-12-31",
+      "approved_by": "security-team",
+      "approved_on": "2026-03-01",
+      "scope": "version-only",
+      "ticket": "SEC-2026-0042"
+    }
+  ]
+}

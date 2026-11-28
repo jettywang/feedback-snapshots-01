@@ -332,6 +332,53 @@ describe Bundler::Audit::CLI::Formats::Junit do
       end
     end
 
+    context "when a source is undetermined" do
+      let(:assessment) do
+        Bundler::Audit::Results::SourceAssessment.new('http://gems.internal.example/',:undetermined,
+          reason: 'source host could not be resolved')
+      end
+      let(:report) do
+        super().tap { |report| report << assessment }
+      end
+
+      it "reports a failure without calling it an insecure source" do
+        expect(output).to include('type="Undetermined"')
+        expect(output).to include('Reason: source host could not be resolved')
+        expect(output).to include('failures="1"')
+        expect(output).to_not include('Insecure Source URI found')
+      end
+    end
+
+    context "when an advisory was exempted" do
+      let(:exemption) do
+        Bundler::Audit::Exemption.new(
+          advisory: 'CVE-2020-1234',
+          reason:   'vendor patch shipped in the application image',
+          expires_on: '2026-12-31'
+        )
+      end
+      let(:gem) do
+        Gem::Specification.new do |spec|
+          spec.name = 'test'
+          spec.version = '0.1.0'
+        end
+      end
+      let(:advisory) do
+        Bundler::Audit::Advisory.load(Fixtures.join('advisory','CVE-2020-1234.yml'))
+      end
+      let(:report) do
+        super().tap do |report|
+          report << Bundler::Audit::Results::ExemptedGem.new(gem,advisory,exemption)
+        end
+      end
+
+      it "keeps the approval out of the failure count" do
+        expect(output).to include('failures="0"')
+        expect(output).to include('Exempted: vendor patch shipped in the application image')
+        expect(output).to include('expires 2026-12-31')
+      end
+    end
+
     context "when no vulnerabilities were found" do
       it 'must print an empty testsuite' do
         expect(output).to include('failures="0"')

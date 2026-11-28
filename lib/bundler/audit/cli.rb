@@ -85,7 +85,7 @@ module Bundler
 
         output.close if options[:output]
 
-        exit(1) if report.vulnerable?
+        exit(1) unless report.passes?
       end
 
       desc 'stats', 'Prints ruby-advisory-db stats'

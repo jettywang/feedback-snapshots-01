@@ -1,0 +1,17 @@
+---
+gem: testgem
+ghsa: aaaa-bbbb-0002
+url: https://example.com/GHSA-aaaa-bbbb-0002
+title: Second synthetic vulnerability in testgem
+date: 2026-02-01
+
+description: |
+  A second synthetic advisory used to check exemption binding.
+
+cvss_v3: 5.0
+
+unaffected_versions:
+  - "< 1.0.0"
+
+patched_versions:
+  - ">= 3.0.0"

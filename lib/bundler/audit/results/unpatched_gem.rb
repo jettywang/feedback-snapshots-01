@@ -38,6 +38,11 @@ module Bundler
         # @return [Advisory]
         attr_reader :advisory
 
+        # Additional evidence for the result.
+        #
+        # @return [Hash{Symbol => Object}]
+        attr_reader :evidence
+
         #
         # Initializes the unpatched gem result.
         #
@@ -47,9 +52,32 @@ module Bundler
         # @param [Advisory] advisory
         #   The advisory documenting the vulnerability.
         #
-        def initialize(gem,advisory)
+        # @param [Hash{Symbol => Object}] evidence
+        #   Additional evidence for the result.
+        #
+        def initialize(gem,advisory,evidence: {})
           @gem      = gem
           @advisory = advisory
+          @evidence = evidence
+        end
+
+        #
+        # The unpatched gem result blocks the release unless an exemption
+        # approved it.
+        #
+        # @return [:blocked]
+        #
+        def disposition
+          :blocked
+        end
+
+        #
+        # The reason the result blocks the release.
+        #
+        # @return [String]
+        #
+        def reason
+          @evidence[:reason] || 'version is affected by an advisory'
         end
 
         #
@@ -88,7 +116,10 @@ module Bundler
               name: @gem.name,
               version: @gem.version
             },
-            advisory: @advisory.to_h
+            advisory: @advisory.to_h,
+            disposition: disposition,
+            reason:      reason,
+            evidence:    @evidence
           }
         end
 

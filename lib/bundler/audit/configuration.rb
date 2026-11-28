@@ -15,6 +15,8 @@
 # along with bundler-audit.  If not, see <https://www.gnu.org/licenses/>.
 #
 
+require 'bundler/audit/exemption'
+
 require 'yaml'
 require 'set'
 
@@ -77,6 +79,24 @@ module Bundler
             end
 
             config[:ignore] = value.children.map(&:value)
+          when 'exemptions'
+            unless value.is_a?(YAML::Nodes::Sequence)
+              raise(InvalidConfigurationError,"'exemptions' key found in config file, but is not an Array")
+            end
+
+            config[:exemptions] = value.children.map do |node|
+              unless node.is_a?(YAML::Nodes::Mapping)
+                raise(InvalidConfigurationError,"'exemptions' array in config file contains a non-Hash")
+              end
+
+              node.children.each_slice(2).each_with_object({}) do |(key,value),exemption|
+                unless value.is_a?(YAML::Nodes::Scalar)
+                  raise(InvalidConfigurationError,"exemption '#{key.value}' must be a scalar value")
+                end
+
+                exemption[key.value] = value.value
+              end
+            end
           end
         end
 
@@ -90,6 +110,12 @@ module Bundler
       #
       attr_reader :ignore
 
+      # The time-limited version advisory exemptions.
+      #
+      # @return [Array<Exemption>]
+      #
+      attr_reader :exemptions
+
       #
       # Initializes the configuration.
       #
@@ -99,8 +125,22 @@ module Bundler
       # @option config [Array<String>] :ignore
       #   The list of advisory IDs to ignore.
       #
+      # @option config [Array<Hash>, Array<Exemption>] :exemptions
+      #   The time-limited exemptions to apply to version advisories.
+      #
       def initialize(config={})
-        @ignore = Set.new(config[:ignore])
+        @ignore     = Set.new(config[:ignore])
+        @exemptions = Array(config[:exemptions]).map { |exemption|
+          begin
+            if exemption.kind_of?(Exemption)
+              exemption
+            else
+              Exemption.from_h(exemption)
+            end
+          rescue ArgumentError => error
+            raise(InvalidConfigurationError,error.message)
+          end
+        }
       end
 
     end

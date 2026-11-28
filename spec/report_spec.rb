@@ -94,5 +94,74 @@ describe Bundler::Audit::Report do
     context "when then report contains results" do
       it { expect(subject.vulnerable?).to be true }
     end
+
+    context "when the only results were approved" do
+      let(:exemption) do
+        Bundler::Audit::Exemption.new(
+          advisory: 'CVE-3000-1234',
+          reason:   'vendor patch',
+          expires_on: '2026-12-31'
+        )
+      end
+      let(:exempted_gem) do
+        Bundler::Audit::Results::ExemptedGem.new(gem,advisory,exemption)
+      end
+
+      subject { described_class.new([exempted_gem]) }
+
+      it { expect(subject.vulnerable?).to be false }
+      it { expect(subject.passes?).to be true }
+      it { expect(subject.approved_results).to eq([exempted_gem]) }
+    end
+  end
+
+  describe "#passes?" do
+    context "when the report is empty" do
+      subject { described_class.new }
+
+      it { expect(subject.passes?).to be true }
+    end
+
+    context "when the report contains a blocked source" do
+      subject { described_class.new([insecure_source]) }
+
+      it { expect(subject.passes?).to be false }
+      it { expect(subject.blocked_sources).to eq([insecure_source]) }
+    end
+
+    context "when the report contains an undetermined source" do
+      let(:assessment) do
+        Bundler::Audit::Results::SourceAssessment.new(uri,:undetermined,
+          reason: 'source host could not be resolved')
+      end
+
+      subject { described_class.new([assessment]) }
+
+      it { expect(subject.passes?).to be false }
+      it { expect(subject.undetermined_sources).to eq([assessment]) }
+      it { expect(subject.blocked_sources).to be_empty }
+    end
+
+    context "when mixed with an approved version result" do
+      let(:assessment) do
+        Bundler::Audit::Results::SourceAssessment.new(uri,:undetermined,
+          reason: 'source host could not be resolved')
+      end
+
+      subject { described_class.new([insecure_source,assessment,unpatched_gem]) }
+
+      it "still blocks on the unapproved results" do
+        expect(subject.passes?).to be false
+        expect(subject.blocking_results).to eq([insecure_source,assessment,unpatched_gem])
+      end
+    end
+  end
+
+  describe "#to_h" do
+    subject { described_class.new([insecure_source]) }
+
+    it "includes the pass decision" do
+      expect(subject.to_h[:passed]).to be(false)
+    end
   end
 end

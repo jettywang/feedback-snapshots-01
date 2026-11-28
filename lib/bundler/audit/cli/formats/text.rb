@@ -42,21 +42,61 @@ module Bundler
               case result
               when Results::InsecureSource
                 print_warning "Insecure Source URI found: #{result.source}"
+                print_reason result.reason
+              when Results::SourceAssessment
+                if result.undetermined?
+                  print_warning "Source identity undetermined: #{result.source}"
+                  print_reason result.reason
+                end
+              when Results::ExemptedGem
+                print_exemption result
               when Results::UnpatchedGem
                 print_advisory result.gem, result.advisory
+                print_reason result.reason if result.evidence[:reason]
               end
             end
 
-            if report.vulnerable?
-              say "Vulnerabilities found!", :red
-            else
+            if report.passes?
               say("No vulnerabilities found", :green) unless options.quiet?
+            else
+              say "Vulnerabilities found!", :red
+
+              if report.undetermined_sources.any?
+                say "Source identity undetermined for #{report.undetermined_sources.length} source(s)", :red
+              end
             end
 
             $stdout = original_stdout
           end
 
           private
+
+          def print_reason(reason)
+            say "Reason: ", :red
+            say reason
+            say
+          end
+
+          def print_exemption(result)
+            say "Name: ", :red
+            say result.gem.name
+
+            say "Version: ", :red
+            say result.gem.version
+
+            say "Advisory: ", :red
+            say result.advisory.id
+
+            say "Exempted: ", :yellow
+            say result.reason
+
+            if result.expires_on
+              say "Expires on: ", :yellow
+              say result.expires_on
+            end
+
+            say
+          end
 
           def print_warning(message)
             say message, :yellow

@@ -179,9 +179,38 @@ bundler-audit also supports a per-project configuration file:
 ignore:
   - CVE-YYYY-XXXX
   - ...
+
+exemptions:
+  - advisory: CVE-YYYY-XXXX
+    gem: example
+    reason: vendor patch backported in the application image
+    expires_on: 2026-12-31
+    approved_by: security-team
 ```
 
 * `ignore:` \[Array\<String\>\] - A list of advisory IDs to ignore.
+* `exemptions:` \[Array\<Hash\>\] - Time-limited exemptions for version
+  advisories. Each entry takes `advisory`, `gem`, `reason`, `expires_on`, and
+  `approved_by`. An exemption never suppresses an insecure-source result.
+
+`ignore` removes a version advisory from the results. `exemptions` keeps the
+advisory in the report as an approved item, along with its reason and expiry,
+so that temporary approvals remain auditable.
+
+### Source and version decisions
+
+Source checks and version checks are evaluated independently. Source findings
+are reported as:
+
+* `blocked` - the source was explicitly rejected, for example an `http://`
+  or `git://` source outside the internal network.
+* `undetermined` - the source could not be classified because its host could
+  not be resolved. This is not evidence of an explicit policy violation, but
+  it also does not clear the source.
+
+A version advisory exemption applies only to version results. A lockfile that
+contains an approved advisory and an insecure source still fails the audit,
+and the report keeps the approved advisory with its reason.
 
 You can provide a path to a config file using the `--config` flag:
 

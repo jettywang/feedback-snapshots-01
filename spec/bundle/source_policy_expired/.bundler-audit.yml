@@ -1,0 +1,14 @@
+---
+exemptions:
+  - advisory: CVE-2026-0001
+    gem: testgem
+    reason: vendor patch shipped in the application image
+    expires_on: 2026-01-01
+    approved_by: security-team
+    ticket: SEC-2026-0042
+  - advisory: GHSA-aaaa-bbbb-0002
+    gem: testgem
+    reason: vendor patch shipped in the application image
+    expires_on: 2026-01-01
+    approved_by: security-team
+    ticket: SEC-2026-0042

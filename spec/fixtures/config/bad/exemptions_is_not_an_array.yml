@@ -1,0 +1,4 @@
+---
+exemptions:
+  advisory: CVE-2026-0001
+  reason: vendor patch

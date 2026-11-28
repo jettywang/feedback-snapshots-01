@@ -120,4 +120,38 @@ describe Bundler::Audit::Results::UnpatchedGem do
       expect(subject.to_s).to be == advisory.id
     end
   end
+
+  describe "#disposition" do
+    it "is blocked" do
+      expect(subject.disposition).to eq(:blocked)
+      expect(subject).to be_blocks_release
+      expect(subject).to_not be_approved
+    end
+
+    it "has a default reason" do
+      expect(subject.reason).to eq('version is affected by an advisory')
+    end
+  end
+
+  describe "#to_h" do
+    let(:advisory_hash) { {id: advisory.id} }
+
+    before { expect(advisory).to receive(:to_h).and_return(advisory_hash) }
+
+    it "keeps the disposition and reason" do
+      expect(subject.to_h).to include(
+        disposition: :blocked,
+        reason:      'version is affected by an advisory'
+      )
+    end
+
+    context "when given evidence" do
+      subject { described_class.new(gem,advisory,evidence: {reason: 'exemption expired'}) }
+
+      it "uses the evidence reason" do
+        expect(subject.reason).to eq('exemption expired')
+        expect(subject.to_h[:evidence]).to eq(reason: 'exemption expired')
+      end
+    end
+  end
 end

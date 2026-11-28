@@ -109,6 +109,15 @@ describe Bundler::Audit::CLI::Formats::JSON do
         expect(output_json[:results]).to be_kind_of(Array)
         expect(output_json[:results]).to be_empty
       end
+
+      it "must output a passed decision and source summary" do
+        expect(output_json[:passed]).to be(true)
+        expect(output_json[:sources]).to eq(
+          allowed: [],
+          blocked: [],
+          undetermined: []
+        )
+      end
     end
   end
 end

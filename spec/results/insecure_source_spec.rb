@@ -44,4 +44,44 @@ describe Bundler::Audit::Results::InsecureSource do
       expect(subject.to_s).to be == source
     end
   end
+
+  describe "#disposition" do
+    it "is blocked" do
+      expect(subject.disposition).to eq(:blocked)
+      expect(subject).to be_blocked
+      expect(subject).to_not be_undetermined
+      expect(subject).to_not be_allowed
+    end
+
+    it "blocks the release" do
+      expect(subject).to be_blocks_release
+      expect(subject).to_not be_permits_release
+      expect(subject).to_not be_approved
+    end
+  end
+
+  describe "#to_h" do
+    it "includes the reason and the disposition" do
+      expect(subject.to_h).to include(
+        type:        :insecure_source,
+        source:      source,
+        disposition: :blocked
+      )
+      expect(subject.to_h[:reason]).to eq('insecure source')
+    end
+
+    context "when given a reason and evidence" do
+      subject do
+        described_class.new(source,
+          reason: 'insecure http source',
+          evidence: {scheme: 'git',internal: false})
+      end
+
+      it "keeps them in the output" do
+        expect(subject.disposition).to eq(:blocked)
+        expect(subject.reason).to eq('insecure http source')
+        expect(subject.to_h[:evidence]).to eq(scheme: 'git',internal: false)
+      end
+    end
+  end
 end

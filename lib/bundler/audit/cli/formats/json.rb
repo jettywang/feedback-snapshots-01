@@ -39,11 +39,29 @@ module Bundler
           def print_report(report,output=$stdout)
             hash = report.to_h
 
+            hash[:sources] = source_summary(report)
+
             if output.tty?
               output.puts(::JSON.pretty_generate(hash))
             else
               output.write(::JSON.generate(hash))
             end
+          end
+
+          #
+          # Summarizes source decisions without collapsing them into the
+          # version findings.
+          #
+          # @param [Report] report
+          #
+          # @return [Hash{Symbol => Object}]
+          #
+          def source_summary(report)
+            {
+              allowed:      report.allowed_sources.map(&:source),
+              blocked:      report.blocked_sources.map(&:source),
+              undetermined: report.undetermined_sources.map(&:source)
+            }
           end
 
           def criticality_label(advisory)

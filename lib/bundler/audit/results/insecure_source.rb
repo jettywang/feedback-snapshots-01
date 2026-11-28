@@ -30,14 +30,77 @@ module Bundler
         # @return [URI::Generic, URI::HTTP]
         attr_reader :source
 
+        # The reason the source was rejected.
+        #
+        # @return [String]
+        attr_reader :reason
+
+        # The evidence collected while classifying the source.
+        #
+        # @return [Hash{Symbol => Object}]
+        attr_reader :evidence
+
         #
         # Initializes the insecure source result.
         #
         # @param [URI::Generic, URI::HTTP] source
         #   The insecure `git://` or `http://` URI.
         #
-        def initialize(source)
-          @source = source
+        # @param [String] reason
+        #   The reason the source was rejected.
+        #
+        # @param [Hash{Symbol => Object}] evidence
+        #   The evidence collected while classifying the source.
+        #
+        def initialize(source,reason: 'insecure source',evidence: {})
+          @source   = source
+          @reason   = reason.to_s
+          @evidence = evidence
+        end
+
+        #
+        # The source result always blocks the release.
+        #
+        # @return [:blocked]
+        #
+        def disposition
+          :blocked
+        end
+
+        #
+        # Insecure sources always block the release.
+        #
+        # @return [Boolean]
+        #
+        def blocked?
+          true
+        end
+
+        #
+        # Insecure sources were identified, so they are not undetermined.
+        #
+        # @return [Boolean]
+        #
+        def undetermined?
+          false
+        end
+
+        #
+        # Insecure sources are not an approval.
+        #
+        # @return [Boolean]
+        #
+        def allowed?
+          false
+        end
+
+        #
+        # Insecure sources do not permit the release.
+        #
+        # @return [Boolean]
+        #
+        def permits_release?
+          false
         end
 
         #
@@ -67,8 +130,11 @@ module Bundler
         #
         def to_h
           {
-            type: :insecure_source,
-            source: @source
+            type:        :insecure_source,
+            source:      @source,
+            disposition: disposition,
+            reason:      @reason,
+            evidence:    @evidence
           }
         end
 

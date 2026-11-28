@@ -1,3 +1,15 @@
+### Unreleased
+
+* Added time-limited `exemptions:` to `.bundler-audit.yml`. Exemptions keep
+  the approved advisory in the report with its reason and expiry, and only
+  apply to version results.
+* Source results are now independent of version advisory exemptions. Sources
+  are reported as `blocked` or `undetermined`, and an undetermined source
+  blocks the release without being reported as an explicit policy violation.
+* `Report#passes?`, `Report#blocking_results`, `Report#blocked_sources`, and
+  `Report#undetermined_sources` expose the release decision. Reports now
+  include a `passed` field and per-result `disposition`/`reason`.
+
 ### 0.9.3 / 2025-11-28
 
 * Officially support Ruby 3.4, 3.5, and 4.0.

@@ -321,6 +321,65 @@ describe Bundler::Audit::CLI::Formats::Text do
       end
     end
 
+    context "when an advisory was exempted" do
+      let(:exemption) do
+        Bundler::Audit::Exemption.new(
+          advisory: 'CVE-2020-1234',
+          reason:   'vendor patch shipped in the application image',
+          expires_on: '2026-12-31'
+        )
+      end
+      let(:gem) do
+        Gem::Specification.new do |spec|
+          spec.name = 'test'
+          spec.version = '0.1.0'
+        end
+      end
+      let(:advisory) do
+        Bundler::Audit::Advisory.load(Fixtures.join('advisory','CVE-2020-1234.yml'))
+      end
+      let(:exempted_gem) do
+        Bundler::Audit::Results::ExemptedGem.new(gem,advisory,exemption)
+      end
+      let(:report) do
+        super().tap { |report| report << exempted_gem }
+      end
+
+      it "prints the approval and its reason" do
+        expect(output_lines).to include(
+          'Name: test',
+          'Advisory: CVE-2020-1234',
+          'Exempted: vendor patch shipped in the application image',
+          'Expires on: 2026-12-31'
+        )
+      end
+
+      it "does not report vulnerabilities" do
+        expect(output_lines).to include('No vulnerabilities found')
+        expect(output_lines).to_not include('Vulnerabilities found!')
+      end
+    end
+
+    context "when a source is undetermined" do
+      let(:assessment) do
+        Bundler::Audit::Results::SourceAssessment.new('http://gems.internal.example/',:undetermined,
+          reason: 'source host could not be resolved')
+      end
+      let(:report) do
+        super().tap { |report| report << assessment }
+      end
+
+      it "distinguishes undetermined evidence from an explicit block" do
+        expect(output_lines).to include(
+          'Source identity undetermined: http://gems.internal.example/',
+          'Reason: source host could not be resolved',
+          'Vulnerabilities found!',
+          'Source identity undetermined for 1 source(s)'
+        )
+        expect(output_lines.join("\n")).to_not include('Insecure Source URI found')
+      end
+    end
+
     context "when no vulnerabilities were found" do
       it 'must print "No vulnerabilities found"' do
         expect(output_lines).to include('No vulnerabilities found')

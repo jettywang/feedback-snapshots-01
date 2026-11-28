@@ -55,7 +55,7 @@ module Bundler
             say_xml(
               %{<?xml version="1.0" encoding="UTF-8" ?>},
               %{<testsuites id="#{Time.now.to_i}" name="Bundle Audit">},
-              %{  <testsuite id="Gemfile" name="Ruby Gemfile" failures="#{report.count}">}
+              %{  <testsuite id="Gemfile" name="Ruby Gemfile" failures="#{report.blocking_results.count}">}
             )
 
             yield
@@ -75,7 +75,32 @@ module Bundler
             when Results::InsecureSource
               say_xml(
                 %{    <testcase id="#{xml(result.source)}" name="Insecure Source URI found: #{xml(result.source)}">},
-                %{      <failure message="Insecure Source URI found: #{xml(result.source)}" type="Unknown"></failure>},
+                %{      <failure message="Insecure Source URI found: #{xml(result.source)}" type="Unknown">},
+                %{        Reason: #{xml(result.reason)}},
+                %{      </failure>},
+                %{    </testcase>}
+              )
+            when Results::SourceAssessment
+              if result.permits_release?
+                say_xml(
+                  %{    <testcase id="#{xml(result.source)}" name="Source allowed: #{xml(result.source)}">},
+                  %{    </testcase>}
+                )
+              else
+                say_xml(
+                  %{    <testcase id="#{xml(result.source)}" name="Source identity undetermined: #{xml(result.source)}">},
+                  %{      <failure message="Source identity undetermined: #{xml(result.source)}" type="Undetermined">},
+                  %{        Reason: #{xml(result.reason)}},
+                  %{      </failure>},
+                  %{    </testcase>}
+                )
+              end
+            when Results::ExemptedGem
+              expires = result.expires_on ? " (expires #{result.expires_on})" : ""
+
+              say_xml(
+                %{    <testcase id="#{xml(result.gem.name)}" name="Exempted: #{xml(result.gem.name)}(#{xml(result.gem.version)}) #{xml(result.advisory.id)}">},
+                %{      <system-out>Exempted: #{xml(result.reason)}#{xml(expires)}</system-out>},
                 %{    </testcase>}
               )
             when Results::UnpatchedGem
