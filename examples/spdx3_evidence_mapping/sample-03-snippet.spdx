@@ -1,0 +1,26 @@
+SPDXVersion: SPDX-2.3
+DataLicense: CC0-1.0
+DocumentNamespace: https://example.com/spdxdocs/incident-003
+DocumentName: incident-003
+SPDXID: SPDXRef-DOCUMENT
+Creator: Person: Carol Developer (carol@example.com)
+Created: 2026-11-10T00:00:00Z
+
+Relationship: SPDXRef-DOCUMENT DESCRIBES SPDXRef-File-parser
+Relationship: SPDXRef-File-parser CONTAINS SPDXRef-Snippet-read
+
+FileName: ./src/parser.c
+SPDXID: SPDXRef-File-parser
+FileChecksum: SHA1: 89abcdef0123456789abcdef0123456789abcdef
+LicenseConcluded: MIT
+FileCopyrightText: Copyright 2026 Example
+
+SnippetSPDXID: SPDXRef-Snippet-read
+SnippetFromFileSPDXID: SPDXRef-File-parser
+SnippetByteRange: 100:200
+SnippetLineRange: 10:20
+SnippetLicenseConcluded: MIT
+LicenseInfoInSnippet: MIT
+SnippetCopyrightText: Copyright 2026 Example
+SnippetComment: <text>Hot path; reviewed in incident IR-42.</text>
+SnippetName: read_header

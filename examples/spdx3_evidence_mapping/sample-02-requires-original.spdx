@@ -1,0 +1,56 @@
+SPDXVersion: SPDX-2.3
+DataLicense: CC0-1.0
+DocumentNamespace: https://example.com/spdxdocs/incident-002
+DocumentName: incident-002
+SPDXID: SPDXRef-DOCUMENT
+Creator: Tool: fixture-writer-1.0
+Creator: Person: Bob Responder (bob@example.com)
+Created: 2026-11-05T00:00:00Z
+
+ExternalDocumentRef: DocumentRef-upstream https://upstream.example/sbom/component-4.0 SHA1: aa11bb22cc33dd44ee55ff660011223344556677
+
+Relationship: SPDXRef-DOCUMENT DESCRIBES SPDXRef-Package-service
+Relationship: SPDXRef-Package-service DEPENDENCY_OF SPDXRef-Package-vendorlib
+Relationship: SPDXRef-DOCUMENT DESCRIBES DocumentRef-upstream:SPDXRef-Package-crypto
+Relationship: SPDXRef-Package-service CONTAINS SPDXRef-File-handler
+
+PackageName: service
+SPDXID: SPDXRef-Package-service
+PackageVersion: 4.0.1
+PackageDownloadLocation: https://service.example/releases/4.0.1.tar.gz
+PackageSupplier: Organization: Example Services (psirt@example.com)
+PackageLicenseConcluded: Apache-2.0
+PackageLicenseDeclared: Apache-2.0
+PackageCopyrightText: Copyright 2026 Example Services
+PackageChecksum: SHA256: abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789
+ExternalRef: PACKAGE-MANAGER maven-central org.example:service:4.0.1
+ExternalRef: SECURITY advisory https://advisories.example/ADV-2026-77
+
+PackageName: vendorlib
+SPDXID: SPDXRef-Package-vendorlib
+PackageDownloadLocation: NOASSERTION
+PackageLicenseConcluded: NOASSERTION
+PackageLicenseDeclared: LicenseRef-Vendor-EULA
+PackageCopyrightText: Copyright 2026 Vendor Inc.
+
+FileName: ./src/handler.rs
+SPDXID: SPDXRef-File-handler
+FileChecksum: SHA1: 0123456789abcdef0123456789abcdef01234567
+LicenseConcluded: MIT
+FileCopyrightText: Copyright 2026 Example Services
+
+Annotator: Tool: vuln-correlator-2.1
+AnnotationDate: 2026-11-06T00:00:00Z
+AnnotationComment: <text>Automated match: CVE-2026-1234 maps to service 4.0.1.</text>
+AnnotationType: OTHER
+SPDXREF: SPDXRef-Package-service
+
+Annotator: Person: Bob Responder (bob@example.com)
+AnnotationDate: 2026-11-06T01:00:00Z
+AnnotationComment: <text>Triaged as affected; retain original SBOM for dependency direction.</text>
+AnnotationType: REVIEW
+SPDXREF: DocumentRef-upstream:SPDXRef-Package-crypto
+
+LicenseID: LicenseRef-Vendor-EULA
+ExtractedText: <text>Vendor EULA text.</text>
+LicenseName: Vendor EULA

@@ -1,0 +1,74 @@
+SPDX 2 -> 3 migration trace: sample-04-relationship-merge
+input: /Users/apple/Documents/用户反馈项目/batches/feedback-20261120-backend-security-280-jettywang/prepared/FB-20261120-SEC-JW-253/workspace/examples/spdx3_evidence_mapping/sample-04-relationship-merge.json
+namespace: https://example.com/spdxdocs/incident-004
+jsonld: /Users/apple/Documents/用户反馈项目/batches/feedback-20261120-backend-security-280-jettywang/prepared/FB-20261120-SEC-JW-253/workspace/examples/spdx3_evidence_mapping/output/sample-04-relationship-merge.jsonld
+
+== INPUT ELEMENTS ==
+package   SPDXRef-Package-alpha  name='alpha'
+package   SPDXRef-Package-beta  name='beta'
+
+== EMITTED ELEMENTS ==
+Person                           https://example.com/spdxdocs/incident-004#SPDXRef-Actor-DanaReviewer-dana@example.com
+SpdxDocument                     https://example.com/spdxdocs/incident-004#SPDXRef-DOCUMENT
+Package                          https://example.com/spdxdocs/incident-004#SPDXRef-Package-alpha
+Package                          https://example.com/spdxdocs/incident-004#SPDXRef-Package-beta
+Relationship                     https://example.com/spdxdocs/incident-004#SPDXRef-Relationship-1
+Relationship                     https://example.com/spdxdocs/incident-004#SPDXRef-Relationship-0
+
+== NODE ID MAPPING ==
+package  SPDXRef-Package-alpha                    -> 'https://example.com/spdxdocs/incident-004#SPDXRef-Package-alpha'  MATCH
+package  SPDXRef-Package-beta                     -> 'https://example.com/spdxdocs/incident-004#SPDXRef-Package-beta'  MATCH
+count    package  input=2 emitted=2  OK
+count    file     input=0 emitted=0  OK
+count    snippet  input=0 emitted=0  OK
+
+== RELATIONSHIP MAPPING ==
+[0] SPDXRef-DOCUMENT DESCRIBES SPDXRef-Package-alpha  ->  https://example.com/spdxdocs/incident-004#SPDXRef-Relationship-0 https://example.com/spdxdocs/incident-004#SPDXRef-DOCUMENT DESCRIBES ['https://example.com/spdxdocs/incident-004#SPDXRef-Package-alpha']  [one-to-one]
+[1] SPDXRef-DOCUMENT DESCRIBES SPDXRef-Package-beta  ->  merge-overwrite: same group exists but 'https://example.com/spdxdocs/incident-004#SPDXRef-Package-beta' is absent; emitted targets=['https://example.com/spdxdocs/incident-004#SPDXRef-Package-alpha', 'https://example.com/spdxdocs/incident-004#SPDXRef-Package-alpha'] (a previously emitted target can be duplicated instead)
+
+== ANNOTATION MAPPING ==
+
+== EXTERNAL DOCUMENT REFERENCES ==
+
+== PACKAGE EXTERNAL REFERENCES ==
+
+== LICENSE / COPYRIGHT / SNIPPET RETENTION ==
+SPDXRef-Package-alpha          license_concluded    NOASSERTION                  -> None
+SPDXRef-Package-alpha          license_declared     NOASSERTION                  -> None
+SPDXRef-Package-beta           license_concluded    NOASSERTION                  -> None
+SPDXRef-Package-beta           license_declared     NOASSERTION                  -> None
+
+== DANGLING REFERENCES ==
+none
+
+== PARSER PROVENANCE ==
+raw 'Relationship:' lines: 0; parsed relationships: 2
+relationships added by the tag-value parser itself: 2 (File placement under a Package)
+
+== DIAGNOSTICS EMITTED BY THE BUMPER (stderr) ==
+creation_info.document_namespace not converted: missing conversion rule https://github.com/spdx/spdx-3-model/issues/87
+creation_info.license_list_version not converted: missing conversion rule part of licensing profile, https://github.com/spdx/spdx-3-model/issues/131
+package2.file_name not converted: missing conversion rule https://github.com/spdx/spdx-3-model/issues/83
+package2.files_analyzed not converted: missing conversion rule https://github.com/spdx/spdx-3-model/issues/84
+package2.verification_code not converted: missing implementation of IntegrityMethod, https://github.com/spdx/spdx-3-model/issues/85
+package2.license_info_from_files, package2.license_comment not converted: missing conversion rule and missing definition of license profile
+package2.file_name not converted: missing conversion rule https://github.com/spdx/spdx-3-model/issues/83
+package2.files_analyzed not converted: missing conversion rule https://github.com/spdx/spdx-3-model/issues/84
+package2.verification_code not converted: missing implementation of IntegrityMethod, https://github.com/spdx/spdx-3-model/issues/85
+package2.license_info_from_files, package2.license_comment not converted: missing conversion rule and missing definition of license profile
+
+
+== SUMMARY ==
+INFO        parser-inference             1
+lost        license                      4
+lost        merge-overwrite              1
+one-to-one  copyright                    2
+one-to-one  count                        3
+one-to-one  identity                     2
+one-to-one  relationship                 1
+source assertions: 13  lost: 5
+LOST merge-overwrite: 1:SPDXRef-DOCUMENT DESCRIBES SPDXRef-Package-beta -> None (same group exists but 'https://example.com/spdxdocs/incident-004#SPDXRef-Package-beta' is absent; emitted targets=['https://example.com/spdxdocs/incident-004#SPDXRef-Package-alpha', 'https://example.com/spdxdocs/incident-004#SPDXRef-Package-alpha'] (a previously emitted target can be duplicated instead); expected https://example.com/spdxdocs/incident-004#SPDXRef-DOCUMENT DESCRIBES [https://example.com/spdxdocs/incident-004#SPDXRef-Package-beta])
+LOST license: SPDXRef-Package-alpha:license_concluded -> concluded_license (NOASSERTION -> None)
+LOST license: SPDXRef-Package-alpha:license_declared -> declared_license (NOASSERTION -> None)
+LOST license: SPDXRef-Package-beta:license_concluded -> concluded_license (NOASSERTION -> None)
+LOST license: SPDXRef-Package-beta:license_declared -> declared_license (NOASSERTION -> None)

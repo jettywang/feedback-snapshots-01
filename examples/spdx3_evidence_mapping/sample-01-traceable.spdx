@@ -1,0 +1,43 @@
+SPDXVersion: SPDX-2.3
+DataLicense: CC0-1.0
+DocumentNamespace: https://example.com/spdxdocs/incident-001
+DocumentName: incident-001
+SPDXID: SPDXRef-DOCUMENT
+Creator: Tool: fixture-writer-1.0
+Creator: Person: Alice Analyst (alice@example.com)
+Created: 2026-11-01T00:00:00Z
+
+ExternalDocumentRef: DocumentRef-vendor https://vendor.example/sbom/vendor-2.1 SHA1: d6a770ba38583ed4bb4525bd96e50461655d2759
+
+Relationship: SPDXRef-DOCUMENT DESCRIBES SPDXRef-Package-app
+Relationship: SPDXRef-DOCUMENT COPY_OF DocumentRef-vendor:SPDXRef-Package-lib
+Relationship: SPDXRef-Package-app CONTAINS SPDXRef-File-main
+
+PackageName: app
+SPDXID: SPDXRef-Package-app
+PackageVersion: 1.2.3
+PackageDownloadLocation: NOASSERTION
+PackageSupplier: Organization: Acme Software (security@acme.example)
+PackageLicenseConcluded: LicenseRef-AcmeProprietary
+PackageLicenseDeclared: MIT
+PackageCopyrightText: Copyright 2026 Acme
+PackageChecksum: SHA256: 9f2c1d4e5a6b7c8d9e0f1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f
+ExternalRef: PACKAGE-MANAGER purl pkg:generic/app@1.2.3
+ExternalRef: SECURITY cpe23Type cpe:2.3:a:acme:app:1.2.3:*:*:*:*:*:*:*
+ExternalRefComment: cpe from vendor advisory
+
+FileName: ./src/main.c
+SPDXID: SPDXRef-File-main
+FileChecksum: SHA1: 71c4025dd9897b364f3ebbb42c484ff43d00791c
+LicenseConcluded: NOASSERTION
+FileCopyrightText: Copyright 2026 Acme
+
+Annotator: Person: Alice Analyst (alice@example.com)
+AnnotationDate: 2026-11-02T00:00:00Z
+AnnotationComment: <text>Reviewed against incident report IR-42; package is affected.</text>
+AnnotationType: REVIEW
+SPDXREF: SPDXRef-Package-app
+
+LicenseID: LicenseRef-AcmeProprietary
+ExtractedText: <text>Acme proprietary license text.</text>
+LicenseName: Acme Proprietary

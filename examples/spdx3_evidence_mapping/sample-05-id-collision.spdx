@@ -1,0 +1,27 @@
+SPDXVersion: SPDX-2.3
+DataLicense: CC0-1.0
+DocumentNamespace: https://example.com/spdxdocs/incident-005
+DocumentName: incident-005
+SPDXID: SPDXRef-DOCUMENT
+Creator: Person: Erin Engineer (erin@example.com)
+Created: 2026-11-14T00:00:00Z
+
+Relationship: SPDXRef-DOCUMENT DESCRIBES SPDXRef-Package-core
+
+PackageName: core
+SPDXID: SPDXRef-Package-core
+PackageDownloadLocation: NOASSERTION
+PackageLicenseConcluded: MIT
+PackageCopyrightText: Copyright 2026 Example
+
+Annotator: Tool: vuln-correlator-2.1
+AnnotationDate: 2026-11-14T01:00:00Z
+AnnotationComment: <text>Automated match: CVE-2026-9999 maps to core.</text>
+AnnotationType: REVIEW
+SPDXREF: SPDXRef-Package-core
+
+Annotator: Person: Erin Engineer (erin@example.com)
+AnnotationDate: 2026-11-14T02:00:00Z
+AnnotationComment: <text>Confirmed affected.</text>
+AnnotationType: REVIEW
+SPDXREF: SPDXRef-Package-core

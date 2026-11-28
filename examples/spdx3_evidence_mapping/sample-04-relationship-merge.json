@@ -1,0 +1,42 @@
+{
+  "spdxVersion": "SPDX-2.3",
+  "dataLicense": "CC0-1.0",
+  "SPDXID": "SPDXRef-DOCUMENT",
+  "name": "incident-004",
+  "documentNamespace": "https://example.com/spdxdocs/incident-004",
+  "creationInfo": {
+    "created": "2026-11-12T00:00:00Z",
+    "creators": ["Person: Dana Reviewer (dana@example.com)"]
+  },
+  "packages": [
+    {
+      "name": "alpha",
+      "SPDXID": "SPDXRef-Package-alpha",
+      "downloadLocation": "NOASSERTION",
+      "copyrightText": "Copyright 2026 Example",
+      "licenseConcluded": "NOASSERTION",
+      "licenseDeclared": "NOASSERTION"
+    },
+    {
+      "name": "beta",
+      "SPDXID": "SPDXRef-Package-beta",
+      "downloadLocation": "NOASSERTION",
+      "copyrightText": "Copyright 2026 Example",
+      "licenseConcluded": "NOASSERTION",
+      "licenseDeclared": "NOASSERTION"
+    }
+  ],
+  "relationships": [
+    {
+      "spdxElementId": "SPDXRef-DOCUMENT",
+      "relationshipType": "DESCRIBES",
+      "relatedSpdxElement": "SPDXRef-Package-alpha"
+    },
+    {
+      "spdxElementId": "SPDXRef-DOCUMENT",
+      "relationshipType": "DESCRIBES",
+      "relatedSpdxElement": "SPDXRef-Package-beta",
+      "comment": "beta is the component named in advisory ADV-2026-88"
+    }
+  ]
+}

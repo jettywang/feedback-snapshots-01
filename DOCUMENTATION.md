@@ -123,3 +123,6 @@ the `spdx3` package is planned to be structured similarly to the `spdx` package.
 
 Additionally, the `bump_from_spdx2` package takes care of converting SPDX-2 documents to SPDX-3.
 Guideline for this is the [migration guide](https://docs.google.com/document/d/1-olHRnX1CssUS67Psv_sAq9Vd-pc81HF8MM0hA7M0hg).
+The conversion is one-way and the prototype drops or reshapes several SPDX 2 assertions. See
+[`examples/spdx3_evidence_mapping/MAPPING.md`](examples/spdx3_evidence_mapping/MAPPING.md) for a
+code-referenced mapping and the claims that still need the original document.

@@ -1,0 +1,69 @@
+SPDX 2 -> 3 migration trace: sample-05-id-collision
+input: /Users/apple/Documents/用户反馈项目/batches/feedback-20261120-backend-security-280-jettywang/prepared/FB-20261120-SEC-JW-253/workspace/examples/spdx3_evidence_mapping/sample-05-id-collision.spdx
+namespace: https://example.com/spdxdocs/incident-005
+jsonld: /Users/apple/Documents/用户反馈项目/batches/feedback-20261120-backend-security-280-jettywang/prepared/FB-20261120-SEC-JW-253/workspace/examples/spdx3_evidence_mapping/output/sample-05-id-collision.jsonld
+
+== INPUT ELEMENTS ==
+package   SPDXRef-Package-core  name='core'
+
+== EMITTED ELEMENTS ==
+Person                           https://example.com/spdxdocs/incident-005#SPDXRef-Actor-ErinEngineer-erin@example.com
+SpdxDocument                     https://example.com/spdxdocs/incident-005#SPDXRef-DOCUMENT
+Package                          https://example.com/spdxdocs/incident-005#SPDXRef-Package-core
+Relationship                     https://example.com/spdxdocs/incident-005#SPDXRef-Relationship-0
+Tool                             https://example.com/spdxdocs/incident-005#SPDXRef-Actor-vuln-correlator-2.1
+Annotation                       https://example.com/spdxdocs/incident-005#SPDXRef-Annotation-0
+Annotation                       https://example.com/spdxdocs/incident-005#SPDXRef-Annotation-1
+
+== NODE ID MAPPING ==
+package  SPDXRef-Package-core                     -> 'https://example.com/spdxdocs/incident-005#SPDXRef-Package-core'  MATCH
+count    package  input=1 emitted=1  OK
+count    file     input=0 emitted=0  OK
+count    snippet  input=0 emitted=0  OK
+
+== RELATIONSHIP MAPPING ==
+[0] SPDXRef-DOCUMENT DESCRIBES SPDXRef-Package-core  ->  https://example.com/spdxdocs/incident-005#SPDXRef-Relationship-0 https://example.com/spdxdocs/incident-005#SPDXRef-DOCUMENT DESCRIBES ['https://example.com/spdxdocs/incident-005#SPDXRef-Package-core']  [one-to-one]
+
+== ANNOTATION MAPPING ==
+[0] SPDXRef-Package-core -> https://example.com/spdxdocs/incident-005#SPDXRef-Annotation-0 subject='https://example.com/spdxdocs/incident-005#SPDXRef-Package-core' type=REVIEW created_by=['https://example.com/spdxdocs/incident-005#SPDXRef-Actor-ErinEngineer-erin@example.com'] created_using=[]
+[1] SPDXRef-Package-core -> https://example.com/spdxdocs/incident-005#SPDXRef-Annotation-1 subject='https://example.com/spdxdocs/incident-005#SPDXRef-Package-core' type=REVIEW created_by=['https://example.com/spdxdocs/incident-005#SPDXRef-Actor-ErinEngineer-erin@example.com'] created_using=[]
+
+== EXTERNAL DOCUMENT REFERENCES ==
+
+== PACKAGE EXTERNAL REFERENCES ==
+
+== LICENSE / COPYRIGHT / SNIPPET RETENTION ==
+SPDXRef-Package-core           license_concluded    MIT                          -> None
+SPDXRef-Package-core           license_declared     None                         -> None
+
+== DANGLING REFERENCES ==
+none
+
+== PARSER PROVENANCE ==
+raw 'Relationship:' lines: 1; parsed relationships: 1
+relationships added by the tag-value parser itself: 0 (File placement under a Package)
+
+== DIAGNOSTICS EMITTED BY THE BUMPER (stderr) ==
+creation_info.document_namespace not converted: missing conversion rule https://github.com/spdx/spdx-3-model/issues/87
+creation_info.license_list_version not converted: missing conversion rule part of licensing profile, https://github.com/spdx/spdx-3-model/issues/131
+package2.file_name not converted: missing conversion rule https://github.com/spdx/spdx-3-model/issues/83
+package2.files_analyzed not converted: missing conversion rule https://github.com/spdx/spdx-3-model/issues/84
+package2.verification_code not converted: missing implementation of IntegrityMethod, https://github.com/spdx/spdx-3-model/issues/85
+package2.license_info_from_files, package2.license_comment not converted: missing conversion rule and missing definition of license profile
+Annotator not converted: missing conversion rule The SPDX2 annotation is not of Type Person or Organization. This case leads to an invalid SPDX3 document and is currently not supported.https://github.com/spdx/spdx-3-model/issues/180
+
+
+== SUMMARY ==
+INFO        parser-inference             1
+lost        annotator-attribution        1
+lost        license                      1
+one-to-one  annotator-attribution        1
+one-to-one  copyright                    1
+one-to-one  count                        3
+one-to-one  identity                     1
+one-to-one  license                      1
+one-to-one  relationship                 1
+one-to-one  subject                      2
+source assertions: 12  lost: 2
+LOST annotator-attribution: 0:annotator:TOOL:vuln-correlator-2.1 -> https://example.com/spdxdocs/incident-005#SPDXRef-Annotation-0 (created_by=['https://example.com/spdxdocs/incident-005#SPDXRef-Actor-ErinEngineer-erin@example.com'] created_using=[])
+LOST license: SPDXRef-Package-core:license_concluded -> concluded_license (MIT -> None)

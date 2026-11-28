@@ -1,0 +1,464 @@
+{
+  "input": "/Users/apple/Documents/\u7528\u6237\u53cd\u9988\u9879\u76ee/batches/feedback-20261120-backend-security-280-jettywang/prepared/FB-20261120-SEC-JW-253/workspace/examples/spdx3_evidence_mapping/sample-02-requires-original.spdx",
+  "label": "sample-02-requires-original",
+  "mapping": [
+    {
+      "source_kind": "package",
+      "source_id": "SPDXRef-Package-service",
+      "target_id": "https://example.com/spdxdocs/incident-002#SPDXRef-Package-service",
+      "status": "one-to-one",
+      "category": "identity",
+      "note": "Package"
+    },
+    {
+      "source_kind": "package",
+      "source_id": "SPDXRef-Package-vendorlib",
+      "target_id": "https://example.com/spdxdocs/incident-002#SPDXRef-Package-vendorlib",
+      "status": "one-to-one",
+      "category": "identity",
+      "note": "Package"
+    },
+    {
+      "source_kind": "file",
+      "source_id": "SPDXRef-File-handler",
+      "target_id": "https://example.com/spdxdocs/incident-002#SPDXRef-File-handler",
+      "status": "one-to-one",
+      "category": "identity",
+      "note": "File"
+    },
+    {
+      "source_kind": "package",
+      "source_id": "<count:package>",
+      "target_id": "2",
+      "status": "one-to-one",
+      "category": "count",
+      "note": "input=2 emitted=2"
+    },
+    {
+      "source_kind": "file",
+      "source_id": "<count:file>",
+      "target_id": "1",
+      "status": "one-to-one",
+      "category": "count",
+      "note": "input=1 emitted=1"
+    },
+    {
+      "source_kind": "snippet",
+      "source_id": "<count:snippet>",
+      "target_id": "0",
+      "status": "one-to-one",
+      "category": "count",
+      "note": "input=0 emitted=0"
+    },
+    {
+      "source_kind": "relationship",
+      "source_id": "0:SPDXRef-DOCUMENT DESCRIBES SPDXRef-Package-service",
+      "target_id": null,
+      "status": "lost",
+      "category": "merge-contamination",
+      "note": "target present but merged with unresolved ['https://example.com/spdxdocs/incident-002#DocumentRef-upstream:SPDXRef-Package-crypto']; expected https://example.com/spdxdocs/incident-002#SPDXRef-DOCUMENT DESCRIBES [https://example.com/spdxdocs/incident-002#SPDXRef-Package-service]"
+    },
+    {
+      "source_kind": "relationship",
+      "source_id": "1:SPDXRef-Package-service DEPENDENCY_OF SPDXRef-Package-vendorlib",
+      "target_id": null,
+      "status": "lost",
+      "category": "direction-not-swapped",
+      "note": "emitted https://example.com/spdxdocs/incident-002#SPDXRef-Relationship-1 keeps https://example.com/spdxdocs/incident-002#SPDXRef-Package-service DEPENDS_ON; expected https://example.com/spdxdocs/incident-002#SPDXRef-Package-vendorlib DEPENDS_ON [https://example.com/spdxdocs/incident-002#SPDXRef-Package-service]"
+    },
+    {
+      "source_kind": "relationship",
+      "source_id": "2:SPDXRef-DOCUMENT DESCRIBES DocumentRef-upstream:SPDXRef-Package-crypto",
+      "target_id": null,
+      "status": "lost",
+      "category": "external-target-unresolved",
+      "note": "target 'https://upstream.example/sbom/component-4.0#SPDXRef-Package-crypto' is not in the payload; expected https://example.com/spdxdocs/incident-002#SPDXRef-DOCUMENT DESCRIBES [https://upstream.example/sbom/component-4.0#SPDXRef-Package-crypto]"
+    },
+    {
+      "source_kind": "relationship",
+      "source_id": "3:SPDXRef-Package-service CONTAINS SPDXRef-File-handler",
+      "target_id": "https://example.com/spdxdocs/incident-002#SPDXRef-Relationship-3",
+      "status": "one-to-one",
+      "category": "relationship",
+      "note": "emitted https://example.com/spdxdocs/incident-002#SPDXRef-Package-service CONTAINS ['https://example.com/spdxdocs/incident-002#SPDXRef-File-handler']"
+    },
+    {
+      "source_kind": "relationship",
+      "source_id": "4:SPDXRef-Package-vendorlib CONTAINS SPDXRef-File-handler",
+      "target_id": "https://example.com/spdxdocs/incident-002#SPDXRef-Relationship-4",
+      "status": "one-to-one",
+      "category": "relationship",
+      "note": "emitted https://example.com/spdxdocs/incident-002#SPDXRef-Package-vendorlib CONTAINS ['https://example.com/spdxdocs/incident-002#SPDXRef-File-handler']"
+    },
+    {
+      "source_kind": "annotation",
+      "source_id": "0:SPDXRef-Package-service",
+      "target_id": "https://example.com/spdxdocs/incident-002#SPDXRef-Annotation-0",
+      "status": "one-to-one",
+      "category": "subject",
+      "note": "subject 'https://example.com/spdxdocs/incident-002#SPDXRef-Package-service', expected 'https://example.com/spdxdocs/incident-002#SPDXRef-Package-service'"
+    },
+    {
+      "source_kind": "annotation",
+      "source_id": "0:annotator:TOOL:vuln-correlator-2.1",
+      "target_id": "https://example.com/spdxdocs/incident-002#SPDXRef-Annotation-0",
+      "status": "lost",
+      "category": "annotator-attribution",
+      "note": "created_by=['https://example.com/spdxdocs/incident-002#SPDXRef-Actor-BobResponder-bob@example.com'] created_using=['https://example.com/spdxdocs/incident-002#SPDXRef-Actor-fixture-writer-1.0']"
+    },
+    {
+      "source_kind": "annotation",
+      "source_id": "1:DocumentRef-upstream:SPDXRef-Package-crypto",
+      "target_id": "https://example.com/spdxdocs/incident-002#SPDXRef-Annotation-1",
+      "status": "lost",
+      "category": "external-subject-unresolved",
+      "note": "subject 'https://example.com/spdxdocs/incident-002#DocumentRef-upstream:SPDXRef-Package-crypto', expected 'https://upstream.example/sbom/component-4.0#SPDXRef-Package-crypto'"
+    },
+    {
+      "source_kind": "annotation",
+      "source_id": "1:annotator:PERSON:Bob Responder",
+      "target_id": "https://example.com/spdxdocs/incident-002#SPDXRef-Annotation-1",
+      "status": "one-to-one",
+      "category": "annotator-attribution",
+      "note": "created_by=['https://example.com/spdxdocs/incident-002#SPDXRef-Actor-BobResponder-bob@example.com'] created_using=['https://example.com/spdxdocs/incident-002#SPDXRef-Actor-fixture-writer-1.0']"
+    },
+    {
+      "source_kind": "external-document-ref",
+      "source_id": "DocumentRef-upstream",
+      "target_id": "https://upstream.example/sbom/component-4.0#",
+      "status": "one-to-one",
+      "category": "namespace-map",
+      "note": "document_uri=https://upstream.example/sbom/component-4.0"
+    },
+    {
+      "source_kind": "external-document-ref",
+      "source_id": "DocumentRef-upstream",
+      "target_id": "DocumentRef-upstream:SPDXRef-DOCUMENT",
+      "status": "one-to-one",
+      "category": "external-map",
+      "note": "verified_using=['Hash']"
+    },
+    {
+      "source_kind": "external-ref",
+      "source_id": "SPDXRef-Package-service:maven-central:org.example:service:4.0.1",
+      "target_id": null,
+      "status": "lost",
+      "category": "silent-drop",
+      "note": "comment=None"
+    },
+    {
+      "source_kind": "external-ref",
+      "source_id": "SPDXRef-Package-service:advisory:https://advisories.example/ADV-2026-77",
+      "target_id": "external_reference",
+      "status": "one-to-one",
+      "category": "external-ref",
+      "note": "comment=None"
+    },
+    {
+      "source_kind": "license",
+      "source_id": "SPDXRef-Package-service:license_concluded",
+      "target_id": "concluded_license",
+      "status": "lost",
+      "category": "license",
+      "note": "Apache-2.0 -> None"
+    },
+    {
+      "source_kind": "license",
+      "source_id": "SPDXRef-Package-service:license_declared",
+      "target_id": "declared_license",
+      "status": "lost",
+      "category": "license",
+      "note": "Apache-2.0 -> None"
+    },
+    {
+      "source_kind": "copyright",
+      "source_id": "SPDXRef-Package-service",
+      "target_id": "copyright_text",
+      "status": "one-to-one",
+      "category": "copyright",
+      "note": "'Copyright 2026 Example Services'"
+    },
+    {
+      "source_kind": "license",
+      "source_id": "SPDXRef-Package-vendorlib:license_concluded",
+      "target_id": "concluded_license",
+      "status": "lost",
+      "category": "license",
+      "note": "NOASSERTION -> None"
+    },
+    {
+      "source_kind": "license",
+      "source_id": "SPDXRef-Package-vendorlib:license_declared",
+      "target_id": "declared_license",
+      "status": "lost",
+      "category": "license",
+      "note": "LicenseRef-Vendor-EULA -> None"
+    },
+    {
+      "source_kind": "copyright",
+      "source_id": "SPDXRef-Package-vendorlib",
+      "target_id": "copyright_text",
+      "status": "one-to-one",
+      "category": "copyright",
+      "note": "'Copyright 2026 Vendor Inc.'"
+    },
+    {
+      "source_kind": "license",
+      "source_id": "SPDXRef-File-handler:license_concluded",
+      "target_id": "concluded_license",
+      "status": "lost",
+      "category": "license",
+      "note": "MIT -> None"
+    },
+    {
+      "source_kind": "dangling",
+      "source_id": "https://example.com/spdxdocs/incident-002#SPDXRef-Relationship-2",
+      "target_id": "https://example.com/spdxdocs/incident-002#DocumentRef-upstream:SPDXRef-Package-crypto",
+      "status": "lost",
+      "category": "dangling",
+      "note": "target not in payload"
+    },
+    {
+      "source_kind": "dangling",
+      "source_id": "https://example.com/spdxdocs/incident-002#SPDXRef-Annotation-1",
+      "target_id": "https://example.com/spdxdocs/incident-002#DocumentRef-upstream:SPDXRef-Package-crypto",
+      "status": "lost",
+      "category": "dangling",
+      "note": "target not in payload"
+    }
+  ],
+  "checks": [
+    {
+      "kind": "package",
+      "source_id": "SPDXRef-Package-service",
+      "target_id": "https://example.com/spdxdocs/incident-002#SPDXRef-Package-service",
+      "status": "one-to-one",
+      "category": "identity",
+      "note": "Package"
+    },
+    {
+      "kind": "package",
+      "source_id": "SPDXRef-Package-vendorlib",
+      "target_id": "https://example.com/spdxdocs/incident-002#SPDXRef-Package-vendorlib",
+      "status": "one-to-one",
+      "category": "identity",
+      "note": "Package"
+    },
+    {
+      "kind": "file",
+      "source_id": "SPDXRef-File-handler",
+      "target_id": "https://example.com/spdxdocs/incident-002#SPDXRef-File-handler",
+      "status": "one-to-one",
+      "category": "identity",
+      "note": "File"
+    },
+    {
+      "kind": "package",
+      "source_id": "<count:package>",
+      "target_id": "2",
+      "status": "one-to-one",
+      "category": "count",
+      "note": "input=2 emitted=2"
+    },
+    {
+      "kind": "file",
+      "source_id": "<count:file>",
+      "target_id": "1",
+      "status": "one-to-one",
+      "category": "count",
+      "note": "input=1 emitted=1"
+    },
+    {
+      "kind": "snippet",
+      "source_id": "<count:snippet>",
+      "target_id": "0",
+      "status": "one-to-one",
+      "category": "count",
+      "note": "input=0 emitted=0"
+    },
+    {
+      "kind": "relationship",
+      "source_id": "0:SPDXRef-DOCUMENT DESCRIBES SPDXRef-Package-service",
+      "target_id": null,
+      "status": "lost",
+      "category": "merge-contamination",
+      "note": "target present but merged with unresolved ['https://example.com/spdxdocs/incident-002#DocumentRef-upstream:SPDXRef-Package-crypto']; expected https://example.com/spdxdocs/incident-002#SPDXRef-DOCUMENT DESCRIBES [https://example.com/spdxdocs/incident-002#SPDXRef-Package-service]"
+    },
+    {
+      "kind": "relationship",
+      "source_id": "1:SPDXRef-Package-service DEPENDENCY_OF SPDXRef-Package-vendorlib",
+      "target_id": null,
+      "status": "lost",
+      "category": "direction-not-swapped",
+      "note": "emitted https://example.com/spdxdocs/incident-002#SPDXRef-Relationship-1 keeps https://example.com/spdxdocs/incident-002#SPDXRef-Package-service DEPENDS_ON; expected https://example.com/spdxdocs/incident-002#SPDXRef-Package-vendorlib DEPENDS_ON [https://example.com/spdxdocs/incident-002#SPDXRef-Package-service]"
+    },
+    {
+      "kind": "relationship",
+      "source_id": "2:SPDXRef-DOCUMENT DESCRIBES DocumentRef-upstream:SPDXRef-Package-crypto",
+      "target_id": null,
+      "status": "lost",
+      "category": "external-target-unresolved",
+      "note": "target 'https://upstream.example/sbom/component-4.0#SPDXRef-Package-crypto' is not in the payload; expected https://example.com/spdxdocs/incident-002#SPDXRef-DOCUMENT DESCRIBES [https://upstream.example/sbom/component-4.0#SPDXRef-Package-crypto]"
+    },
+    {
+      "kind": "relationship",
+      "source_id": "3:SPDXRef-Package-service CONTAINS SPDXRef-File-handler",
+      "target_id": "https://example.com/spdxdocs/incident-002#SPDXRef-Relationship-3",
+      "status": "one-to-one",
+      "category": "relationship",
+      "note": "emitted https://example.com/spdxdocs/incident-002#SPDXRef-Package-service CONTAINS ['https://example.com/spdxdocs/incident-002#SPDXRef-File-handler']"
+    },
+    {
+      "kind": "relationship",
+      "source_id": "4:SPDXRef-Package-vendorlib CONTAINS SPDXRef-File-handler",
+      "target_id": "https://example.com/spdxdocs/incident-002#SPDXRef-Relationship-4",
+      "status": "one-to-one",
+      "category": "relationship",
+      "note": "emitted https://example.com/spdxdocs/incident-002#SPDXRef-Package-vendorlib CONTAINS ['https://example.com/spdxdocs/incident-002#SPDXRef-File-handler']"
+    },
+    {
+      "kind": "annotation",
+      "source_id": "0:SPDXRef-Package-service",
+      "target_id": "https://example.com/spdxdocs/incident-002#SPDXRef-Annotation-0",
+      "status": "one-to-one",
+      "category": "subject",
+      "note": "subject 'https://example.com/spdxdocs/incident-002#SPDXRef-Package-service', expected 'https://example.com/spdxdocs/incident-002#SPDXRef-Package-service'"
+    },
+    {
+      "kind": "annotation",
+      "source_id": "0:annotator:TOOL:vuln-correlator-2.1",
+      "target_id": "https://example.com/spdxdocs/incident-002#SPDXRef-Annotation-0",
+      "status": "lost",
+      "category": "annotator-attribution",
+      "note": "created_by=['https://example.com/spdxdocs/incident-002#SPDXRef-Actor-BobResponder-bob@example.com'] created_using=['https://example.com/spdxdocs/incident-002#SPDXRef-Actor-fixture-writer-1.0']"
+    },
+    {
+      "kind": "annotation",
+      "source_id": "1:DocumentRef-upstream:SPDXRef-Package-crypto",
+      "target_id": "https://example.com/spdxdocs/incident-002#SPDXRef-Annotation-1",
+      "status": "lost",
+      "category": "external-subject-unresolved",
+      "note": "subject 'https://example.com/spdxdocs/incident-002#DocumentRef-upstream:SPDXRef-Package-crypto', expected 'https://upstream.example/sbom/component-4.0#SPDXRef-Package-crypto'"
+    },
+    {
+      "kind": "annotation",
+      "source_id": "1:annotator:PERSON:Bob Responder",
+      "target_id": "https://example.com/spdxdocs/incident-002#SPDXRef-Annotation-1",
+      "status": "one-to-one",
+      "category": "annotator-attribution",
+      "note": "created_by=['https://example.com/spdxdocs/incident-002#SPDXRef-Actor-BobResponder-bob@example.com'] created_using=['https://example.com/spdxdocs/incident-002#SPDXRef-Actor-fixture-writer-1.0']"
+    },
+    {
+      "kind": "external-document-ref",
+      "source_id": "DocumentRef-upstream",
+      "target_id": "https://upstream.example/sbom/component-4.0#",
+      "status": "one-to-one",
+      "category": "namespace-map",
+      "note": "document_uri=https://upstream.example/sbom/component-4.0"
+    },
+    {
+      "kind": "external-document-ref",
+      "source_id": "DocumentRef-upstream",
+      "target_id": "DocumentRef-upstream:SPDXRef-DOCUMENT",
+      "status": "one-to-one",
+      "category": "external-map",
+      "note": "verified_using=['Hash']"
+    },
+    {
+      "kind": "external-ref",
+      "source_id": "SPDXRef-Package-service:maven-central:org.example:service:4.0.1",
+      "target_id": null,
+      "status": "lost",
+      "category": "silent-drop",
+      "note": "comment=None"
+    },
+    {
+      "kind": "external-ref",
+      "source_id": "SPDXRef-Package-service:advisory:https://advisories.example/ADV-2026-77",
+      "target_id": "external_reference",
+      "status": "one-to-one",
+      "category": "external-ref",
+      "note": "comment=None"
+    },
+    {
+      "kind": "license",
+      "source_id": "SPDXRef-Package-service:license_concluded",
+      "target_id": "concluded_license",
+      "status": "lost",
+      "category": "license",
+      "note": "Apache-2.0 -> None"
+    },
+    {
+      "kind": "license",
+      "source_id": "SPDXRef-Package-service:license_declared",
+      "target_id": "declared_license",
+      "status": "lost",
+      "category": "license",
+      "note": "Apache-2.0 -> None"
+    },
+    {
+      "kind": "copyright",
+      "source_id": "SPDXRef-Package-service",
+      "target_id": "copyright_text",
+      "status": "one-to-one",
+      "category": "copyright",
+      "note": "'Copyright 2026 Example Services'"
+    },
+    {
+      "kind": "license",
+      "source_id": "SPDXRef-Package-vendorlib:license_concluded",
+      "target_id": "concluded_license",
+      "status": "lost",
+      "category": "license",
+      "note": "NOASSERTION -> None"
+    },
+    {
+      "kind": "license",
+      "source_id": "SPDXRef-Package-vendorlib:license_declared",
+      "target_id": "declared_license",
+      "status": "lost",
+      "category": "license",
+      "note": "LicenseRef-Vendor-EULA -> None"
+    },
+    {
+      "kind": "copyright",
+      "source_id": "SPDXRef-Package-vendorlib",
+      "target_id": "copyright_text",
+      "status": "one-to-one",
+      "category": "copyright",
+      "note": "'Copyright 2026 Vendor Inc.'"
+    },
+    {
+      "kind": "license",
+      "source_id": "SPDXRef-File-handler:license_concluded",
+      "target_id": "concluded_license",
+      "status": "lost",
+      "category": "license",
+      "note": "MIT -> None"
+    },
+    {
+      "kind": "dangling",
+      "source_id": "https://example.com/spdxdocs/incident-002#SPDXRef-Relationship-2",
+      "target_id": "https://example.com/spdxdocs/incident-002#DocumentRef-upstream:SPDXRef-Package-crypto",
+      "status": "lost",
+      "category": "dangling",
+      "note": "target not in payload"
+    },
+    {
+      "kind": "dangling",
+      "source_id": "https://example.com/spdxdocs/incident-002#SPDXRef-Annotation-1",
+      "target_id": "https://example.com/spdxdocs/incident-002#DocumentRef-upstream:SPDXRef-Package-crypto",
+      "status": "lost",
+      "category": "dangling",
+      "note": "target not in payload"
+    },
+    {
+      "kind": "provenance",
+      "source_id": "<parser>",
+      "target_id": "5",
+      "status": "INFO",
+      "category": "parser-inference",
+      "note": "raw Relationship: lines=4, parsed=5"
+    }
+  ]
+}

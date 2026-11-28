@@ -1,0 +1,87 @@
+SPDX 2 -> 3 migration trace: sample-01-traceable
+input: /Users/apple/Documents/用户反馈项目/batches/feedback-20261120-backend-security-280-jettywang/prepared/FB-20261120-SEC-JW-253/workspace/examples/spdx3_evidence_mapping/sample-01-traceable.spdx
+namespace: https://example.com/spdxdocs/incident-001
+jsonld: /Users/apple/Documents/用户反馈项目/batches/feedback-20261120-backend-security-280-jettywang/prepared/FB-20261120-SEC-JW-253/workspace/examples/spdx3_evidence_mapping/output/sample-01-traceable.jsonld
+
+== INPUT ELEMENTS ==
+package   SPDXRef-Package-app  name='app'
+file      SPDXRef-File-main  name='./src/main.c'
+
+== EMITTED ELEMENTS ==
+Tool                             https://example.com/spdxdocs/incident-001#SPDXRef-Actor-fixture-writer-1.0
+Person                           https://example.com/spdxdocs/incident-001#SPDXRef-Actor-AliceAnalyst-alice@example.com
+SpdxDocument                     https://example.com/spdxdocs/incident-001#SPDXRef-DOCUMENT
+Organization                     https://example.com/spdxdocs/incident-001#SPDXRef-Actor-AcmeSoftware-security@acme.example
+Package                          https://example.com/spdxdocs/incident-001#SPDXRef-Package-app
+File                             https://example.com/spdxdocs/incident-001#SPDXRef-File-main
+Relationship                     https://example.com/spdxdocs/incident-001#SPDXRef-Relationship-0
+Relationship                     https://example.com/spdxdocs/incident-001#SPDXRef-Relationship-1
+Relationship                     https://example.com/spdxdocs/incident-001#SPDXRef-Relationship-2
+Annotation                       https://example.com/spdxdocs/incident-001#SPDXRef-Annotation-0
+
+== NODE ID MAPPING ==
+package  SPDXRef-Package-app                      -> 'https://example.com/spdxdocs/incident-001#SPDXRef-Package-app'  MATCH
+file     SPDXRef-File-main                        -> 'https://example.com/spdxdocs/incident-001#SPDXRef-File-main'  MATCH
+count    package  input=1 emitted=1  OK
+count    file     input=1 emitted=1  OK
+count    snippet  input=0 emitted=0  OK
+
+== RELATIONSHIP MAPPING ==
+[0] SPDXRef-DOCUMENT DESCRIBES SPDXRef-Package-app  ->  https://example.com/spdxdocs/incident-001#SPDXRef-Relationship-0 https://example.com/spdxdocs/incident-001#SPDXRef-DOCUMENT DESCRIBES ['https://example.com/spdxdocs/incident-001#SPDXRef-Package-app']  [one-to-one]
+[1] SPDXRef-DOCUMENT COPY_OF DocumentRef-vendor:SPDXRef-Package-lib  ->  external-target-unresolved: target 'https://vendor.example/sbom/vendor-2.1#SPDXRef-Package-lib' is not in the payload
+[2] SPDXRef-Package-app CONTAINS SPDXRef-File-main  ->  https://example.com/spdxdocs/incident-001#SPDXRef-Relationship-2 https://example.com/spdxdocs/incident-001#SPDXRef-Package-app CONTAINS ['https://example.com/spdxdocs/incident-001#SPDXRef-File-main']  [one-to-one]
+
+== ANNOTATION MAPPING ==
+[0] SPDXRef-Package-app -> https://example.com/spdxdocs/incident-001#SPDXRef-Annotation-0 subject='https://example.com/spdxdocs/incident-001#SPDXRef-Package-app' type=REVIEW created_by=['https://example.com/spdxdocs/incident-001#SPDXRef-Actor-AliceAnalyst-alice@example.com'] created_using=['https://example.com/spdxdocs/incident-001#SPDXRef-Actor-fixture-writer-1.0']
+
+== EXTERNAL DOCUMENT REFERENCES ==
+DocumentRef-vendor: https://vendor.example/sbom/vendor-2.1 checksum=SHA1:d6a770ba38583ed4bb4525bd96e50461655d2759 -> NamespaceMap(namespace=https://vendor.example/sbom/vendor-2.1#), ExternalMap('DocumentRef-vendor:SPDXRef-DOCUMENT')
+
+== PACKAGE EXTERNAL REFERENCES ==
+SPDXRef-Package-app            purl             pkg:generic/app@1.2.3                                   -> package_url
+SPDXRef-Package-app            cpe23Type        cpe:2.3:a:acme:app:1.2.3:*:*:*:*:*:*:*                  -> external_identifier
+
+== LICENSE / COPYRIGHT / SNIPPET RETENTION ==
+SPDXRef-Package-app            license_concluded    LicenseRef-AcmeProprietary   -> None
+SPDXRef-Package-app            license_declared     MIT                          -> None
+SPDXRef-File-main              license_concluded      NOASSERTION                  -> None
+
+== DANGLING REFERENCES ==
+https://example.com/spdxdocs/incident-001#SPDXRef-Relationship-1 -> https://example.com/spdxdocs/incident-001#DocumentRef-vendor:SPDXRef-Package-lib NOT IN PAYLOAD
+
+== PARSER PROVENANCE ==
+raw 'Relationship:' lines: 3; parsed relationships: 3
+relationships added by the tag-value parser itself: 0 (File placement under a Package)
+
+== DIAGNOSTICS EMITTED BY THE BUMPER (stderr) ==
+creation_info.document_namespace not converted: missing conversion rule https://github.com/spdx/spdx-3-model/issues/87
+creation_info.license_list_version not converted: missing conversion rule part of licensing profile, https://github.com/spdx/spdx-3-model/issues/131
+package2.file_name not converted: missing conversion rule https://github.com/spdx/spdx-3-model/issues/83
+package2.files_analyzed not converted: missing conversion rule https://github.com/spdx/spdx-3-model/issues/84
+package2.verification_code not converted: missing implementation of IntegrityMethod, https://github.com/spdx/spdx-3-model/issues/85
+package2.license_info_from_files, package2.license_comment not converted: missing conversion rule and missing definition of license profile
+file.file_type not converted: missing conversion rule different cardinalities, https://github.com/spdx/spdx-3-model/issues/82
+file.notice, file.contributors, file.license_info_in_file, file.license_comment not converted: missing conversion rule missing definition for license profile
+
+
+== SUMMARY ==
+INFO        parser-inference             1
+lost        dangling                     1
+lost        external-target-unresolved   1
+lost        license                      3
+one-to-one  annotator-attribution        1
+one-to-one  copyright                    1
+one-to-one  count                        3
+one-to-one  external-map                 1
+one-to-one  external-ref                 1
+one-to-one  identity                     2
+one-to-one  namespace-map                1
+one-to-one  package-url-promotion        1
+one-to-one  relationship                 2
+one-to-one  subject                      1
+source assertions: 19  lost: 5
+LOST external-target-unresolved: 1:SPDXRef-DOCUMENT COPY_OF DocumentRef-vendor:SPDXRef-Package-lib -> None (target 'https://vendor.example/sbom/vendor-2.1#SPDXRef-Package-lib' is not in the payload; expected https://example.com/spdxdocs/incident-001#SPDXRef-DOCUMENT COPY_OF [https://vendor.example/sbom/vendor-2.1#SPDXRef-Package-lib])
+LOST license: SPDXRef-Package-app:license_concluded -> concluded_license (LicenseRef-AcmeProprietary -> None)
+LOST license: SPDXRef-Package-app:license_declared -> declared_license (MIT -> None)
+LOST license: SPDXRef-File-main:license_concluded -> concluded_license (NOASSERTION -> None)
+LOST dangling: https://example.com/spdxdocs/incident-001#SPDXRef-Relationship-1 -> https://example.com/spdxdocs/incident-001#DocumentRef-vendor:SPDXRef-Package-lib (target not in payload)

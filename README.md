@@ -203,6 +203,10 @@ There currently are two options:
 You can convert an SPDX v2 document to v3 via the `spdx_tools.spdx3.bump_from_spdx2.spdx_document` module.
 The `bump_spdx_document()` function will return a payload containing an `SpdxDocument` Element and one Element for each package, file, snippet, relationship, or annotation contained in the v2 document.
 
+When migrating documents for incident evidence, note that the prototype does not preserve every assertion.
+A reproducible sample-driven review of what survives, what is aggregated and what requires the original SPDX 2
+document is in [`examples/spdx3_evidence_mapping`](examples/spdx3_evidence_mapping/MAPPING.md).
+
 ## Dependencies
 
 - PyYAML: <https://pypi.org/project/PyYAML/> for handling YAML.

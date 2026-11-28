@@ -1,0 +1,160 @@
+{
+  "input": "/Users/apple/Documents/\u7528\u6237\u53cd\u9988\u9879\u76ee/batches/feedback-20261120-backend-security-280-jettywang/prepared/FB-20261120-SEC-JW-253/workspace/examples/spdx3_evidence_mapping/sample-03-snippet.spdx",
+  "label": "sample-03-snippet",
+  "mapping": [
+    {
+      "source_kind": "file",
+      "source_id": "SPDXRef-File-parser",
+      "target_id": "https://example.com/spdxdocs/incident-003#SPDXRef-File-parser",
+      "status": "one-to-one",
+      "category": "identity",
+      "note": "File"
+    },
+    {
+      "source_kind": "snippet",
+      "source_id": "SPDXRef-Snippet-read",
+      "target_id": "https://example.com/spdxdocs/incident-003#SPDXRef-Snippet-read",
+      "status": "one-to-one",
+      "category": "identity",
+      "note": "Snippet"
+    },
+    {
+      "source_kind": "package",
+      "source_id": "<count:package>",
+      "target_id": "0",
+      "status": "one-to-one",
+      "category": "count",
+      "note": "input=0 emitted=0"
+    },
+    {
+      "source_kind": "file",
+      "source_id": "<count:file>",
+      "target_id": "1",
+      "status": "one-to-one",
+      "category": "count",
+      "note": "input=1 emitted=1"
+    },
+    {
+      "source_kind": "snippet",
+      "source_id": "<count:snippet>",
+      "target_id": "1",
+      "status": "one-to-one",
+      "category": "count",
+      "note": "input=1 emitted=1"
+    },
+    {
+      "source_kind": "relationship",
+      "source_id": "0:SPDXRef-DOCUMENT DESCRIBES SPDXRef-File-parser",
+      "target_id": "https://example.com/spdxdocs/incident-003#SPDXRef-Relationship-0",
+      "status": "one-to-one",
+      "category": "relationship",
+      "note": "emitted https://example.com/spdxdocs/incident-003#SPDXRef-DOCUMENT DESCRIBES ['https://example.com/spdxdocs/incident-003#SPDXRef-File-parser']"
+    },
+    {
+      "source_kind": "relationship",
+      "source_id": "1:SPDXRef-File-parser CONTAINS SPDXRef-Snippet-read",
+      "target_id": "https://example.com/spdxdocs/incident-003#SPDXRef-Relationship-1",
+      "status": "one-to-one",
+      "category": "relationship",
+      "note": "emitted https://example.com/spdxdocs/incident-003#SPDXRef-File-parser CONTAINS ['https://example.com/spdxdocs/incident-003#SPDXRef-Snippet-read']"
+    },
+    {
+      "source_kind": "license",
+      "source_id": "SPDXRef-File-parser:license_concluded",
+      "target_id": "concluded_license",
+      "status": "lost",
+      "category": "license",
+      "note": "MIT -> None"
+    },
+    {
+      "source_kind": "snippet",
+      "source_id": "SPDXRef-Snippet-read",
+      "target_id": "https://example.com/spdxdocs/incident-003#SPDXRef-Snippet-read",
+      "status": "lost",
+      "category": "snippet-file-link",
+      "note": "file_spdx_id=SPDXRef-File-parser"
+    }
+  ],
+  "checks": [
+    {
+      "kind": "file",
+      "source_id": "SPDXRef-File-parser",
+      "target_id": "https://example.com/spdxdocs/incident-003#SPDXRef-File-parser",
+      "status": "one-to-one",
+      "category": "identity",
+      "note": "File"
+    },
+    {
+      "kind": "snippet",
+      "source_id": "SPDXRef-Snippet-read",
+      "target_id": "https://example.com/spdxdocs/incident-003#SPDXRef-Snippet-read",
+      "status": "one-to-one",
+      "category": "identity",
+      "note": "Snippet"
+    },
+    {
+      "kind": "package",
+      "source_id": "<count:package>",
+      "target_id": "0",
+      "status": "one-to-one",
+      "category": "count",
+      "note": "input=0 emitted=0"
+    },
+    {
+      "kind": "file",
+      "source_id": "<count:file>",
+      "target_id": "1",
+      "status": "one-to-one",
+      "category": "count",
+      "note": "input=1 emitted=1"
+    },
+    {
+      "kind": "snippet",
+      "source_id": "<count:snippet>",
+      "target_id": "1",
+      "status": "one-to-one",
+      "category": "count",
+      "note": "input=1 emitted=1"
+    },
+    {
+      "kind": "relationship",
+      "source_id": "0:SPDXRef-DOCUMENT DESCRIBES SPDXRef-File-parser",
+      "target_id": "https://example.com/spdxdocs/incident-003#SPDXRef-Relationship-0",
+      "status": "one-to-one",
+      "category": "relationship",
+      "note": "emitted https://example.com/spdxdocs/incident-003#SPDXRef-DOCUMENT DESCRIBES ['https://example.com/spdxdocs/incident-003#SPDXRef-File-parser']"
+    },
+    {
+      "kind": "relationship",
+      "source_id": "1:SPDXRef-File-parser CONTAINS SPDXRef-Snippet-read",
+      "target_id": "https://example.com/spdxdocs/incident-003#SPDXRef-Relationship-1",
+      "status": "one-to-one",
+      "category": "relationship",
+      "note": "emitted https://example.com/spdxdocs/incident-003#SPDXRef-File-parser CONTAINS ['https://example.com/spdxdocs/incident-003#SPDXRef-Snippet-read']"
+    },
+    {
+      "kind": "license",
+      "source_id": "SPDXRef-File-parser:license_concluded",
+      "target_id": "concluded_license",
+      "status": "lost",
+      "category": "license",
+      "note": "MIT -> None"
+    },
+    {
+      "kind": "snippet",
+      "source_id": "SPDXRef-Snippet-read",
+      "target_id": "https://example.com/spdxdocs/incident-003#SPDXRef-Snippet-read",
+      "status": "lost",
+      "category": "snippet-file-link",
+      "note": "file_spdx_id=SPDXRef-File-parser"
+    },
+    {
+      "kind": "provenance",
+      "source_id": "<parser>",
+      "target_id": "2",
+      "status": "INFO",
+      "category": "parser-inference",
+      "note": "raw Relationship: lines=2, parsed=2"
+    }
+  ]
+}

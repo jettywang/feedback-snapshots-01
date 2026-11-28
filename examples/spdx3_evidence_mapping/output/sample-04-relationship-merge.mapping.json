@@ -1,0 +1,224 @@
+{
+  "input": "/Users/apple/Documents/\u7528\u6237\u53cd\u9988\u9879\u76ee/batches/feedback-20261120-backend-security-280-jettywang/prepared/FB-20261120-SEC-JW-253/workspace/examples/spdx3_evidence_mapping/sample-04-relationship-merge.json",
+  "label": "sample-04-relationship-merge",
+  "mapping": [
+    {
+      "source_kind": "package",
+      "source_id": "SPDXRef-Package-alpha",
+      "target_id": "https://example.com/spdxdocs/incident-004#SPDXRef-Package-alpha",
+      "status": "one-to-one",
+      "category": "identity",
+      "note": "Package"
+    },
+    {
+      "source_kind": "package",
+      "source_id": "SPDXRef-Package-beta",
+      "target_id": "https://example.com/spdxdocs/incident-004#SPDXRef-Package-beta",
+      "status": "one-to-one",
+      "category": "identity",
+      "note": "Package"
+    },
+    {
+      "source_kind": "package",
+      "source_id": "<count:package>",
+      "target_id": "2",
+      "status": "one-to-one",
+      "category": "count",
+      "note": "input=2 emitted=2"
+    },
+    {
+      "source_kind": "file",
+      "source_id": "<count:file>",
+      "target_id": "0",
+      "status": "one-to-one",
+      "category": "count",
+      "note": "input=0 emitted=0"
+    },
+    {
+      "source_kind": "snippet",
+      "source_id": "<count:snippet>",
+      "target_id": "0",
+      "status": "one-to-one",
+      "category": "count",
+      "note": "input=0 emitted=0"
+    },
+    {
+      "source_kind": "relationship",
+      "source_id": "0:SPDXRef-DOCUMENT DESCRIBES SPDXRef-Package-alpha",
+      "target_id": "https://example.com/spdxdocs/incident-004#SPDXRef-Relationship-0",
+      "status": "one-to-one",
+      "category": "relationship",
+      "note": "emitted https://example.com/spdxdocs/incident-004#SPDXRef-DOCUMENT DESCRIBES ['https://example.com/spdxdocs/incident-004#SPDXRef-Package-alpha']"
+    },
+    {
+      "source_kind": "relationship",
+      "source_id": "1:SPDXRef-DOCUMENT DESCRIBES SPDXRef-Package-beta",
+      "target_id": null,
+      "status": "lost",
+      "category": "merge-overwrite",
+      "note": "same group exists but 'https://example.com/spdxdocs/incident-004#SPDXRef-Package-beta' is absent; emitted targets=['https://example.com/spdxdocs/incident-004#SPDXRef-Package-alpha', 'https://example.com/spdxdocs/incident-004#SPDXRef-Package-alpha'] (a previously emitted target can be duplicated instead); expected https://example.com/spdxdocs/incident-004#SPDXRef-DOCUMENT DESCRIBES [https://example.com/spdxdocs/incident-004#SPDXRef-Package-beta]"
+    },
+    {
+      "source_kind": "license",
+      "source_id": "SPDXRef-Package-alpha:license_concluded",
+      "target_id": "concluded_license",
+      "status": "lost",
+      "category": "license",
+      "note": "NOASSERTION -> None"
+    },
+    {
+      "source_kind": "license",
+      "source_id": "SPDXRef-Package-alpha:license_declared",
+      "target_id": "declared_license",
+      "status": "lost",
+      "category": "license",
+      "note": "NOASSERTION -> None"
+    },
+    {
+      "source_kind": "copyright",
+      "source_id": "SPDXRef-Package-alpha",
+      "target_id": "copyright_text",
+      "status": "one-to-one",
+      "category": "copyright",
+      "note": "'Copyright 2026 Example'"
+    },
+    {
+      "source_kind": "license",
+      "source_id": "SPDXRef-Package-beta:license_concluded",
+      "target_id": "concluded_license",
+      "status": "lost",
+      "category": "license",
+      "note": "NOASSERTION -> None"
+    },
+    {
+      "source_kind": "license",
+      "source_id": "SPDXRef-Package-beta:license_declared",
+      "target_id": "declared_license",
+      "status": "lost",
+      "category": "license",
+      "note": "NOASSERTION -> None"
+    },
+    {
+      "source_kind": "copyright",
+      "source_id": "SPDXRef-Package-beta",
+      "target_id": "copyright_text",
+      "status": "one-to-one",
+      "category": "copyright",
+      "note": "'Copyright 2026 Example'"
+    }
+  ],
+  "checks": [
+    {
+      "kind": "package",
+      "source_id": "SPDXRef-Package-alpha",
+      "target_id": "https://example.com/spdxdocs/incident-004#SPDXRef-Package-alpha",
+      "status": "one-to-one",
+      "category": "identity",
+      "note": "Package"
+    },
+    {
+      "kind": "package",
+      "source_id": "SPDXRef-Package-beta",
+      "target_id": "https://example.com/spdxdocs/incident-004#SPDXRef-Package-beta",
+      "status": "one-to-one",
+      "category": "identity",
+      "note": "Package"
+    },
+    {
+      "kind": "package",
+      "source_id": "<count:package>",
+      "target_id": "2",
+      "status": "one-to-one",
+      "category": "count",
+      "note": "input=2 emitted=2"
+    },
+    {
+      "kind": "file",
+      "source_id": "<count:file>",
+      "target_id": "0",
+      "status": "one-to-one",
+      "category": "count",
+      "note": "input=0 emitted=0"
+    },
+    {
+      "kind": "snippet",
+      "source_id": "<count:snippet>",
+      "target_id": "0",
+      "status": "one-to-one",
+      "category": "count",
+      "note": "input=0 emitted=0"
+    },
+    {
+      "kind": "relationship",
+      "source_id": "0:SPDXRef-DOCUMENT DESCRIBES SPDXRef-Package-alpha",
+      "target_id": "https://example.com/spdxdocs/incident-004#SPDXRef-Relationship-0",
+      "status": "one-to-one",
+      "category": "relationship",
+      "note": "emitted https://example.com/spdxdocs/incident-004#SPDXRef-DOCUMENT DESCRIBES ['https://example.com/spdxdocs/incident-004#SPDXRef-Package-alpha']"
+    },
+    {
+      "kind": "relationship",
+      "source_id": "1:SPDXRef-DOCUMENT DESCRIBES SPDXRef-Package-beta",
+      "target_id": null,
+      "status": "lost",
+      "category": "merge-overwrite",
+      "note": "same group exists but 'https://example.com/spdxdocs/incident-004#SPDXRef-Package-beta' is absent; emitted targets=['https://example.com/spdxdocs/incident-004#SPDXRef-Package-alpha', 'https://example.com/spdxdocs/incident-004#SPDXRef-Package-alpha'] (a previously emitted target can be duplicated instead); expected https://example.com/spdxdocs/incident-004#SPDXRef-DOCUMENT DESCRIBES [https://example.com/spdxdocs/incident-004#SPDXRef-Package-beta]"
+    },
+    {
+      "kind": "license",
+      "source_id": "SPDXRef-Package-alpha:license_concluded",
+      "target_id": "concluded_license",
+      "status": "lost",
+      "category": "license",
+      "note": "NOASSERTION -> None"
+    },
+    {
+      "kind": "license",
+      "source_id": "SPDXRef-Package-alpha:license_declared",
+      "target_id": "declared_license",
+      "status": "lost",
+      "category": "license",
+      "note": "NOASSERTION -> None"
+    },
+    {
+      "kind": "copyright",
+      "source_id": "SPDXRef-Package-alpha",
+      "target_id": "copyright_text",
+      "status": "one-to-one",
+      "category": "copyright",
+      "note": "'Copyright 2026 Example'"
+    },
+    {
+      "kind": "license",
+      "source_id": "SPDXRef-Package-beta:license_concluded",
+      "target_id": "concluded_license",
+      "status": "lost",
+      "category": "license",
+      "note": "NOASSERTION -> None"
+    },
+    {
+      "kind": "license",
+      "source_id": "SPDXRef-Package-beta:license_declared",
+      "target_id": "declared_license",
+      "status": "lost",
+      "category": "license",
+      "note": "NOASSERTION -> None"
+    },
+    {
+      "kind": "copyright",
+      "source_id": "SPDXRef-Package-beta",
+      "target_id": "copyright_text",
+      "status": "one-to-one",
+      "category": "copyright",
+      "note": "'Copyright 2026 Example'"
+    },
+    {
+      "kind": "provenance",
+      "source_id": "<parser>",
+      "target_id": "2",
+      "status": "INFO",
+      "category": "parser-inference",
+      "note": "raw Relationship: lines=0, parsed=2"
+    }
+  ]
+}

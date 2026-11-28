@@ -1,0 +1,64 @@
+SPDX 2 -> 3 migration trace: sample-03-snippet
+input: /Users/apple/Documents/用户反馈项目/batches/feedback-20261120-backend-security-280-jettywang/prepared/FB-20261120-SEC-JW-253/workspace/examples/spdx3_evidence_mapping/sample-03-snippet.spdx
+namespace: https://example.com/spdxdocs/incident-003
+jsonld: /Users/apple/Documents/用户反馈项目/batches/feedback-20261120-backend-security-280-jettywang/prepared/FB-20261120-SEC-JW-253/workspace/examples/spdx3_evidence_mapping/output/sample-03-snippet.jsonld
+
+== INPUT ELEMENTS ==
+file      SPDXRef-File-parser  name='./src/parser.c'
+snippet   SPDXRef-Snippet-read  file=SPDXRef-File-parser
+
+== EMITTED ELEMENTS ==
+Person                           https://example.com/spdxdocs/incident-003#SPDXRef-Actor-CarolDeveloper-carol@example.com
+SpdxDocument                     https://example.com/spdxdocs/incident-003#SPDXRef-DOCUMENT
+File                             https://example.com/spdxdocs/incident-003#SPDXRef-File-parser
+Snippet                          https://example.com/spdxdocs/incident-003#SPDXRef-Snippet-read
+Relationship                     https://example.com/spdxdocs/incident-003#SPDXRef-Relationship-0
+Relationship                     https://example.com/spdxdocs/incident-003#SPDXRef-Relationship-1
+
+== NODE ID MAPPING ==
+file     SPDXRef-File-parser                      -> 'https://example.com/spdxdocs/incident-003#SPDXRef-File-parser'  MATCH
+snippet  SPDXRef-Snippet-read                     -> 'https://example.com/spdxdocs/incident-003#SPDXRef-Snippet-read'  MATCH
+count    package  input=0 emitted=0  OK
+count    file     input=1 emitted=1  OK
+count    snippet  input=1 emitted=1  OK
+
+== RELATIONSHIP MAPPING ==
+[0] SPDXRef-DOCUMENT DESCRIBES SPDXRef-File-parser  ->  https://example.com/spdxdocs/incident-003#SPDXRef-Relationship-0 https://example.com/spdxdocs/incident-003#SPDXRef-DOCUMENT DESCRIBES ['https://example.com/spdxdocs/incident-003#SPDXRef-File-parser']  [one-to-one]
+[1] SPDXRef-File-parser CONTAINS SPDXRef-Snippet-read  ->  https://example.com/spdxdocs/incident-003#SPDXRef-Relationship-1 https://example.com/spdxdocs/incident-003#SPDXRef-File-parser CONTAINS ['https://example.com/spdxdocs/incident-003#SPDXRef-Snippet-read']  [one-to-one]
+
+== ANNOTATION MAPPING ==
+
+== EXTERNAL DOCUMENT REFERENCES ==
+
+== PACKAGE EXTERNAL REFERENCES ==
+
+== LICENSE / COPYRIGHT / SNIPPET RETENTION ==
+SPDXRef-File-parser            license_concluded      MIT                          -> None
+SPDXRef-Snippet-read           file_spdx_id           SPDXRef-File-parser -> not represented
+
+== DANGLING REFERENCES ==
+none
+
+== PARSER PROVENANCE ==
+raw 'Relationship:' lines: 2; parsed relationships: 2
+relationships added by the tag-value parser itself: 0 (File placement under a Package)
+
+== DIAGNOSTICS EMITTED BY THE BUMPER (stderr) ==
+creation_info.document_namespace not converted: missing conversion rule https://github.com/spdx/spdx-3-model/issues/87
+creation_info.license_list_version not converted: missing conversion rule part of licensing profile, https://github.com/spdx/spdx-3-model/issues/131
+file.file_type not converted: missing conversion rule different cardinalities, https://github.com/spdx/spdx-3-model/issues/82
+file.notice, file.contributors, file.license_info_in_file, file.license_comment not converted: missing conversion rule missing definition for license profile
+snippet.file_spdx_id not converted: missing conversion rule https://github.com/spdx/spdx-3-model/issues/130
+snippet.license_info_in_snippet, snippet.license_comment, not converted: missing conversion rule missing definitions for license profile
+
+
+== SUMMARY ==
+INFO        parser-inference             1
+lost        license                      1
+lost        snippet-file-link            1
+one-to-one  count                        3
+one-to-one  identity                     2
+one-to-one  relationship                 2
+source assertions: 9  lost: 2
+LOST license: SPDXRef-File-parser:license_concluded -> concluded_license (MIT -> None)
+LOST snippet-file-link: SPDXRef-Snippet-read -> https://example.com/spdxdocs/incident-003#SPDXRef-Snippet-read (file_spdx_id=SPDXRef-File-parser)

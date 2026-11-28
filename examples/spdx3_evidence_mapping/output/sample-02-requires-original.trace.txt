@@ -1,0 +1,116 @@
+SPDX 2 -> 3 migration trace: sample-02-requires-original
+input: /Users/apple/Documents/用户反馈项目/batches/feedback-20261120-backend-security-280-jettywang/prepared/FB-20261120-SEC-JW-253/workspace/examples/spdx3_evidence_mapping/sample-02-requires-original.spdx
+namespace: https://example.com/spdxdocs/incident-002
+jsonld: /Users/apple/Documents/用户反馈项目/batches/feedback-20261120-backend-security-280-jettywang/prepared/FB-20261120-SEC-JW-253/workspace/examples/spdx3_evidence_mapping/output/sample-02-requires-original.jsonld
+
+== INPUT ELEMENTS ==
+package   SPDXRef-Package-service  name='service'
+package   SPDXRef-Package-vendorlib  name='vendorlib'
+file      SPDXRef-File-handler  name='./src/handler.rs'
+
+== EMITTED ELEMENTS ==
+Tool                             https://example.com/spdxdocs/incident-002#SPDXRef-Actor-fixture-writer-1.0
+Person                           https://example.com/spdxdocs/incident-002#SPDXRef-Actor-BobResponder-bob@example.com
+SpdxDocument                     https://example.com/spdxdocs/incident-002#SPDXRef-DOCUMENT
+Organization                     https://example.com/spdxdocs/incident-002#SPDXRef-Actor-ExampleServices-psirt@example.com
+Package                          https://example.com/spdxdocs/incident-002#SPDXRef-Package-service
+Package                          https://example.com/spdxdocs/incident-002#SPDXRef-Package-vendorlib
+File                             https://example.com/spdxdocs/incident-002#SPDXRef-File-handler
+Relationship                     https://example.com/spdxdocs/incident-002#SPDXRef-Relationship-2
+SoftwareDependencyRelationship   https://example.com/spdxdocs/incident-002#SPDXRef-Relationship-1
+Relationship                     https://example.com/spdxdocs/incident-002#SPDXRef-Relationship-3
+Relationship                     https://example.com/spdxdocs/incident-002#SPDXRef-Relationship-4
+Tool                             https://example.com/spdxdocs/incident-002#SPDXRef-Actor-vuln-correlator-2.1
+Annotation                       https://example.com/spdxdocs/incident-002#SPDXRef-Annotation-0
+Annotation                       https://example.com/spdxdocs/incident-002#SPDXRef-Annotation-1
+
+== NODE ID MAPPING ==
+package  SPDXRef-Package-service                  -> 'https://example.com/spdxdocs/incident-002#SPDXRef-Package-service'  MATCH
+package  SPDXRef-Package-vendorlib                -> 'https://example.com/spdxdocs/incident-002#SPDXRef-Package-vendorlib'  MATCH
+file     SPDXRef-File-handler                     -> 'https://example.com/spdxdocs/incident-002#SPDXRef-File-handler'  MATCH
+count    package  input=2 emitted=2  OK
+count    file     input=1 emitted=1  OK
+count    snippet  input=0 emitted=0  OK
+
+== RELATIONSHIP MAPPING ==
+[0] SPDXRef-DOCUMENT DESCRIBES SPDXRef-Package-service  ->  merge-contamination: target present but merged with unresolved ['https://example.com/spdxdocs/incident-002#DocumentRef-upstream:SPDXRef-Package-crypto']
+[1] SPDXRef-Package-service DEPENDENCY_OF SPDXRef-Package-vendorlib  ->  direction-not-swapped: emitted https://example.com/spdxdocs/incident-002#SPDXRef-Relationship-1 keeps https://example.com/spdxdocs/incident-002#SPDXRef-Package-service DEPENDS_ON
+[2] SPDXRef-DOCUMENT DESCRIBES DocumentRef-upstream:SPDXRef-Package-crypto  ->  external-target-unresolved: target 'https://upstream.example/sbom/component-4.0#SPDXRef-Package-crypto' is not in the payload
+[3] SPDXRef-Package-service CONTAINS SPDXRef-File-handler  ->  https://example.com/spdxdocs/incident-002#SPDXRef-Relationship-3 https://example.com/spdxdocs/incident-002#SPDXRef-Package-service CONTAINS ['https://example.com/spdxdocs/incident-002#SPDXRef-File-handler']  [one-to-one]
+[4] SPDXRef-Package-vendorlib CONTAINS SPDXRef-File-handler  ->  https://example.com/spdxdocs/incident-002#SPDXRef-Relationship-4 https://example.com/spdxdocs/incident-002#SPDXRef-Package-vendorlib CONTAINS ['https://example.com/spdxdocs/incident-002#SPDXRef-File-handler']  [one-to-one]
+
+== ANNOTATION MAPPING ==
+[0] SPDXRef-Package-service -> https://example.com/spdxdocs/incident-002#SPDXRef-Annotation-0 subject='https://example.com/spdxdocs/incident-002#SPDXRef-Package-service' type=OTHER created_by=['https://example.com/spdxdocs/incident-002#SPDXRef-Actor-BobResponder-bob@example.com'] created_using=['https://example.com/spdxdocs/incident-002#SPDXRef-Actor-fixture-writer-1.0']
+[1] DocumentRef-upstream:SPDXRef-Package-crypto -> https://example.com/spdxdocs/incident-002#SPDXRef-Annotation-1 subject='https://example.com/spdxdocs/incident-002#DocumentRef-upstream:SPDXRef-Package-crypto' type=REVIEW created_by=['https://example.com/spdxdocs/incident-002#SPDXRef-Actor-BobResponder-bob@example.com'] created_using=['https://example.com/spdxdocs/incident-002#SPDXRef-Actor-fixture-writer-1.0']
+
+== EXTERNAL DOCUMENT REFERENCES ==
+DocumentRef-upstream: https://upstream.example/sbom/component-4.0 checksum=SHA1:aa11bb22cc33dd44ee55ff660011223344556677 -> NamespaceMap(namespace=https://upstream.example/sbom/component-4.0#), ExternalMap('DocumentRef-upstream:SPDXRef-DOCUMENT')
+
+== PACKAGE EXTERNAL REFERENCES ==
+SPDXRef-Package-service        maven-central    org.example:service:4.0.1                               -> DROPPED
+SPDXRef-Package-service        advisory         https://advisories.example/ADV-2026-77                  -> external_reference
+
+== LICENSE / COPYRIGHT / SNIPPET RETENTION ==
+SPDXRef-Package-service        license_concluded    Apache-2.0                   -> None
+SPDXRef-Package-service        license_declared     Apache-2.0                   -> None
+SPDXRef-Package-vendorlib      license_concluded    NOASSERTION                  -> None
+SPDXRef-Package-vendorlib      license_declared     LicenseRef-Vendor-EULA       -> None
+SPDXRef-File-handler           license_concluded      MIT                          -> None
+
+== DANGLING REFERENCES ==
+https://example.com/spdxdocs/incident-002#SPDXRef-Relationship-2 -> https://example.com/spdxdocs/incident-002#DocumentRef-upstream:SPDXRef-Package-crypto NOT IN PAYLOAD
+https://example.com/spdxdocs/incident-002#SPDXRef-Annotation-1 -> https://example.com/spdxdocs/incident-002#DocumentRef-upstream:SPDXRef-Package-crypto NOT IN PAYLOAD
+
+== PARSER PROVENANCE ==
+raw 'Relationship:' lines: 4; parsed relationships: 5
+relationships added by the tag-value parser itself: 1 (File placement under a Package)
+
+== DIAGNOSTICS EMITTED BY THE BUMPER (stderr) ==
+creation_info.document_namespace not converted: missing conversion rule https://github.com/spdx/spdx-3-model/issues/87
+creation_info.license_list_version not converted: missing conversion rule part of licensing profile, https://github.com/spdx/spdx-3-model/issues/131
+package2.file_name not converted: missing conversion rule https://github.com/spdx/spdx-3-model/issues/83
+package2.files_analyzed not converted: missing conversion rule https://github.com/spdx/spdx-3-model/issues/84
+package2.verification_code not converted: missing implementation of IntegrityMethod, https://github.com/spdx/spdx-3-model/issues/85
+package2.license_info_from_files, package2.license_comment not converted: missing conversion rule and missing definition of license profile
+package2.file_name not converted: missing conversion rule https://github.com/spdx/spdx-3-model/issues/83
+package2.files_analyzed not converted: missing conversion rule https://github.com/spdx/spdx-3-model/issues/84
+package2.verification_code not converted: missing implementation of IntegrityMethod, https://github.com/spdx/spdx-3-model/issues/85
+package2.license_info_from_files, package2.license_comment not converted: missing conversion rule and missing definition of license profile
+file.file_type not converted: missing conversion rule different cardinalities, https://github.com/spdx/spdx-3-model/issues/82
+file.notice, file.contributors, file.license_info_in_file, file.license_comment not converted: missing conversion rule missing definition for license profile
+Annotator not converted: missing conversion rule The SPDX2 annotation is not of Type Person or Organization. This case leads to an invalid SPDX3 document and is currently not supported.https://github.com/spdx/spdx-3-model/issues/180
+
+
+== SUMMARY ==
+INFO        parser-inference             1
+lost        annotator-attribution        1
+lost        dangling                     2
+lost        direction-not-swapped        1
+lost        external-subject-unresolved  1
+lost        external-target-unresolved   1
+lost        license                      5
+lost        merge-contamination          1
+lost        silent-drop                  1
+one-to-one  annotator-attribution        1
+one-to-one  copyright                    2
+one-to-one  count                        3
+one-to-one  external-map                 1
+one-to-one  external-ref                 1
+one-to-one  identity                     3
+one-to-one  namespace-map                1
+one-to-one  relationship                 2
+one-to-one  subject                      1
+source assertions: 28  lost: 13
+LOST merge-contamination: 0:SPDXRef-DOCUMENT DESCRIBES SPDXRef-Package-service -> None (target present but merged with unresolved ['https://example.com/spdxdocs/incident-002#DocumentRef-upstream:SPDXRef-Package-crypto']; expected https://example.com/spdxdocs/incident-002#SPDXRef-DOCUMENT DESCRIBES [https://example.com/spdxdocs/incident-002#SPDXRef-Package-service])
+LOST direction-not-swapped: 1:SPDXRef-Package-service DEPENDENCY_OF SPDXRef-Package-vendorlib -> None (emitted https://example.com/spdxdocs/incident-002#SPDXRef-Relationship-1 keeps https://example.com/spdxdocs/incident-002#SPDXRef-Package-service DEPENDS_ON; expected https://example.com/spdxdocs/incident-002#SPDXRef-Package-vendorlib DEPENDS_ON [https://example.com/spdxdocs/incident-002#SPDXRef-Package-service])
+LOST external-target-unresolved: 2:SPDXRef-DOCUMENT DESCRIBES DocumentRef-upstream:SPDXRef-Package-crypto -> None (target 'https://upstream.example/sbom/component-4.0#SPDXRef-Package-crypto' is not in the payload; expected https://example.com/spdxdocs/incident-002#SPDXRef-DOCUMENT DESCRIBES [https://upstream.example/sbom/component-4.0#SPDXRef-Package-crypto])
+LOST annotator-attribution: 0:annotator:TOOL:vuln-correlator-2.1 -> https://example.com/spdxdocs/incident-002#SPDXRef-Annotation-0 (created_by=['https://example.com/spdxdocs/incident-002#SPDXRef-Actor-BobResponder-bob@example.com'] created_using=['https://example.com/spdxdocs/incident-002#SPDXRef-Actor-fixture-writer-1.0'])
+LOST external-subject-unresolved: 1:DocumentRef-upstream:SPDXRef-Package-crypto -> https://example.com/spdxdocs/incident-002#SPDXRef-Annotation-1 (subject 'https://example.com/spdxdocs/incident-002#DocumentRef-upstream:SPDXRef-Package-crypto', expected 'https://upstream.example/sbom/component-4.0#SPDXRef-Package-crypto')
+LOST silent-drop: SPDXRef-Package-service:maven-central:org.example:service:4.0.1 -> None (comment=None)
+LOST license: SPDXRef-Package-service:license_concluded -> concluded_license (Apache-2.0 -> None)
+LOST license: SPDXRef-Package-service:license_declared -> declared_license (Apache-2.0 -> None)
+LOST license: SPDXRef-Package-vendorlib:license_concluded -> concluded_license (NOASSERTION -> None)
+LOST license: SPDXRef-Package-vendorlib:license_declared -> declared_license (LicenseRef-Vendor-EULA -> None)
+LOST license: SPDXRef-File-handler:license_concluded -> concluded_license (MIT -> None)
+LOST dangling: https://example.com/spdxdocs/incident-002#SPDXRef-Relationship-2 -> https://example.com/spdxdocs/incident-002#DocumentRef-upstream:SPDXRef-Package-crypto (target not in payload)
+LOST dangling: https://example.com/spdxdocs/incident-002#SPDXRef-Annotation-1 -> https://example.com/spdxdocs/incident-002#DocumentRef-upstream:SPDXRef-Package-crypto (target not in payload)
