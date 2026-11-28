@@ -97,6 +97,24 @@
             "additionalProperties": false
           },
           "description": "Per-policy info on what must be eliminated to achieve a higher tag."
+        },
+        "search_paths": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Ordered approved library directories used for this analysis."
+        },
+        "library_sources": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "properties": {
+              "path": { "type": ["string", "null"] },
+              "source": { "type": ["string", "null"] },
+              "directory": { "type": ["string", "null"] }
+            },
+            "additionalProperties": false
+          },
+          "description": "Per SONAME, the resolved file and the approved search source that provided it."
         }
       },
       "required": [
@@ -110,7 +128,9 @@
         "unsupported_isa",
         "versioned_symbols",
         "external_libs",
-        "policy_upgrades"
+        "policy_upgrades",
+        "search_paths",
+        "library_sources"
       ],
       "additionalProperties": false
     },
@@ -128,6 +148,19 @@
         "error": {
           "type": "string",
           "description": "Error message."
+        },
+        "missing_libs": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "array",
+            "items": { "type": "string" }
+          },
+          "description": "Unresolved SONAMEs and the ELF files that need them."
+        },
+        "search_paths": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Approved search directories that were consulted."
         }
       },
       "required": ["version", "wheel", "error"],

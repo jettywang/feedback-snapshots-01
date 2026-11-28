@@ -100,6 +100,52 @@ Repairing a wheel. ::
     Fixed-up wheel written to /wheelhouse/cffi-1.5.2-cp35-cp35m-manylinux1_x86_64.whl
 
 
+Restricting the search to an approved sysroot
+---------------------------------------------
+
+On machines that carry more than one set of runtime libraries, a normal
+``show``/``repair``/``lddtree`` analysis is ambiguous: it consults
+``LD_LIBRARY_PATH`` and goes through ``AUDITWHEEL_LD_LIBRARY_PATH``, so an
+unrelated set of libraries can silently satisfy a dependency.  Pass
+``--sysroot`` to give the analysis a hard search boundary::
+
+    $ auditwheel show --json \
+        --sysroot /build/sysroot \
+        --ldpaths /build/sysroot/opt/toolchain/lib \
+        mypkg-1.0-cp312-cp312-linux_x86_64.whl
+
+    $ auditwheel repair --sysroot /build/sysroot \
+        --ldpaths /build/sysroot/opt/toolchain/lib \
+        mypkg-1.0-cp312-cp312-linux_x86_64.whl
+
+    $ auditwheel lddtree --sysroot /build/sysroot \
+        --ldpaths /build/sysroot/opt/toolchain/lib \
+        mypkg/_native.so
+
+With ``--sysroot``:
+
+- Only the sysroot's ``ld.so.conf`` (or its musl ``ld-musl-*.path``), its
+  trusted library directories below the sysroot, and the given ``--ldpaths``
+  directories are searched.  Host ``LD_LIBRARY_PATH`` and
+  ``AUDITWHEEL_LD_LIBRARY_PATH`` are ignored.
+- Every ``--ldpaths`` entry must be an existing directory below the sysroot;
+  otherwise the command fails with a ``SearchPathError`` naming the entry.
+  A sysroot without its linker configuration is treated the same way.
+- Absolute RPATH/RUNPATH/interpreter references are resolved relative to the
+  sysroot (like a chroot), but only when the remapped directory exists.
+  References inside the wheel being analyzed still resolve normally.
+- Every unresolved dependency aborts the analysis with a
+  ``MissingLibraryError`` that lists each missing SONAME, the ELF file that
+  needs it, and the approved directories that were searched.  A partial
+  match is never reported as a pass.
+
+``auditwheel show --json`` reports the ordered ``search_paths`` and a
+``library_sources`` map (resolved path, approving source, and directory) so
+the exact file that ``repair`` would graft can be verified.  ``repair`` logs
+the same source for every library it copies.  Without ``--sysroot``, the
+historical environment-based behaviour is unchanged.
+
+
 Limitations
 -----------
 

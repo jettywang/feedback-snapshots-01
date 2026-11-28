@@ -34,5 +34,18 @@ def ldpaths(parser: ArgumentParser) -> None:
         dest="LDPATHS",
         help="Colon-delimited list of directories to search for external libraries. "
         "This replaces the default list; to add to this list, set the environment "
-        "variable AUDITWHEEL_LD_LIBRARY_PATH.",
+        "variable AUDITWHEEL_LD_LIBRARY_PATH. With --sysroot, entries must live "
+        "inside the sysroot.",
+    )
+
+
+def sysroot(parser: ArgumentParser) -> None:
+    parser.add_argument(
+        "--sysroot",
+        dest="SYSROOT",
+        metavar="DIR",
+        help="Strictly search only this approved root tree and the ld.so "
+        "configuration below it. The host's LD_LIBRARY_PATH and ld.so "
+        "configuration are ignored, and every required library must resolve "
+        "below DIR (or in --ldpaths entries below DIR).",
     )

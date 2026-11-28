@@ -30,6 +30,7 @@ def configure_parser(sub_parsers: Any) -> None:  # noqa: ANN401
     options.disable_isa_check(p)
     options.allow_pure_python_wheel(p)
     options.ldpaths(p)
+    options.sysroot(p)
     p.set_defaults(func=execute)
 
 
@@ -71,6 +72,8 @@ def _output_json(fn: str, winfo: WheelAbIInfo) -> None:
         "versioned_symbols": {k: sorted(v) for k, v in sorted(winfo.versioned_symbols.items())},
         "external_libs": {str(k): str(v) if v else None for k, v in sorted(libs.items())},
         "policy_upgrades": policy_upgrades,
+        "search_paths": list(winfo.search_paths),
+        "library_sources": winfo.library_provenance,
     }
 
     print(json.dumps(result))
@@ -78,7 +81,12 @@ def _output_json(fn: str, winfo: WheelAbIInfo) -> None:
 
 def execute(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
     from auditwheel import json
-    from auditwheel.error import NonPlatformWheelError, WheelToolsError
+    from auditwheel.error import (
+        MissingLibraryError,
+        NonPlatformWheelError,
+        SearchPathError,
+        WheelToolsError,
+    )
     from auditwheel.wheel_abi import analyze_wheel_abi
     from auditwheel.wheeltools import get_wheel_architecture, get_wheel_libc
 
@@ -114,7 +122,27 @@ def execute(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
             disable_isa_ext_check=args.DISABLE_ISA_EXT_CHECK,
             allow_graft=False,
             args_ldpaths=args.LDPATHS,
+            sysroot=args.SYSROOT,
         )
+    except MissingLibraryError as e:
+        logger.error("%s", e.message)
+        if args.JSON:
+            result = {
+                "version": 1,
+                "wheel": fn,
+                "error": e.message,
+                "missing_libs": {
+                    soname: sorted(needed_by) for soname, needed_by in sorted(e.missing.items())
+                },
+                "search_paths": list(e.search_paths),
+            }
+            print(json.dumps(result))
+        return 1
+    except SearchPathError as e:
+        logger.error("%s", e.message)
+        if args.JSON:
+            print(json.dumps({"version": 1, "wheel": fn, "error": e.message}))
+        return 1
     except NonPlatformWheelError as e:
         logger.info("%s", e.message)
         if is_pure_python and args.ALLOW_PURE_PY_WHEEL:

@@ -6,7 +6,7 @@ import itertools
 import logging
 from collections import defaultdict
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, TypeVar
 
@@ -20,7 +20,7 @@ from auditwheel.elfutils import (
 )
 from auditwheel.error import InvalidLibcError, NonPlatformWheelError
 from auditwheel.genericpkgctx import InGenericPkgCtx
-from auditwheel.lddtree import DynamicExecutable, DynamicLibrary, ld_paths_from_arg, ldd
+from auditwheel.lddtree import DynamicExecutable, DynamicLibrary, build_search_paths, ldd
 from auditwheel.libc import Libc
 from auditwheel.policy import ExternalReference, Policy, WheelPolicies
 
@@ -46,6 +46,9 @@ class WheelAbIInfo:
     blacklist_policy: Policy
     machine_policy: Policy
     graft_policy: Policy
+    full_elftree: dict[Path, DynamicExecutable] = field(default_factory=dict)
+    search_paths: tuple[str, ...] = ()
+    library_provenance: dict[str, dict[str, str | None]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -56,6 +59,8 @@ class WheelElfData:
     versioned_symbols: dict[str, set[str]]
     uses_ucs2_symbols: bool
     uses_pyfpe_jbuf: bool
+    search_paths: tuple[str, ...] = ()
+    library_provenance: dict[str, dict[str, str | None]] = field(default_factory=dict)
 
 
 def _fixup_elf_trees(
@@ -124,6 +129,7 @@ def get_wheel_elfdata(
     wheel_fn: Path,
     exclude: frozenset[str],
     args_ldpaths: str | None,
+    sysroot: str | None = None,
 ) -> WheelElfData:
     full_elftree: dict[Path, DynamicExecutable] = {}
     nonpy_elftree: dict[Path, DynamicExecutable] = {}
@@ -132,9 +138,10 @@ def get_wheel_elfdata(
     uses_ucs2_symbols = False
     uses_pyfpe_jbuf = False
     policies: WheelPolicies | None = None
+    search_paths: tuple[str, ...] = ()
 
     # Android is cross-compiled, so ldpaths should never be loaded from the build machine.
-    if libc == Libc.ANDROID and args_ldpaths is None:
+    if libc == Libc.ANDROID and args_ldpaths is None and sysroot is None:
         args_ldpaths = ""
 
     with InGenericPkgCtx(wheel_fn) as ctx:
@@ -156,7 +163,13 @@ def get_wheel_elfdata(
             # to fail and there's no need to do further checks
             if not shared_libraries_in_purelib:
                 log.debug("processing: %s", fn)
-                elftree = ldd(fn, exclude=exclude, ldpaths=ld_paths_from_arg(args_ldpaths))
+                search = build_search_paths(
+                    args_ldpaths,
+                    sysroot=sysroot,
+                    internal_root=str(ctx.path) if sysroot is not None else None,
+                )
+                elftree = ldd(fn, exclude=exclude, ldpaths=search)
+                search_paths = elftree.search_paths
 
                 try:
                     elf_arch = elftree.platform.baseline_architecture
@@ -276,7 +289,26 @@ def get_wheel_elfdata(
         versioned_symbols,
         uses_ucs2_symbols,
         uses_pyfpe_jbuf,
+        search_paths,
+        _library_provenance(full_elftree),
     )
+
+
+def _library_provenance(
+    elftree_by_fn: dict[Path, DynamicExecutable],
+) -> dict[str, dict[str, str | None]]:
+    """Map resolved SONAMEs to their path and approving search source."""
+    result: dict[str, dict[str, str | None]] = {}
+    for executable in elftree_by_fn.values():
+        for soname, library in executable.libraries.items():
+            if soname in result or library.realpath is None:
+                continue
+            result[soname] = {
+                "path": str(library.realpath),
+                "source": library.search_source,
+                "directory": library.search_dir,
+            }
+    return result
 
 
 def get_external_libs(external_refs: dict[str, ExternalReference]) -> dict[Path, str]:
@@ -443,8 +475,16 @@ def analyze_wheel_abi(
     allow_graft: bool,
     requested_policy_base_name: str | None = None,
     args_ldpaths: str | None = None,
+    sysroot: str | None = None,
 ) -> WheelAbIInfo:
-    data = get_wheel_elfdata(libc, architecture, wheel_fn, exclude, args_ldpaths)
+    data = get_wheel_elfdata(
+        libc,
+        architecture,
+        wheel_fn,
+        exclude,
+        args_ldpaths,
+        sysroot,
+    )
     policies = data.policies
     elftree_by_fn = data.full_elftree
     external_refs_by_fn = data.full_external_refs
@@ -551,6 +591,9 @@ def analyze_wheel_abi(
         blacklist_policy,
         machine_policy,
         graft_policy,
+        dict(elftree_by_fn),
+        data.search_paths,
+        dict(data.library_provenance),
     )
 
 

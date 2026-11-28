@@ -19,9 +19,10 @@ import glob
 import logging
 import os
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from fnmatch import fnmatch
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from elftools.elf.constants import E_FLAGS
 from elftools.elf.dynamic import DynamicSegment
@@ -30,11 +31,14 @@ from elftools.elf.sections import NoteSection
 from elftools.elf.segments import InterpSegment
 
 from auditwheel.architecture import Architecture
-from auditwheel.error import InvalidLibcError
+from auditwheel.error import InvalidLibcError, MissingLibraryError, SearchPathError
 from auditwheel.libc import Libc
 
+if TYPE_CHECKING:
+    from collections.abc import Mapping
+
 log = logging.getLogger(__name__)
-__all__ = ["LIBPYTHON_RE", "DynamicExecutable", "DynamicLibrary", "ldd"]
+__all__ = ["LIBPYTHON_RE", "DynamicExecutable", "DynamicLibrary", "SearchPaths", "ldd"]
 
 # Regex to match libpython shared library names
 LIBPYTHON_RE = re.compile(r"^libpython\d+\.\d+m?.so(\.\d)*$")
@@ -83,6 +87,8 @@ class DynamicLibrary:
     realpath: Path | None
     platform: Platform | None = None
     needed: tuple[str, ...] = ()
+    search_source: str | None = None
+    search_dir: str | None = None
 
 
 @dataclass(frozen=True)
@@ -96,6 +102,202 @@ class DynamicExecutable:
     rpath: tuple[str, ...]
     runpath: tuple[str, ...]
     libraries: dict[str, DynamicLibrary]
+    search_paths: tuple[str, ...] = ()
+
+
+_SEARCH_KINDS = ("rpath", "runpath", "env", "conf", "interp")
+
+
+def _resolved_under(path: str | Path, root: str | Path) -> bool:
+    candidate = Path(path).resolve()
+    base = Path(root).resolve()
+    return candidate == base or base in candidate.parents
+
+
+@dataclass(eq=False)
+class SearchPaths:
+    """Ordered library search directories with their provenance.
+
+    ``strict`` makes every approved source mandatory and records unresolved
+    dependencies so callers can fail with a locatable report.
+    """
+
+    paths: dict[str, list[str]] = field(
+        default_factory=lambda: {"conf": [], "env": [], "interp": []},
+    )
+    source_of: dict[tuple[str, str], str] = field(default_factory=dict)
+    root: str = "/"
+    internal_root: str | None = None
+    strict: bool = False
+    extra_conf: tuple[str, ...] = ()
+    missing: dict[str, set[str]] = field(default_factory=dict)
+    unavailable: list[str] = field(default_factory=list)
+    _conf_loaded: bool = field(default=False, repr=False)
+
+    @classmethod
+    def from_dict(cls, paths: Mapping[str, list[str]]) -> SearchPaths:
+        search = cls()
+        for kind, entries in paths.items():
+            search.add(kind, list(entries), kind)
+        for kind in _SEARCH_KINDS:
+            search.paths.setdefault(kind, [])
+        return search
+
+    def __eq__(self, other: object) -> bool:
+        # Keep ``ld_paths_from_arg`` comparable to plain path dictionaries.
+        if isinstance(other, dict):
+            return self.paths == other
+        if isinstance(other, SearchPaths):
+            return self.paths == other.paths
+        return NotImplemented
+
+    def add(self, kind: str, paths: list[str], source: str) -> None:
+        bucket = self.paths.setdefault(kind, [])
+        for path in paths:
+            if path in bucket:
+                continue
+            bucket.append(path)
+            self.source_of[(kind, path)] = source
+
+    def ordered(self) -> list[tuple[str, str]]:
+        return [(kind, path) for kind in _SEARCH_KINDS for path in self.paths.get(kind, [])]
+
+    def describe(self, kind: str, path: str) -> str:
+        source = self.source_of.get((kind, path), kind)
+        return f"{source}:{path}"
+
+    def record_missing(self, soname: str, needed_by: str) -> None:
+        self.missing.setdefault(soname, set()).add(needed_by)
+
+    def missing_error(self, search_paths: tuple[str, ...] | None = None) -> MissingLibraryError:
+        return MissingLibraryError(
+            self.missing,
+            self.all_display_paths() if search_paths is None else search_paths,
+            tuple(dedupe(self.unavailable)),
+        )
+
+    def approved_dir(self, kind: str, path: str) -> str | None:
+        """Return the effective directory for ``path`` or ``None`` if unapproved.
+
+        A strict sysroot behaves like a chroot: an absolute RPATH/RUNPATH or
+        interpreter path from a library in the sysroot is remapped below the
+        sysroot as long as that remapped directory exists. Wheel-internal
+        references remain valid through ``internal_root``.
+        """
+        if not self.strict or kind not in {"rpath", "runpath", "interp"}:
+            return path
+        for candidate in (self.root, self.internal_root):
+            if candidate is not None and _resolved_under(path, candidate):
+                return path
+        if path.startswith("/") and self.root not in {"", "/"}:
+            remapped = normpath(self.root + path)
+            if Path(remapped).is_dir():
+                log.debug("remapping %s entry %s below sysroot as %s", kind, path, remapped)
+                return remapped
+        log.debug("ignoring %s entry %s outside the approved sysroot", kind, path)
+        return None
+
+    def all_display_paths(self) -> tuple[str, ...]:
+        return tuple(path for _, path in self.ordered())
+
+    def fork(self) -> SearchPaths:
+        """A per-ELF view sharing the approved configuration and missing set."""
+        fork = SearchPaths(
+            root=self.root,
+            internal_root=self.internal_root,
+            strict=self.strict,
+            extra_conf=self.extra_conf,
+            missing=self.missing,
+            unavailable=self.unavailable,
+            _conf_loaded=self._conf_loaded,
+        )
+        for kind in _SEARCH_KINDS:
+            fork.paths[kind] = list(self.paths.get(kind, []))
+        fork.source_of = dict(self.source_of)
+        return fork
+
+
+def _parse_approved_paths(str_ldpaths: str, root: str) -> list[str]:
+    """Parse ``--ldpaths`` entries that must live inside the approved root."""
+    approved: list[str] = []
+    for entry in str_ldpaths.split(":"):
+        if not entry:
+            continue
+        path = Path(entry)
+        if not path.is_absolute():
+            msg = f"approved library directory must be absolute: {entry}"
+            raise SearchPathError(msg)
+        if not path.is_dir():
+            msg = f"approved library directory does not exist: {entry}"
+            raise SearchPathError(msg)
+        if not _resolved_under(path, root):
+            msg = f"approved library directory is outside the sysroot {root}: {entry}"
+            raise SearchPathError(msg)
+        approved.append(normpath(str(path)))
+    return list(dedupe(approved))
+
+
+def load_conf_for(search: SearchPaths, libc: Libc | None) -> None:
+    """Resolve the sysroot's approved ld.so configuration exactly once."""
+    if search._conf_loaded:
+        return
+    search._conf_loaded = True
+    if search.root == "/" and not search.strict and not search.extra_conf:
+        return
+    loaded = load_ld_paths(
+        libc,
+        root=search.root,
+        strict=search.strict,
+    )
+    if search.strict:
+        missing_conf = [
+            path
+            for path in loaded["conf"]
+            if not Path(path).is_dir() and path not in search.unavailable
+        ]
+        search.unavailable.extend(missing_conf)
+    search.add("conf", loaded["conf"], "sysroot ld.so.conf")
+    search.add("interp", loaded["interp"], "sysroot interpreter")
+    search.add("conf", list(search.extra_conf), "--ldpaths")
+
+
+def build_search_paths(
+    args_ldpaths: str | None = None,
+    *,
+    sysroot: str | None = None,
+    internal_root: str | None = None,
+) -> SearchPaths | None:
+    """Build the effective search paths for an analysis.
+
+    Without ``sysroot`` this is the historical environment-based behaviour.
+    With ``sysroot``, host environment variables and host configuration are
+    ignored; only the sysroot configuration and approved ``--ldpaths``
+    directories below it are searched.
+    """
+    if sysroot is None:
+        return ld_paths_from_arg(args_ldpaths)
+
+    root = os.path.abspath(sysroot)
+    if not Path(root).is_dir():
+        msg = f"sysroot does not exist: {sysroot}"
+        raise SearchPathError(msg)
+
+    extra: list[str] = []
+    if args_ldpaths:
+        extra = _parse_approved_paths(args_ldpaths, root)
+
+    for variable in ("LD_LIBRARY_PATH", "AUDITWHEEL_LD_LIBRARY_PATH"):
+        if os.environ.get(variable):
+            log.warning("ignoring %s: strict sysroot search is in effect", variable)
+
+    search = SearchPaths(
+        root=root,
+        internal_root=internal_root,
+        strict=True,
+        extra_conf=tuple(extra),
+    )
+    # ``ldd`` expands the approved configuration once the libc is known.
+    return search
 
 
 def _get_platform(elf: ELFFile) -> Platform:
@@ -218,7 +420,13 @@ def dedupe(items: list[str]) -> list[str]:
     return [seen.setdefault(x, x) for x in items if x not in seen]
 
 
-def parse_ld_paths(str_ldpaths: str, path: str = "", root: str = "") -> list[str]:
+def parse_ld_paths(
+    str_ldpaths: str,
+    path: str = "",
+    root: str = "",
+    *,
+    keep_missing: bool = False,
+) -> list[str]:
     """Parse the colon-delimited list of paths and apply ldso rules to each
 
     Note the special handling as dictated by the ldso:
@@ -234,6 +442,9 @@ def parse_ld_paths(str_ldpaths: str, path: str = "", root: str = "") -> list[str
         The path to prepend to all paths found
     path
         The object actively being parsed (used for $ORIGIN)
+    keep_missing
+        Keep entries that do not exist on the host. Strict sysroot analysis
+        uses this so absolute RPATHs can be remapped below the sysroot later.
 
     Returns
     -------
@@ -256,11 +467,19 @@ def parse_ld_paths(str_ldpaths: str, path: str = "", root: str = "") -> list[str
         else:
             ldpath_ = root + ldpath
         ldpaths.append(normpath(ldpath_))
+    if keep_missing:
+        return list(dedupe(ldpaths))
     return [p for p in dedupe(ldpaths) if os.path.isdir(p)]
 
 
 @functools.lru_cache
-def parse_ld_so_conf(ldso_conf: str, *, root: str = "/", _first: bool = True) -> list[str]:
+def parse_ld_so_conf(
+    ldso_conf: str,
+    *,
+    root: str = "/",
+    _first: bool = True,
+    keep_missing: bool = False,
+) -> list[str]:
     """Load all the paths from a given ldso config file
 
     This should handle comments, whitespace, and "include" statements.
@@ -273,6 +492,8 @@ def parse_ld_so_conf(ldso_conf: str, *, root: str = "/", _first: bool = True) ->
         The path to prepend to all paths found
     _first
         Recursive use only; is this the first ELF?
+    keep_missing
+        Keep configured directories that do not exist (strict sysroot audit).
 
     Returns
     -------
@@ -297,7 +518,12 @@ def parse_ld_so_conf(ldso_conf: str, *, root: str = "/", _first: bool = True) ->
                         line = os.path.dirname(ldso_conf) + "/" + line
                     log.debug("%s  glob: %s", dbg_pfx, line)
                     for path in glob.glob(line):
-                        paths += parse_ld_so_conf(path, root=root, _first=False)
+                        paths += parse_ld_so_conf(
+                            path,
+                            root=root,
+                            _first=False,
+                            keep_missing=keep_missing,
+                        )
                 else:
                     paths += [normpath(root + line)]
     except OSError as e:
@@ -307,9 +533,23 @@ def parse_ld_so_conf(ldso_conf: str, *, root: str = "/", _first: bool = True) ->
     if _first:
         # TODO: Load paths from ldso itself.
         # Remove duplicate entries to speed things up.
-        paths = [p for p in dedupe(paths) if os.path.isdir(p)]
+        paths = list(dedupe(paths))
+        if not keep_missing:
+            paths = [p for p in paths if os.path.isdir(p)]
 
     return paths
+
+
+def _system_conf_dirs(root: str, *, keep_missing: bool = False) -> list[str]:
+    """The trusted directories the dynamic linker searches below ``root``."""
+    dirs = ["/lib", "/lib64/", "/usr/lib", "/usr/lib64"]
+    if root not in {"", "/"}:
+        rooted = [normpath(root + dir_.rstrip("/")) for dir_ in dirs]
+        rooted.append(normpath(root + "/usr/local/lib"))
+        dirs = rooted
+    if keep_missing:
+        return dirs
+    return [dir_ for dir_ in dirs if Path(dir_).is_dir()]
 
 
 @functools.lru_cache
@@ -317,6 +557,7 @@ def load_ld_paths(
     libc: Libc | None,
     root: str = "/",
     prefix: str = "",
+    strict: bool = False,
 ) -> dict[str, list[str]]:
     """Load linker paths from common locations
 
@@ -328,6 +569,9 @@ def load_ld_paths(
         The root tree to prepend to paths
     prefix
         The path under ``root`` to search
+    strict
+        Fail if the given ``root`` or its ld.so configuration is missing
+        instead of silently falling back to default directories.
 
     Returns
     -------
@@ -335,6 +579,11 @@ def load_ld_paths(
 
     """
     ldpaths: dict[str, list[str]] = {"conf": [], "env": [], "interp": []}
+    rooted = root not in {"", "/"}
+
+    if strict and rooted and not Path(root).is_dir():
+        msg = f"sysroot does not exist: {root}"
+        raise SearchPathError(msg)
 
     ld_library_path = os.environ.get("LD_LIBRARY_PATH")
     if root != "/" and ld_library_path is not None:
@@ -360,38 +609,44 @@ def load_ld_paths(
         ld_musl = list((root_prefix / "etc").glob("ld-musl-*.path"))
         assert len(ld_musl) <= 1  # noqa: S101
         if len(ld_musl) == 0:
-            ldpaths["conf"] = [
-                root + "/lib",
-                root + "/usr/local/lib",
-                root + "/usr/lib",
-            ]
+            if strict and rooted:
+                msg = f"sysroot has no musl ld-musl-*.path configuration: {root_prefix / 'etc'}"
+                raise SearchPathError(msg)
+            ldpaths["conf"] = _system_conf_dirs(root, keep_missing=strict)
         else:
             ldpaths["conf"] = []
             for ldpath in ld_musl[0].read_text().split(":"):
                 ldpath_stripped = ldpath.strip()
                 if ldpath_stripped == "":
                     continue
-                ldpaths["conf"].append(root + ldpath_stripped)
+                ldpaths["conf"].append(normpath(root + ldpath_stripped))
     else:
         # Load up /etc/ld.so.conf.
-        ldpaths["conf"] = parse_ld_so_conf(root + prefix + "/etc/ld.so.conf", root=root)
+        conf = root + prefix + "/etc/ld.so.conf"
+        if strict and not Path(conf).is_file():
+            msg = f"approved sysroot has no linker configuration: {conf}"
+            raise SearchPathError(msg)
+        ldpaths["conf"] = parse_ld_so_conf(conf, root=root, keep_missing=strict)
         # the trusted directories are not necessarily in ld.so.conf
-        ldpaths["conf"].extend(["/lib", "/lib64/", "/usr/lib", "/usr/lib64"])
+        ldpaths["conf"].extend(_system_conf_dirs(root, keep_missing=strict))
     log.debug("linker ldpaths: %s", ldpaths)
     return ldpaths
 
 
-def ld_paths_from_arg(args_ldpaths: str | None) -> dict[str, list[str]] | None:
+def ld_paths_from_arg(args_ldpaths: str | None) -> SearchPaths | None:
     """Load linker paths from the --ldpaths option and the environment."""
     if args_ldpaths is None:
         # The option was not provided, so fall back on load_ld_paths.
         return None
 
-    return {
-        "conf": parse_ld_paths(args_ldpaths),
-        "env": parse_ld_paths(os.environ.get("AUDITWHEEL_LD_LIBRARY_PATH", "")),
-        "interp": [],
-    }
+    search = SearchPaths()
+    search.add(
+        "env",
+        parse_ld_paths(os.environ.get("AUDITWHEEL_LD_LIBRARY_PATH", "")),
+        "AUDITWHEEL_LD_LIBRARY_PATH",
+    )
+    search.add("conf", parse_ld_paths(args_ldpaths), "--ldpaths")
+    return search
 
 
 def find_lib(
@@ -419,6 +674,17 @@ def find_lib(
     Tuple of the full path to the desired library and the real path to it
 
     """
+    match = find_lib_with_source(platform, lib, ldpaths, root)
+    return match[0], match[1]
+
+
+def find_lib_with_source(
+    platform: Platform,
+    lib: str,
+    ldpaths: list[str],
+    root: str = "/",
+) -> tuple[Path | None, str | None, str | None]:
+    """Like :func:`find_lib` but also return the directory that matched."""
     for ldpath in ldpaths:
         path = os.path.join(ldpath, lib)
         target = Path(readlink(path, root, prefixed=True))
@@ -427,16 +693,16 @@ def find_lib(
             with open(target, "rb") as f:
                 libelf = ELFFile(f)
                 if platform.is_compatible(_get_platform(libelf)):
-                    return target, path
+                    return target, path, ldpath
 
-    return None, None
+    return None, None, None
 
 
 def ldd(
     path: Path,
     root: str = "/",
     prefix: str = "",
-    ldpaths: dict[str, list[str]] | None = None,
+    ldpaths: dict[str, list[str]] | SearchPaths | None = None,
     display: str | None = None,
     exclude: frozenset[str] = frozenset(),
     _all_libs: dict[str, DynamicLibrary] | None = None,
@@ -486,6 +752,14 @@ def ldd(
     if _all_libs is None:
         _all_libs = {}
 
+    if isinstance(ldpaths, dict):
+        ldpaths = SearchPaths.from_dict(ldpaths)
+    # The top-level call owns a private view so per-ELF interpreters do not
+    # leak into sibling analyses sharing the same approved boundary.
+    search = ldpaths
+    if _first and search is not None and search.strict:
+        search = search.fork()
+
     log.debug("ldd(%s)", path)
 
     interpreter: str | None = None
@@ -514,19 +788,21 @@ def ldd(
                     interpreter,
                     Path(readlink(interpreter, root, prefixed=True)),
                     platform,
+                    search_source="interp",
+                    search_dir=os.path.dirname(interpreter),
                 )
                 # if we have an interpreter and it's not MUSL, assume GLIBC
                 libc = Libc.MUSL if soname.startswith("ld-musl-") else Libc.GLIBC
-                if ldpaths is None:
-                    ldpaths = load_ld_paths(libc).copy()
                 # TODO: Should read it and scan for /lib paths.
-                ldpaths["interp"] = [
+                interp_dirs = [
                     normpath(root + os.path.dirname(interp)),
                     normpath(
                         root + prefix + "/usr" + os.path.dirname(interp).lstrip(prefix),
                     ),
                 ]
-                log.debug("  ldpaths[interp]  = %s", ldpaths["interp"])
+                if search is not None:
+                    search.paths["interp"] = list(interp_dirs)
+                log.debug("  ldpaths[interp]  = %s", interp_dirs)
                 break
 
         # Parse the ELF's dynamic tags.
@@ -535,9 +811,19 @@ def ldd(
                 continue
             for t in segment.iter_tags():
                 if t.entry.d_tag == "DT_RPATH":
-                    rpaths = parse_ld_paths(t.rpath, path=str(path), root=root)  # type: ignore[attr-defined]
+                    rpaths = parse_ld_paths(
+                        t.rpath,  # type: ignore[attr-defined]
+                        path=str(path),
+                        root=root,
+                        keep_missing=search is not None and search.strict,
+                    )
                 elif t.entry.d_tag == "DT_RUNPATH":
-                    runpaths = parse_ld_paths(t.runpath, path=str(path), root=root)  # type: ignore[attr-defined]
+                    runpaths = parse_ld_paths(
+                        t.runpath,  # type: ignore[attr-defined]
+                        path=str(path),
+                        root=root,
+                        keep_missing=search is not None and search.strict,
+                    )
                 elif t.entry.d_tag == "DT_NEEDED":
                     needed.append(t.needed)  # type: ignore[attr-defined]
             if runpaths:
@@ -576,26 +862,46 @@ def ldd(
                 if soabi[0] == "cpython" and soabi[1].startswith(valid_python):
                     libc = Libc.GLIBC
 
-        if ldpaths is None:
-            ldpaths = load_ld_paths(libc).copy()
+        if search is None:
+            search = SearchPaths.from_dict(load_ld_paths(libc).copy())
+        load_conf_for(search, libc)
         # Propagate the rpaths used by the main ELF since those will be
         # used at runtime to locate things.
-        ldpaths["rpath"] = rpaths
-        ldpaths["runpath"] = runpaths
+        search.paths["rpath"] = list(rpaths)
+        search.paths["runpath"] = list(runpaths)
+        for entry in rpaths:
+            search.source_of[("rpath", entry)] = "DT_RPATH"
+        for entry in runpaths:
+            search.source_of[("runpath", entry)] = "DT_RUNPATH"
         log.debug("  ldpaths[rpath]   = %s", rpaths)
         log.debug("  ldpaths[runpath] = %s", runpaths)
 
-    assert ldpaths is not None  # noqa: S101
+    assert search is not None  # noqa: S101
 
-    all_ldpaths = (
-        ldpaths["rpath"]
-        + rpaths
-        + runpaths
-        + ldpaths["env"]
-        + ldpaths["runpath"]
-        + ldpaths["conf"]
-        + ldpaths["interp"]
+    # Preserve the linker search order and the provenance of every directory.
+    candidates: list[tuple[str, str, str]] = [
+        (search.describe("rpath", p), "rpath", p) for p in search.paths.get("rpath", [])
+    ]
+    candidates.extend((f"DT_RPATH of {path.name}", "rpath", p) for p in rpaths)
+    candidates.extend((f"DT_RUNPATH of {path.name}", "runpath", p) for p in runpaths)
+    candidates.extend(
+        (search.describe("env", p), "env", p) for p in search.paths.get("env", [])
     )
+    candidates.extend(
+        (search.describe("runpath", p), "runpath", p) for p in search.paths.get("runpath", [])
+    )
+    candidates.extend(
+        (search.describe("conf", p), "conf", p) for p in search.paths.get("conf", [])
+    )
+    candidates.extend(
+        (search.describe("interp", p), "interp", p) for p in search.paths.get("interp", [])
+    )
+    all_ldpaths = [
+        (label, effective)
+        for label, kind, dir_ in candidates
+        if (effective := search.approved_dir(kind, dir_)) is not None
+    ]
+
     _excluded_libs: set[str] = set()
     for soname in needed:
         if soname in _all_libs:
@@ -616,22 +922,49 @@ def ldd(
             _all_libs[soname] = DynamicLibrary(soname, None, None)
             continue
 
-        realpath, fullpath = find_lib(platform, soname, all_ldpaths, root)
+        realpath, fullpath, search_dir = find_lib_with_source(
+            platform,
+            soname,
+            [dir_ for _, dir_ in all_ldpaths],
+            root,
+        )
+        search_source = next(
+            (label for label, dir_ in all_ldpaths if dir_ == search_dir),
+            None,
+        )
         if realpath is not None and any(fnmatch(str(realpath), e) for e in exclude):
             log.info("Excluding %s", realpath)
             _excluded_libs.add(soname)
             continue
-        _all_libs[soname] = DynamicLibrary(soname, fullpath, realpath)
+        _all_libs[soname] = DynamicLibrary(
+            soname,
+            fullpath,
+            realpath,
+            search_source=search_source,
+            search_dir=search_dir,
+        )
         if realpath is None or fullpath is None:
+            if search.strict:
+                log.warning(
+                    "%s (needed by %s) was not found in the approved search paths",
+                    soname,
+                    path.name,
+                )
+                search.record_missing(soname, str(path))
             continue
-        dependency = ldd(realpath, root, prefix, ldpaths, fullpath, exclude, _all_libs)
+        dependency = ldd(realpath, root, prefix, search, fullpath, exclude, _all_libs)
         _all_libs[soname] = DynamicLibrary(
             soname,
             fullpath,
             realpath,
             dependency.platform,
             dependency.needed,
+            search_source,
+            search_dir,
         )
+
+    if _first and search.strict and search.missing:
+        raise search.missing_error()
 
     return DynamicExecutable(
         interpreter,
@@ -643,4 +976,5 @@ def ldd(
         tuple(rpaths),
         tuple(runpaths),
         _all_libs,
+        search.all_display_paths(),
     )

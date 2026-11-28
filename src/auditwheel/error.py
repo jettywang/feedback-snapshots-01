@@ -19,6 +19,40 @@ class WheelToolsError(AuditwheelError):
     pass
 
 
+class SearchPathError(AuditwheelError):
+    """An explicitly approved library search source is unusable."""
+
+
+class MissingLibraryError(AuditwheelError):
+    """A required external library was not found in the approved search sources."""
+
+    def __init__(
+        self,
+        missing: dict[str, set[str]],
+        search_paths: tuple[str, ...] = (),
+        unavailable_paths: tuple[str, ...] = (),
+    ) -> None:
+        self.missing = {soname: set(needed_by) for soname, needed_by in missing.items()}
+        self.search_paths = tuple(search_paths)
+        self.unavailable_paths = tuple(unavailable_paths)
+        lines = ["required external shared libraries were not found"]
+        for soname in sorted(self.missing):
+            lines.append(
+                f'  - "{soname}" needed by: {", ".join(sorted(self.missing[soname]))}',
+            )
+        if self.search_paths:
+            lines.append("approved search paths:")
+            lines.extend(f"  - {path}" for path in self.search_paths)
+        if self.unavailable_paths:
+            lines.append("approved directories that are missing:")
+            lines.extend(f"  - {path}" for path in self.unavailable_paths)
+        lines.append(
+            "check --sysroot/--ldpaths or provide the missing libraries "
+            "from an approved source",
+        )
+        super().__init__("\n".join(lines))
+
+
 class NonPlatformWheelError(AuditwheelError):
     """No ELF binaries in the wheel"""
 

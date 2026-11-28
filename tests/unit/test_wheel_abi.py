@@ -69,6 +69,7 @@ class TestGetWheelElfdata:
                 Path("/fakepath"),
                 exclude=frozenset(),
                 args_ldpaths="",
+                sysroot=None,
             )
 
         assert exec_info.value.args == (message,)

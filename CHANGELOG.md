@@ -3,6 +3,10 @@
 ## HEAD
 
 ### User-facing changes
+- [FEATURE] add `--sysroot` to `show`, `repair` and `lddtree` for a strict,
+  approved-only library search boundary; unresolved dependencies now fail with
+  a locatable report, and `show --json` / `repair` expose the actual source
+  used for each resolved library
 - [BUGFIX] avoid duplicating the wheel component in SBOMs ([#750](https://github.com/pypa/auditwheel/issues/750))
 
 ## 6.8.2

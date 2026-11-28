@@ -11,7 +11,12 @@ from packaging.utils import InvalidWheelFilename
 
 from auditwheel import options
 from auditwheel.architecture import Architecture
-from auditwheel.error import NonPlatformWheelError, WheelToolsError
+from auditwheel.error import (
+    MissingLibraryError,
+    NonPlatformWheelError,
+    SearchPathError,
+    WheelToolsError,
+)
 from auditwheel.libc import Libc
 from auditwheel.patcher import ElfPatcher
 from auditwheel.policy import WheelPolicies
@@ -124,6 +129,7 @@ wheel will abort processing of subsequent wheels.
     options.disable_isa_check(parser)
     options.allow_pure_python_wheel(parser)
     options.ldpaths(parser)
+    options.sysroot(parser)
     parser.add_argument(
         "--patcher",
         action=EnvironmentDefault,
@@ -211,7 +217,11 @@ def execute(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
                 allow_graft=True,
                 requested_policy_base_name=plat_base,
                 args_ldpaths=args.LDPATHS,
+                sysroot=args.SYSROOT,
             )
+        except (MissingLibraryError, SearchPathError) as e:
+            logger.error("%s", e.message)
+            return 1
         except NonPlatformWheelError as e:
             logger.info(e.message)
             if is_pure_python and args.ALLOW_PURE_PY_WHEEL:

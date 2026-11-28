@@ -228,6 +228,7 @@ def test_wheel_source_date_epoch(timestamp, tmp_path, monkeypatch):
         WHEEL_FILE=[wheel],
         EXCLUDE=[],
         LDPATHS=None,
+        SYSROOT=None,
         DISABLE_ISA_EXT_CHECK=False,
         ZIP_COMPRESSION_LEVEL=6,
         PATCHER="none",
@@ -258,6 +259,7 @@ def test_libpython(tmp_path, caplog):
         WHEEL_FILE=[wheel],
         EXCLUDE=[],
         LDPATHS=None,
+        SYSROOT=None,
         DISABLE_ISA_EXT_CHECK=False,
         ZIP_COMPRESSION_LEVEL=6,
         PATCHER="patchelf",
@@ -311,6 +313,7 @@ def test_main_lddtree(
         "rpath": [],
         "runpath": [],
         "libraries": {},
+        "search_paths": [],
     }
     assert expected_json == actual_json
 

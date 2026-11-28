@@ -94,6 +94,8 @@ def _make_winfo(
         sym_policy=overall_policy,
         versioned_symbols=versioned_symbols or {},
         external_refs=external_refs,
+        search_paths=(),
+        library_provenance={},
     )
 
 
@@ -139,6 +141,7 @@ def _make_args(
         DISABLE_ISA_EXT_CHECK=False,
         ALLOW_PURE_PY_WHEEL=allow_pure_python,
         LDPATHS=None,
+        SYSROOT=None,
         JSON=use_json,
         verbose=0,
     )

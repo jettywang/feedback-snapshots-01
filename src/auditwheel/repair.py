@@ -96,7 +96,15 @@ def repair_wheel(
                 if not dest_dir.exists():
                     dest_dir.mkdir()
                 sbom_filepaths.append(src_path)
+                provenance = wheel_abi.library_provenance.get(soname, {})
+                logger.info(
+                    "Grafting %s from %s (approved via %s)",
+                    soname,
+                    src_path,
+                    provenance.get("source") or "unapproved/environment search",
+                )
                 new_soname, new_path = copylib(src_path, dest_dir, patcher)
+                logger.info("Grafted %s as %s", soname, new_path.name)
                 soname_map[soname] = (new_soname, new_path)
                 replacements.append((soname, new_soname))
             if replacements:
