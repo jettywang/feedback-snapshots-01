@@ -1,0 +1,185 @@
+{
+  "rows": [
+    {
+      "key": "config_file_path",
+      "scope": "core",
+      "verdict": "IDENTITY",
+      "why": "expected: the previewed file changed"
+    },
+    {
+      "key": "env_list",
+      "scope": "core",
+      "verdict": "TRANSLATED",
+      "why": "same value, ini -> toml"
+    },
+    {
+      "key": "min_version",
+      "scope": "core",
+      "verdict": "CARRY",
+      "why": "absent on both sides"
+    },
+    {
+      "key": "no_package",
+      "scope": "core",
+      "verdict": "CARRY",
+      "why": "same default"
+    },
+    {
+      "key": "package_env",
+      "scope": "core",
+      "verdict": "REAPPROVE",
+      "why": "presence changed"
+    },
+    {
+      "key": "requires",
+      "scope": "core",
+      "verdict": "CARRY",
+      "why": "absent on both sides"
+    },
+    {
+      "key": "tox_root",
+      "scope": "core",
+      "verdict": "CARRY",
+      "why": "same default"
+    },
+    {
+      "key": "work_dir",
+      "scope": "core",
+      "verdict": "CARRY",
+      "why": "same default"
+    },
+    {
+      "key": "allowlist_externals",
+      "scope": "py",
+      "verdict": "CARRY",
+      "why": "same default"
+    },
+    {
+      "key": "base",
+      "scope": "py",
+      "verdict": "CARRY",
+      "why": "same default"
+    },
+    {
+      "key": "change_dir",
+      "scope": "py",
+      "verdict": "CARRY",
+      "why": "same default"
+    },
+    {
+      "key": "commands",
+      "scope": "py",
+      "verdict": "TRANSLATED",
+      "why": "same value, ini -> toml"
+    },
+    {
+      "key": "commands_post",
+      "scope": "py",
+      "verdict": "CARRY",
+      "why": "same default"
+    },
+    {
+      "key": "commands_pre",
+      "scope": "py",
+      "verdict": "CARRY",
+      "why": "same default"
+    },
+    {
+      "key": "dependency_groups",
+      "scope": "py",
+      "verdict": "CARRY",
+      "why": "same default"
+    },
+    {
+      "key": "deps",
+      "scope": "py",
+      "verdict": "CARRY",
+      "why": "same default"
+    },
+    {
+      "key": "disallow_pass_env",
+      "scope": "py",
+      "verdict": "CARRY",
+      "why": "same default"
+    },
+    {
+      "key": "env_name",
+      "scope": "py",
+      "verdict": "CARRY",
+      "why": "same constant"
+    },
+    {
+      "key": "extras",
+      "scope": "py",
+      "verdict": "CARRY",
+      "why": "same default"
+    },
+    {
+      "key": "install_command",
+      "scope": "py",
+      "verdict": "CARRY",
+      "why": "same default"
+    },
+    {
+      "key": "package",
+      "scope": "py",
+      "verdict": "REAPPROVE",
+      "why": "final value changed"
+    },
+    {
+      "key": "package_env",
+      "scope": "py",
+      "verdict": "REAPPROVE",
+      "why": "presence changed"
+    },
+    {
+      "key": "package_tox_env_type",
+      "scope": "py",
+      "verdict": "REAPPROVE",
+      "why": "presence changed"
+    },
+    {
+      "key": "pass_env",
+      "scope": "py",
+      "verdict": "CARRY",
+      "why": "same default"
+    },
+    {
+      "key": "set_env",
+      "scope": "py",
+      "verdict": "CARRY",
+      "why": "same default"
+    },
+    {
+      "key": "skip_install",
+      "scope": "py",
+      "verdict": "CARRY",
+      "why": "same default"
+    },
+    {
+      "key": "skip_missing_interpreters",
+      "scope": "py",
+      "verdict": "CARRY",
+      "why": "same default"
+    },
+    {
+      "key": "use_develop",
+      "scope": "py",
+      "verdict": "CARRY",
+      "why": "same default"
+    }
+  ],
+  "summary": {
+    "approvable": false,
+    "carry": 21,
+    "counts": {
+      "CARRY": 21,
+      "IDENTITY": 1,
+      "REAPPROVE": 4,
+      "TRANSLATED": 2
+    },
+    "reapprove_or_blocked": 4,
+    "review": 0,
+    "translated_or_identity": 3
+  }
+}

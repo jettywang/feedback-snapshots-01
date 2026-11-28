@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "demo-project"
+version = "0.1.0"
+
+[tool.tox]
+env_list = ["integration", "unit", "lint"]
+
+[tool.tox.env_run_base]
+set_env = { PROJECT_MODE = { replace = "env", name = "PROJECT_MODE", default = "test" } }
+pass_env = ["PYTEST_*"]
+commands = [["pytest", "-q", { replace = "posargs", default = ["tests"], extend = true }]]
+
+[tool.tox.env.integration]
+commands = [["pytest", "-q", "-m", "integration", { replace = "posargs", default = ["tests/integration"], extend = true }]]
+
+[tool.tox.env.unit]
+commands = [["pytest", "-q", { replace = "posargs", default = ["tests"], extend = true }]]
+
+[tool.tox.env.lint]
+skip_install = true
+deps = ["ruff"]
+commands = [["ruff", "check", "."]]
+
+[tool.tox.env_pkg_base]
+pass_env = ["PKG_CONFIG_PATH"]

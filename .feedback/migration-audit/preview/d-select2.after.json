@@ -1,0 +1,302 @@
+{
+  "core": {
+    "config_file_path": {
+      "present": true,
+      "source": {
+        "kind": "constant"
+      },
+      "substitutions": [],
+      "value": "<PROJECT>/tox.toml"
+    },
+    "env_list": {
+      "present": true,
+      "source": {
+        "depth": 0,
+        "format": "toml",
+        "kind": "loader",
+        "layer": "<core>",
+        "loader": "TomlLoader",
+        "section": ""
+      },
+      "substitutions": [],
+      "value": [
+        "py"
+      ]
+    },
+    "min_version": {
+      "present": false
+    },
+    "no_package": {
+      "present": true,
+      "source": {
+        "default": false,
+        "kind": "default"
+      },
+      "substitutions": [],
+      "value": false
+    },
+    "package_env": {
+      "present": false
+    },
+    "requires": {
+      "present": false
+    },
+    "tox_root": {
+      "present": true,
+      "source": {
+        "default": "PosixPath('/Users/apple/Documents/\u7528\u6237\u53cd\u9988\u9879\u76ee/batches/feedback-20261120-backend-security-280-jettywang/prepared/FB-20261120-SEC-JW-259/workspace/.feedback/migration-audit/work/d-select2/after')",
+        "kind": "default"
+      },
+      "substitutions": [],
+      "value": "<PROJECT>"
+    },
+    "work_dir": {
+      "present": true,
+      "source": {
+        "default": "<callable _default_work_dir>",
+        "kind": "default"
+      },
+      "substitutions": [],
+      "value": "<PROJECT>/.tox"
+    }
+  },
+  "env": {
+    "py": {
+      "allowlist_externals": {
+        "present": true,
+        "source": {
+          "default": "[]",
+          "kind": "default"
+        },
+        "substitutions": [],
+        "value": []
+      },
+      "base": {
+        "present": true,
+        "source": {
+          "default": "['env_run_base']",
+          "kind": "default"
+        },
+        "substitutions": [],
+        "value": [
+          "<run-base>"
+        ]
+      },
+      "change_dir": {
+        "present": true,
+        "source": {
+          "default": "<callable <lambda>>",
+          "kind": "default"
+        },
+        "substitutions": [],
+        "value": "<PROJECT>"
+      },
+      "commands": {
+        "present": true,
+        "source": {
+          "depth": 0,
+          "format": "toml",
+          "kind": "loader",
+          "layer": "<run-base>",
+          "loader": "TomlLoader",
+          "section": "env_run_base"
+        },
+        "substitutions": [],
+        "value": [
+          "ruff check ."
+        ]
+      },
+      "commands_post": {
+        "present": true,
+        "source": {
+          "default": "[]",
+          "kind": "default"
+        },
+        "substitutions": [],
+        "value": []
+      },
+      "commands_pre": {
+        "present": true,
+        "source": {
+          "default": "[]",
+          "kind": "default"
+        },
+        "substitutions": [],
+        "value": []
+      },
+      "dependency_groups": {
+        "present": true,
+        "source": {
+          "default": "set()",
+          "kind": "default"
+        },
+        "substitutions": [],
+        "value": []
+      },
+      "deps": {
+        "present": true,
+        "source": {
+          "default": "<tox.tox_env.python.pip.req_file.PythonDeps object at 0x106fc7d10>",
+          "kind": "default"
+        },
+        "substitutions": [],
+        "value": []
+      },
+      "disallow_pass_env": {
+        "present": true,
+        "source": {
+          "default": "[]",
+          "kind": "default"
+        },
+        "substitutions": [],
+        "value": []
+      },
+      "env_name": {
+        "present": true,
+        "source": {
+          "kind": "constant"
+        },
+        "substitutions": [],
+        "value": "py"
+      },
+      "extras": {
+        "present": true,
+        "source": {
+          "default": "set()",
+          "kind": "default"
+        },
+        "substitutions": [],
+        "value": []
+      },
+      "install_command": {
+        "present": true,
+        "source": {
+          "default": "<callable default_install_command>",
+          "kind": "default"
+        },
+        "substitutions": [],
+        "value": "python -I -m pip install '{packages}'"
+      },
+      "package": {
+        "present": true,
+        "source": {
+          "default": "skip",
+          "kind": "default"
+        },
+        "substitutions": [],
+        "value": "skip"
+      },
+      "package_env": {
+        "present": false
+      },
+      "package_tox_env_type": {
+        "present": false
+      },
+      "pass_env": {
+        "present": true,
+        "source": {
+          "default": "[]",
+          "kind": "default"
+        },
+        "substitutions": [],
+        "value": [
+          "CC",
+          "CCSHARED",
+          "CFLAGS",
+          "CPPFLAGS",
+          "CURL_CA_BUNDLE",
+          "CXX",
+          "FORCE_COLOR",
+          "HOME",
+          "LANG",
+          "LANGUAGE",
+          "LDFLAGS",
+          "LD_LIBRARY_PATH",
+          "NETRC",
+          "NIX_LD",
+          "NIX_LD_LIBRARY_PATH",
+          "NO_COLOR",
+          "PIP_*",
+          "PKG_CONFIG",
+          "PKG_CONFIG_PATH",
+          "PKG_CONFIG_SYSROOT_DIR",
+          "PYTHON_GIL",
+          "REQUESTS_CA_BUNDLE",
+          "SSH_AGENT_PID",
+          "SSH_AUTH_SOCK",
+          "SSL_CERT_FILE",
+          "TMPDIR",
+          "VIRTUALENV_*",
+          "http_proxy",
+          "https_proxy",
+          "no_proxy"
+        ]
+      },
+      "set_env": {
+        "present": true,
+        "source": {
+          "default": "<tox.config.set_env.SetEnv object at 0x106d21610>",
+          "kind": "default"
+        },
+        "substitutions": [],
+        "value": {
+          "PIP_DISABLE_PIP_VERSION_CHECK": "1",
+          "PIP_USER": "0",
+          "PYTHONHASHSEED": "<RANDOM>",
+          "PYTHONIOENCODING": "utf-8",
+          "TOX_ENV_DIR": "<PROJECT>/.tox/py",
+          "TOX_ENV_NAME": "py",
+          "TOX_WORK_DIR": "<PROJECT>/.tox",
+          "VIRTUAL_ENV": "<PROJECT>/.tox/py"
+        }
+      },
+      "skip_install": {
+        "present": true,
+        "source": {
+          "default": false,
+          "kind": "default"
+        },
+        "substitutions": [],
+        "value": false
+      },
+      "skip_missing_interpreters": {
+        "present": true,
+        "source": {
+          "default": "<callable _default_skip_missing>",
+          "kind": "default"
+        },
+        "substitutions": [],
+        "value": false
+      },
+      "use_develop": {
+        "present": true,
+        "source": {
+          "default": false,
+          "kind": "default"
+        },
+        "substitutions": [],
+        "value": false
+      }
+    }
+  },
+  "inputs": {
+    "hash_seed": 2596011248,
+    "host_env": {},
+    "overrides": [],
+    "packed": {
+      "<PROJECT>": "/Users/apple/Documents/\u7528\u6237\u53cd\u9988\u9879\u76ee/batches/feedback-20261120-backend-security-280-jettywang/prepared/FB-20261120-SEC-JW-259/workspace/.feedback/migration-audit/work/d-select2/after"
+    },
+    "pos_args": null
+  },
+  "selected": {
+    "candidates": [
+      "tox.toml"
+    ],
+    "path": "tox.toml",
+    "type": "TomlTox"
+  },
+  "unused": {
+    "core": [],
+    "py": []
+  }
+}

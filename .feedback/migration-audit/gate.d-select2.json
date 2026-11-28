@@ -1,0 +1,5 @@
+{
+  "environments": {
+    "py": {"commands": ["pytest -q tests"], "skip_install": false}
+  }
+}

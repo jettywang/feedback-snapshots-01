@@ -1,0 +1,11 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+[project]
+name = "demo-project"
+version = "0.1.0"
+[tool.tox]
+env_list = ["py"]
+[tool.tox.env_run_base]
+set_env = { TEST_SCOPE = "full" }
+commands = [["pytest", "-q", "-m", "full", { replace = "posargs", default = ["tests"], extend = true }]]

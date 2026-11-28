@@ -1,0 +1,22 @@
+{
+  "rows": [
+    {
+      "env": "py",
+      "key": "commands",
+      "verdict": "KEEP",
+      "why": "matches the approval"
+    },
+    {
+      "env": "py",
+      "key": "skip_install",
+      "verdict": "KEEP",
+      "why": "matches the approval"
+    }
+  ],
+  "summary": {
+    "approvable": true,
+    "changed": 0,
+    "keep": 2,
+    "missing": 0
+  }
+}

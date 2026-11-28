@@ -1,0 +1,6 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+[project]
+name = "demo-project"
+version = "0.1.0"

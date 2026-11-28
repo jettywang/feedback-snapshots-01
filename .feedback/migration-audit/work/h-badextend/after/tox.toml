@@ -1,0 +1,3 @@
+env_list = ["py"]
+[env_run_base]
+commands = [["pytest", "-q", { replace = "posargs", default = ["tests"] }]]

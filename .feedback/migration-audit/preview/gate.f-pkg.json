@@ -1,0 +1,22 @@
+{
+  "rows": [
+    {
+      "env": "py",
+      "key": "package",
+      "verdict": "CHANGED",
+      "why": "approved 'skip', preview 'sdist'"
+    },
+    {
+      "env": "py",
+      "key": "commands",
+      "verdict": "KEEP",
+      "why": "matches the approval"
+    }
+  ],
+  "summary": {
+    "approvable": false,
+    "changed": 1,
+    "keep": 1,
+    "missing": 0
+  }
+}

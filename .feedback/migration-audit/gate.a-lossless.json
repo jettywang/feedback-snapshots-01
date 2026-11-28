@@ -1,0 +1,7 @@
+{
+  "environments": {
+    "integration": {"commands": ["pytest -q -m integration tests/integration"], "skip_install": false},
+    "unit": {"commands": ["pytest -q tests"], "skip_install": false},
+    "lint": {"commands": ["ruff check ."], "skip_install": true}
+  }
+}

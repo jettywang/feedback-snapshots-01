@@ -1,0 +1,46 @@
+{
+  "rows": [
+    {
+      "env": "integration",
+      "key": "commands",
+      "verdict": "KEEP",
+      "why": "matches the approval"
+    },
+    {
+      "env": "integration",
+      "key": "skip_install",
+      "verdict": "KEEP",
+      "why": "matches the approval"
+    },
+    {
+      "env": "unit",
+      "key": "commands",
+      "verdict": "KEEP",
+      "why": "matches the approval"
+    },
+    {
+      "env": "unit",
+      "key": "skip_install",
+      "verdict": "KEEP",
+      "why": "matches the approval"
+    },
+    {
+      "env": "lint",
+      "key": "commands",
+      "verdict": "KEEP",
+      "why": "matches the approval"
+    },
+    {
+      "env": "lint",
+      "key": "skip_install",
+      "verdict": "KEEP",
+      "why": "matches the approval"
+    }
+  ],
+  "summary": {
+    "approvable": true,
+    "changed": 0,
+    "keep": 6,
+    "missing": 0
+  }
+}

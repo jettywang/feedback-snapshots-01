@@ -1,0 +1,5 @@
+[tool.tox]
+env_list = ["py"]
+[tool.tox.env_run_base]
+pass_env = ["NATIVE_SECRET"]
+commands = [["echo", "native"]]

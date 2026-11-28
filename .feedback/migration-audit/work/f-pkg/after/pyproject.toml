@@ -1,0 +1,7 @@
+[project]
+name = "demo-project"
+version = "0.1.0"
+[tool.tox]
+env_list = ["py"]
+[tool.tox.env_run_base]
+commands = [["pytest", "-q", { replace = "posargs", default = ["tests"], extend = true }]]

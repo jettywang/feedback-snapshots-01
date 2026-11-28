@@ -1,0 +1,16 @@
+{
+  "rows": [
+    {
+      "env": "py",
+      "key": "commands",
+      "verdict": "CHANGED",
+      "why": "approved ['pytest -q tests'], preview None"
+    }
+  ],
+  "summary": {
+    "approvable": false,
+    "changed": 1,
+    "keep": 0,
+    "missing": 0
+  }
+}

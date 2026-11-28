@@ -1,0 +1,1 @@
+{"environments": {"py": {"package": "skip", "commands": ["pytest -q tests"]}}}

@@ -1,0 +1,424 @@
+{
+  "rows": [
+    {
+      "key": "config_file_path",
+      "scope": "core",
+      "verdict": "IDENTITY",
+      "why": "expected: the previewed file changed"
+    },
+    {
+      "key": "env_list",
+      "scope": "core",
+      "verdict": "TRANSLATED",
+      "why": "same value, ini -> toml"
+    },
+    {
+      "key": "min_version",
+      "scope": "core",
+      "verdict": "CARRY",
+      "why": "absent on both sides"
+    },
+    {
+      "key": "no_package",
+      "scope": "core",
+      "verdict": "CARRY",
+      "why": "same default"
+    },
+    {
+      "key": "package_env",
+      "scope": "core",
+      "verdict": "CARRY",
+      "why": "same default"
+    },
+    {
+      "key": "requires",
+      "scope": "core",
+      "verdict": "CARRY",
+      "why": "absent on both sides"
+    },
+    {
+      "key": "tox_root",
+      "scope": "core",
+      "verdict": "CARRY",
+      "why": "same default"
+    },
+    {
+      "key": "work_dir",
+      "scope": "core",
+      "verdict": "CARRY",
+      "why": "same default"
+    },
+    {
+      "key": "allowlist_externals",
+      "scope": "integration",
+      "verdict": "CARRY",
+      "why": "same default"
+    },
+    {
+      "key": "base",
+      "scope": "integration",
+      "verdict": "CARRY",
+      "why": "same default"
+    },
+    {
+      "key": "change_dir",
+      "scope": "integration",
+      "verdict": "CARRY",
+      "why": "same default"
+    },
+    {
+      "key": "commands",
+      "scope": "integration",
+      "verdict": "TRANSLATED",
+      "why": "same value, ini -> toml"
+    },
+    {
+      "key": "commands_post",
+      "scope": "integration",
+      "verdict": "CARRY",
+      "why": "same default"
+    },
+    {
+      "key": "commands_pre",
+      "scope": "integration",
+      "verdict": "CARRY",
+      "why": "same default"
+    },
+    {
+      "key": "dependency_groups",
+      "scope": "integration",
+      "verdict": "CARRY",
+      "why": "same default"
+    },
+    {
+      "key": "deps",
+      "scope": "integration",
+      "verdict": "CARRY",
+      "why": "same default"
+    },
+    {
+      "key": "disallow_pass_env",
+      "scope": "integration",
+      "verdict": "CARRY",
+      "why": "same default"
+    },
+    {
+      "key": "env_name",
+      "scope": "integration",
+      "verdict": "CARRY",
+      "why": "same constant"
+    },
+    {
+      "key": "extras",
+      "scope": "integration",
+      "verdict": "CARRY",
+      "why": "same default"
+    },
+    {
+      "key": "install_command",
+      "scope": "integration",
+      "verdict": "CARRY",
+      "why": "same default"
+    },
+    {
+      "key": "package",
+      "scope": "integration",
+      "verdict": "CARRY",
+      "why": "same default"
+    },
+    {
+      "key": "package_env",
+      "scope": "integration",
+      "verdict": "CARRY",
+      "why": "same default"
+    },
+    {
+      "key": "package_tox_env_type",
+      "scope": "integration",
+      "verdict": "CARRY",
+      "why": "same constant"
+    },
+    {
+      "key": "pass_env",
+      "scope": "integration",
+      "verdict": "TRANSLATED",
+      "why": "same value, ini -> toml"
+    },
+    {
+      "key": "set_env",
+      "scope": "integration",
+      "verdict": "TRANSLATED",
+      "why": "same value, ini -> toml"
+    },
+    {
+      "key": "skip_install",
+      "scope": "integration",
+      "verdict": "CARRY",
+      "why": "same default"
+    },
+    {
+      "key": "skip_missing_interpreters",
+      "scope": "integration",
+      "verdict": "CARRY",
+      "why": "same default"
+    },
+    {
+      "key": "use_develop",
+      "scope": "integration",
+      "verdict": "CARRY",
+      "why": "same default"
+    },
+    {
+      "key": "allowlist_externals",
+      "scope": "lint",
+      "verdict": "CARRY",
+      "why": "same default"
+    },
+    {
+      "key": "base",
+      "scope": "lint",
+      "verdict": "CARRY",
+      "why": "same default"
+    },
+    {
+      "key": "change_dir",
+      "scope": "lint",
+      "verdict": "CARRY",
+      "why": "same default"
+    },
+    {
+      "key": "commands",
+      "scope": "lint",
+      "verdict": "TRANSLATED",
+      "why": "same value, ini -> toml"
+    },
+    {
+      "key": "commands_post",
+      "scope": "lint",
+      "verdict": "CARRY",
+      "why": "same default"
+    },
+    {
+      "key": "commands_pre",
+      "scope": "lint",
+      "verdict": "CARRY",
+      "why": "same default"
+    },
+    {
+      "key": "dependency_groups",
+      "scope": "lint",
+      "verdict": "CARRY",
+      "why": "same default"
+    },
+    {
+      "key": "deps",
+      "scope": "lint",
+      "verdict": "TRANSLATED",
+      "why": "same value, ini -> toml"
+    },
+    {
+      "key": "disallow_pass_env",
+      "scope": "lint",
+      "verdict": "CARRY",
+      "why": "same default"
+    },
+    {
+      "key": "env_name",
+      "scope": "lint",
+      "verdict": "CARRY",
+      "why": "same constant"
+    },
+    {
+      "key": "extras",
+      "scope": "lint",
+      "verdict": "CARRY",
+      "why": "same default"
+    },
+    {
+      "key": "install_command",
+      "scope": "lint",
+      "verdict": "CARRY",
+      "why": "same default"
+    },
+    {
+      "key": "package",
+      "scope": "lint",
+      "verdict": "CARRY",
+      "why": "same constant"
+    },
+    {
+      "key": "package_env",
+      "scope": "lint",
+      "verdict": "CARRY",
+      "why": "absent on both sides"
+    },
+    {
+      "key": "package_tox_env_type",
+      "scope": "lint",
+      "verdict": "CARRY",
+      "why": "absent on both sides"
+    },
+    {
+      "key": "pass_env",
+      "scope": "lint",
+      "verdict": "TRANSLATED",
+      "why": "same value, ini -> toml"
+    },
+    {
+      "key": "set_env",
+      "scope": "lint",
+      "verdict": "TRANSLATED",
+      "why": "same value, ini -> toml"
+    },
+    {
+      "key": "skip_install",
+      "scope": "lint",
+      "verdict": "TRANSLATED",
+      "why": "same value, ini -> toml"
+    },
+    {
+      "key": "skip_missing_interpreters",
+      "scope": "lint",
+      "verdict": "CARRY",
+      "why": "same default"
+    },
+    {
+      "key": "use_develop",
+      "scope": "lint",
+      "verdict": "CARRY",
+      "why": "absent on both sides"
+    },
+    {
+      "key": "allowlist_externals",
+      "scope": "unit",
+      "verdict": "CARRY",
+      "why": "same default"
+    },
+    {
+      "key": "base",
+      "scope": "unit",
+      "verdict": "CARRY",
+      "why": "same default"
+    },
+    {
+      "key": "change_dir",
+      "scope": "unit",
+      "verdict": "CARRY",
+      "why": "same default"
+    },
+    {
+      "key": "commands",
+      "scope": "unit",
+      "verdict": "TRANSLATED",
+      "why": "same value, ini -> toml"
+    },
+    {
+      "key": "commands_post",
+      "scope": "unit",
+      "verdict": "CARRY",
+      "why": "same default"
+    },
+    {
+      "key": "commands_pre",
+      "scope": "unit",
+      "verdict": "CARRY",
+      "why": "same default"
+    },
+    {
+      "key": "dependency_groups",
+      "scope": "unit",
+      "verdict": "CARRY",
+      "why": "same default"
+    },
+    {
+      "key": "deps",
+      "scope": "unit",
+      "verdict": "CARRY",
+      "why": "same default"
+    },
+    {
+      "key": "disallow_pass_env",
+      "scope": "unit",
+      "verdict": "CARRY",
+      "why": "same default"
+    },
+    {
+      "key": "env_name",
+      "scope": "unit",
+      "verdict": "CARRY",
+      "why": "same constant"
+    },
+    {
+      "key": "extras",
+      "scope": "unit",
+      "verdict": "CARRY",
+      "why": "same default"
+    },
+    {
+      "key": "install_command",
+      "scope": "unit",
+      "verdict": "CARRY",
+      "why": "same default"
+    },
+    {
+      "key": "package",
+      "scope": "unit",
+      "verdict": "CARRY",
+      "why": "same default"
+    },
+    {
+      "key": "package_env",
+      "scope": "unit",
+      "verdict": "CARRY",
+      "why": "same default"
+    },
+    {
+      "key": "package_tox_env_type",
+      "scope": "unit",
+      "verdict": "CARRY",
+      "why": "same constant"
+    },
+    {
+      "key": "pass_env",
+      "scope": "unit",
+      "verdict": "TRANSLATED",
+      "why": "same value, ini -> toml"
+    },
+    {
+      "key": "set_env",
+      "scope": "unit",
+      "verdict": "TRANSLATED",
+      "why": "same value, ini -> toml"
+    },
+    {
+      "key": "skip_install",
+      "scope": "unit",
+      "verdict": "CARRY",
+      "why": "same default"
+    },
+    {
+      "key": "skip_missing_interpreters",
+      "scope": "unit",
+      "verdict": "CARRY",
+      "why": "same default"
+    },
+    {
+      "key": "use_develop",
+      "scope": "unit",
+      "verdict": "CARRY",
+      "why": "same default"
+    }
+  ],
+  "summary": {
+    "approvable": true,
+    "carry": 55,
+    "counts": {
+      "CARRY": 55,
+      "IDENTITY": 1,
+      "TRANSLATED": 12
+    },
+    "reapprove_or_blocked": 0,
+    "review": 0,
+    "translated_or_identity": 13
+  }
+}
