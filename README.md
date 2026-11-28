@@ -840,6 +840,62 @@ expect(stub).not_to have_been_requested
 expect(stub2).not_to have_been_requested
 ```
 
+## Isolated test scopes
+
+By default every stub and every recorded request lives in one global registry,
+which is why test frameworks reset it after each example. When test groups run
+in parallel (for example in threads), two groups stubbing the same route would
+otherwise share response rotation and request counters.
+
+`WebMock.scope` gives a block its own stub registry and request registry.
+Stubs registered inside the block, their response rotation and the recorded
+request counts stay private to that scope, while global usage outside any scope
+keeps working exactly as before.
+
+```ruby
+WebMock.scope do
+  stub_request(:get, "www.example.com").
+    to_return({ status: 500 }, { status: 200 })
+
+  Net::HTTP.get(URI("http://www.example.com/"))   # => 500
+  Net::HTTP.get(URI("http://www.example.com/"))   # => 200
+
+  assert_requested(:get, "www.example.com", times: 2)
+end
+# The stub and both requests are gone once the block returns.
+```
+
+Scopes nest, and a scope can explicitly share a stub with every nested scope.
+Shared stubs are matched after the nested scope's own stubs, but each scope
+still keeps an independent request history.
+
+```ruby
+WebMock.scope do
+  stub_shared_request(:get, "www.example.com").to_return(body: "shared")
+
+  WebMock.scope do
+    Net::HTTP.get(URI("http://www.example.com/"))   # => "shared"
+    assert_requested(:get, "www.example.com", times: 1)
+  end
+
+  # The nested request did not leak into the parent scope.
+  assert_requested(:get, "www.example.com", times: 0)
+end
+```
+
+A named scope can be re-entered later and keeps its registries between blocks,
+which is useful for repeating a security regression group independently.
+
+```ruby
+WebMock.scope(:security) do
+  stub_request(:get, "www.example.com").to_return(body: "ok")
+end
+
+WebMock.scope(:security) do
+  # Same registries as the previous :security block.
+end
+```
+
 ## Disabling and enabling WebMock or only some http client adapters
 
 ```ruby

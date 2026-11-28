@@ -149,6 +149,21 @@ module WebMock
   def self.reset!
     WebMock::RequestRegistry.instance.reset!
     WebMock::StubRegistry.instance.reset!
+    WebMock::TestScope.reset!
+  end
+
+  # Runs the block inside an isolated TestScope. Stubs registered inside the
+  # block, together with their response rotation and recorded request counts,
+  # stay private to that scope and do not leak into other groups or the global
+  # registries.
+  def self.scope(name = nil, &block)
+    WebMock::TestScope.create(name, &block)
+  end
+
+  # The currently active TestScope, or nil when running against the global
+  # registries.
+  def self.current_scope
+    WebMock::TestScope.current
   end
 
   def self.reset_webmock

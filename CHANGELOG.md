@@ -1,5 +1,11 @@
 # Changelog
 
+# Unreleased
+
+* Add isolated test scopes for parallel test groups
+
+    `WebMock.scope` (and `WebMock::TestScope`) gives a block its own stub registry and request registry. Stubs registered inside the block, their response rotation and the recorded request counts stay private to that scope, so groups that stub the same route no longer share state when running in parallel. Global usage outside a scope is unchanged. Nested scopes can share explicitly registered stubs through `stub_shared_request`, and named scopes can be re-entered to repeat a group independently.
+
 # 3.35.0
 
 * Fix `get_file` with Patron 1.1 (#1147)

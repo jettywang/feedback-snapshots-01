@@ -3,7 +3,21 @@
 module WebMock
 
   class RequestRegistry
+    # The global registry, used when no TestScope is active.
     include Singleton
+
+    # When a TestScope is active, request counts are recorded in that scope's
+    # registry; otherwise they go to the global one. Assertions made inside a
+    # scope therefore only see the requests made by the same test group.
+    def self.instance
+      scope = TestScope.current
+      scope ? scope.request_registry : super
+    end
+
+    # Fresh, non-global registry used to back an isolated TestScope.
+    def self.build
+      send(:new)
+    end
 
     attr_accessor :requested_signatures
 

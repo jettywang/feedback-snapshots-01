@@ -3,7 +3,22 @@
 module WebMock
 
   class StubRegistry
+    # The global registry, used when no TestScope is active.
     include Singleton
+
+    # When a TestScope is active, every call to .instance resolves to that
+    # scope's registry; otherwise it resolves to the global one. This keeps
+    # stub matching and response rotation inside the active test group while
+    # leaving existing global usage untouched.
+    def self.instance
+      scope = TestScope.current
+      scope ? scope.stub_registry : super
+    end
+
+    # Fresh, non-global registry used to back an isolated TestScope.
+    def self.build
+      send(:new)
+    end
 
     attr_accessor :request_stubs
 
@@ -70,10 +85,19 @@ module WebMock
     private
 
     def request_stub_for(request_signature)
-      (global_stubs[:before_local_stubs] + request_stubs + global_stubs[:after_local_stubs])
+      (global_stubs[:before_local_stubs] +
+        request_stubs +
+        inherited_request_stubs +
+        global_stubs[:after_local_stubs])
         .detect { |registered_request_stub|
           registered_request_stub.request_pattern.matches?(request_signature)
         }
+    end
+
+    # Stubs explicitly shared by enclosing TestScopes. Empty outside a scope.
+    def inherited_request_stubs
+      scope = TestScope.current
+      scope ? scope.inherited_stubs : []
     end
 
     def evaluate_response_for_request(response, request_signature)

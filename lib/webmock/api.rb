@@ -11,6 +11,15 @@ module WebMock
 
     alias_method :stub_http_request, :stub_request
 
+    # Registers a stub and shares it with every nested TestScope. Outside a
+    # scope it behaves exactly like #stub_request.
+    def stub_shared_request(method, uri)
+      stub = WebMock::StubRegistry.instance.
+        register_request_stub(WebMock::RequestStub.new(method, uri))
+      scope = WebMock::TestScope.current
+      scope ? scope.share(stub) : stub
+    end
+
     def a_request(method, uri)
       WebMock::RequestPattern.new(method, uri)
     end
