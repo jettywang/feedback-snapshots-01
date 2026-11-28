@@ -414,6 +414,27 @@ class AlreadyListened(Exception):
     """
 
 
+class ListenerHandoverRejected(Exception):
+    """
+    A listener handover was refused by the configured admission policy.
+
+    @ivar reason: A human-readable explanation of why the handover was
+        refused.
+
+    @ivar scope: The binding scope that was evaluated when the handover was
+        refused, or L{None} if it could not be determined.
+
+    @ivar current: C{True} if the previously approved listener is being kept
+        in service as a result of this refusal.
+    """
+
+    def __init__(self, reason: str, scope: object = None, current: bool = False):
+        Exception.__init__(self, reason)
+        self.reason = reason
+        self.scope = scope
+        self.current = current
+
+
 class InvalidAddressError(ValueError):
     """
     An invalid address was specified (i.e. neither IPv4 or IPv6, or expected
@@ -474,5 +495,6 @@ __all__ = [
     "ConnectingCancelledError",
     "UnsupportedAddressFamily",
     "UnsupportedSocketType",
+    "ListenerHandoverRejected",
     "InvalidAddressError",
 ]

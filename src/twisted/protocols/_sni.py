@@ -20,6 +20,7 @@ from twisted.internet.interfaces import (
     IProtocolFactory,
     IReactorTime,
     IStreamServerEndpoint,
+    ITransparentServerEndpoint,
 )
 from twisted.internet.ssl import (
     DN,
@@ -113,7 +114,7 @@ class SNIConnectionCreator:
         return Connection(self.defaultContext)
 
 
-@implementer(IStreamServerEndpoint)
+@implementer(IStreamServerEndpoint, ITransparentServerEndpoint)
 class TLSServerEndpoint:
     """
     A wrapper L{IStreamServerEndpoint} that can run TLS over an arbitrary other
@@ -137,6 +138,13 @@ class TLSServerEndpoint:
         self.endpoint = endpoint
         self.connectionCreator = connectionCreator
         self.clock = clock
+
+    @property
+    def wrappedEndpoint(self) -> IStreamServerEndpoint:
+        """
+        The endpoint which performs the actual bind.
+        """
+        return self.endpoint
 
     def listen(self, factory: IProtocolFactory) -> Deferred[IListeningPort]:
         """

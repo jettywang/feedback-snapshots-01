@@ -18,7 +18,8 @@ import os
 import re
 import socket
 import warnings
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
+from dataclasses import dataclass
 from typing import Any, ClassVar, Protocol as TypingProtocol, TypeVar
 from unicodedata import normalize
 
@@ -41,6 +42,7 @@ from twisted.internet.interfaces import (
     IAddress,
     IHostnameResolver,
     IHostResolution,
+    IListeningPort,
     IOpenSSLClientConnectionCreator,
     IOpenSSLServerConnectionCreator,
     IProtocol,
@@ -119,6 +121,15 @@ __all__ = [
     "connectProtocol",
     "wrapServerTLS",
     "wrapClientTLS",
+    "ListenerAdmission",
+    "ListenerAdmissionDecision",
+    "ListenerEntry",
+    "ListenerHandover",
+    "ListenerHandoverPlan",
+    "ListenerHandoverReceipt",
+    "ListenerConfigSwitch",
+    "ListenerScope",
+    "listenerScope",
 ]
 
 
@@ -559,12 +570,28 @@ class _TCPServerEndpoint:
         Implement L{IStreamServerEndpoint.listen} to listen on a TCP
         socket
         """
+        method, args, kwargs = self._listenEntry(protocolFactory)
         return defer.execute(
-            self._reactor.listenTCP,
-            self._port,
-            protocolFactory,
-            backlog=self._backlog,
-            interface=self._interface,
+            getattr(self._reactor, method),
+            *args,
+            **kwargs,
+        )
+
+    def _listenEntry(
+        self, protocolFactory: IProtocolFactory
+    ) -> tuple[str, tuple[object, ...], dict[str, object]]:
+        """
+        Describe the reactor entry point that L{listen} will use.
+
+        This is shared between the real call to L{listen} and the audit
+        receipts produced by L{ListenerHandover}, so a receipt can name the
+        entry point that really was invoked rather than one that was inferred
+        after the fact.
+        """
+        return (
+            "listenTCP",
+            (self._port, protocolFactory),
+            {"backlog": self._backlog, "interface": self._interface},
         )
 
 
@@ -1246,13 +1273,29 @@ class SSL4ServerEndpoint:
         Implement L{IStreamServerEndpoint.listen} to listen for SSL on a
         TCP socket.
         """
+        method, args, kwargs = self._listenEntry(protocolFactory)
         return defer.execute(
-            self._reactor.listenSSL,
-            self._port,
-            protocolFactory,
-            contextFactory=self._sslContextFactory,
-            backlog=self._backlog,
-            interface=self._interface,
+            getattr(self._reactor, method),
+            *args,
+            **kwargs,
+        )
+
+    def _listenEntry(
+        self, protocolFactory: IProtocolFactory
+    ) -> tuple[str, tuple[object, ...], dict[str, object]]:
+        """
+        Describe the reactor entry point that L{listen} will use.
+
+        @see: L{TCP4ServerEndpoint._listenEntry}
+        """
+        return (
+            "listenSSL",
+            (self._port, protocolFactory),
+            {
+                "contextFactory": self._sslContextFactory,
+                "backlog": self._backlog,
+                "interface": self._interface,
+            },
         )
 
 
@@ -1338,13 +1381,29 @@ class UNIXServerEndpoint:
         """
         Implement L{IStreamServerEndpoint.listen} to listen on a UNIX socket.
         """
+        method, args, kwargs = self._listenEntry(protocolFactory)
         return defer.execute(
-            self._reactor.listenUNIX,
-            self._address,
-            protocolFactory,
-            backlog=self._backlog,
-            mode=self._mode,
-            wantPID=self._wantPID,
+            getattr(self._reactor, method),
+            *args,
+            **kwargs,
+        )
+
+    def _listenEntry(
+        self, protocolFactory: IProtocolFactory
+    ) -> tuple[str, tuple[object, ...], dict[str, object]]:
+        """
+        Describe the reactor entry point that L{listen} will use.
+
+        @see: L{TCP4ServerEndpoint._listenEntry}
+        """
+        return (
+            "listenUNIX",
+            (self._address, protocolFactory),
+            {
+                "backlog": self._backlog,
+                "mode": self._mode,
+                "wantPID": self._wantPID,
+            },
         )
 
 
@@ -2255,6 +2314,895 @@ def clientFromString(reactor, description):
     return _endpointClientFactories[name](reactor, **kwargs)
 
 
+class ListenerScope:
+    """
+    A description of the local network binding that a server endpoint will
+    request from the reactor.
+
+    Instances of this class are hashable and comparable by value, so they can
+    be used to decide whether a handover moves a listener to a different
+    address, and to keep a record of what was approved.
+
+    @ivar kind: The transport family: C{"TCP"}, C{"UNIX"}, or C{"ADOPTED"}.
+    @ivar address: The IP address (or UNIX socket path) to be bound, as a
+        string.  C{""} means all local addresses for the address family.
+    @ivar port: The port number to be bound, for TCP scopes.
+    @ivar family: The address family, either C{socket.AF_INET} or
+        C{socket.AF_INET6}.
+    @ivar roles: A tuple of symbolic roles, such as C{"internal"} or
+        C{"public"}, supplied by the caller to explain what the binding is
+        for.  Roles are not derived from the address; they only document the
+        caller's intent.
+    @ivar certainty: C{"exact"} when the binding can be determined without
+        side effects; C{"unknown"} when a custom endpoint hides its binding.
+    @ivar reason: When C{certainty} is C{"unknown"}, an explanation of why the
+        binding could not be determined.
+    """
+
+    def __init__(
+        self,
+        kind: str,
+        address: str | None,
+        port: int | None,
+        family: int | None = None,
+        roles: Iterable[str] = (),
+        certainty: str = "exact",
+        reason: str | None = None,
+    ) -> None:
+        self.kind = kind
+        self.address = address
+        self.port = port
+        self.family = family
+        self.roles = tuple(roles)
+        self.certainty = certainty
+        self.reason = reason
+
+    @property
+    def binding(self) -> tuple[object, ...]:
+        """
+        The binding identity, excluding roles.
+
+        Two scopes with the same binding identity would occupy the same local
+        address, so moving between them requires stopping the old listener
+        before the new one binds.
+        """
+        return (self.kind, self.address, self.port, self.family)
+
+    def _key(self) -> tuple[object, ...]:
+        return (
+            self.kind,
+            self.address,
+            self.port,
+            self.familyOrInferred,
+            self.roles,
+            self.certainty,
+        )
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, ListenerScope):
+            return NotImplemented
+        return self._key() == other._key()
+
+    def __hash__(self) -> int:
+        return hash(self._key())
+
+    def __repr__(self) -> str:
+        if self.kind == "UNIX":
+            detail = f"{self.address!r}"
+        elif self.kind == "TCP":
+            detail = f"{self.address or '*'}:{self.port}"
+        else:
+            detail = f"{self.address!r}"
+        return (
+            f"ListenerScope({self.kind}, {detail}, "
+            f"roles={self.roles!r}, certainty={self.certainty!r})"
+        )
+
+    @property
+    def familyOrInferred(self) -> int | None:
+        """
+        The address family, inferred for TCP scopes created without one.
+        """
+        if self.family is not None:
+            return self.family
+        if self.kind == "TCP" and self.address and isIPv6Address(self.address):
+            return socket.AF_INET6
+        if self.kind == "TCP":
+            return socket.AF_INET
+        return None
+
+
+def _unknownScope(reason: str) -> ListenerScope:
+    return ListenerScope("UNKNOWN", None, None, certainty="unknown", reason=reason)
+
+
+def _unwrapEndpoint(endpoint: IStreamServerEndpoint) -> IStreamServerEndpoint:
+    """
+    Follow transparent wrappers to the endpoint that performs the bind.
+    """
+    seen = 0
+    while seen < 32:
+        wrapper = interfaces.ITransparentServerEndpoint(endpoint, None)
+        if wrapper is None:
+            return endpoint
+        endpoint = wrapper.wrappedEndpoint
+        seen += 1
+    return endpoint
+
+
+def _entryForEndpoint(
+    endpoint: IStreamServerEndpoint,
+    factory: IProtocolFactory,
+    name: str,
+    scope: ListenerScope,
+) -> ListenerEntry:
+    """
+    Describe the reactor entry point that C{endpoint} will actually use.
+
+    Wrappers are skipped; the innermost endpoint describes the real bind.
+    """
+    inner = _unwrapEndpoint(endpoint)
+    entry = getattr(inner, "_listenEntry", None)
+    if entry is None:
+        return ListenerEntry(name, scope, "listen", (factory,), {})
+    method, args, kwargs = entry(factory)
+    return ListenerEntry(name, scope, method, tuple(args), dict(kwargs))
+
+
+def listenerScope(
+    endpoint: IStreamServerEndpoint,
+    *,
+    roles: Iterable[str] = (),
+    depth: int = 0,
+) -> ListenerScope:
+    """
+    Determine the local binding that C{endpoint} will request.
+
+    This inspects the endpoint configuration only; it never calls C{listen}
+    and therefore never binds a socket.  Transparent wrappers such as TLS,
+    PROXY protocol, SNI, and generic protocol wrappers are followed to the
+    endpoint that performs the actual bind.
+
+    @param endpoint: The server endpoint to inspect.
+
+    @param roles: Optional symbolic roles to attach to the resulting scope.
+
+    @param depth: The current recursion depth; used to detect cycles.
+
+    @return: A L{ListenerScope} describing the binding.  When the binding
+        cannot be determined without side effects (for example, a third party
+        endpoint or a systemd-inherited descriptor), a scope with
+        C{certainty} set to C{"unknown"} is returned rather than guessing.
+    """
+    if depth > 32:
+        return _unknownScope("endpoint wrapper chain is too deep")
+    if isinstance(endpoint, TCP4ServerEndpoint):
+        return ListenerScope(
+            "TCP", endpoint._interface, endpoint._port, socket.AF_INET, roles
+        )
+    if isinstance(endpoint, TCP6ServerEndpoint):
+        return ListenerScope(
+            "TCP", endpoint._interface, endpoint._port, socket.AF_INET6, roles
+        )
+    if isinstance(endpoint, SSL4ServerEndpoint):
+        return ListenerScope(
+            "TCP", endpoint._interface, endpoint._port, socket.AF_INET, roles
+        )
+    if isinstance(endpoint, UNIXServerEndpoint):
+        return ListenerScope("UNIX", endpoint._address, None, None, roles)
+    if isinstance(endpoint, AdoptedStreamServerEndpoint):
+        return ListenerScope(
+            "ADOPTED", None, None, endpoint.addressFamily, roles, "unknown"
+        )
+    wrapper = interfaces.ITransparentServerEndpoint(endpoint, None)
+    if wrapper is not None:
+        return listenerScope(wrapper.wrappedEndpoint, roles=roles, depth=depth + 1)
+    return _unknownScope("endpoint {!r} does not describe its binding".format(endpoint))
+
+
+class ListenerAdmissionDecision:
+    """
+    Constants describing the outcome of an admission check.
+
+    @cvar ACCEPT: The handover may proceed.
+    @cvar REJECT: The handover must not proceed; any current listener must be
+        retained.
+    @cvar UNKNOWN: The binding could not be determined; the configured
+        C{unknown} policy applies.
+    """
+
+    ACCEPT = NamedConstant()
+    REJECT = NamedConstant()
+    UNKNOWN = NamedConstant()
+
+
+class ListenerAdmission:
+    """
+    A callable admission policy for listener handovers.
+
+    An admission object is given the scope of the proposed binding and a
+    mapping of contextual facts.  It returns one of the constants in
+    L{ListenerAdmissionDecision}; it may also return a message as a second
+    element of a tuple, which is recorded verbatim in the receipt.
+
+    Subclasses may override L{check}.  The default implementation accepts any
+    exact scope whose roles are included in C{allowedRoles}, and rejects any
+    scope which carries a role outside that set.
+
+    @ivar allowedRoles: The approved roles, or L{None} to accept any role.
+
+    @ivar allowedScopes: The approved binding scopes (including their roles),
+        or L{None} to accept any exact scope that satisfies C{allowedRoles}.
+
+    @ivar unknown: The decision to apply when the binding cannot be
+        determined.  The default is L{ListenerAdmissionDecision.REJECT} so an
+        unprovable handover never moves a listener.
+    """
+
+    def __init__(
+        self,
+        allowedRoles: Iterable[str] | None = None,
+        allowedScopes: Iterable[ListenerScope] | None = None,
+        unknown: NamedConstant = ListenerAdmissionDecision.REJECT,
+    ) -> None:
+        self.allowedRoles = None if allowedRoles is None else frozenset(allowedRoles)
+        self.allowedScopes = None if allowedScopes is None else frozenset(allowedScopes)
+        self.unknown = unknown
+
+    def check(
+        self, scope: ListenerScope, context: Mapping[str, object]
+    ) -> NamedConstant | tuple[NamedConstant, str]:
+        """
+        Decide whether C{scope} may be bound.
+
+        @param scope: The binding that the handover proposes.
+
+        @param context: Additional facts from the handover; for example,
+            C{"name"} is the listener name and C{"current"} is the scope of
+            the listener already active under that name, if any.
+
+        @return: A L{ListenerAdmissionDecision} constant, optionally paired
+            with an explanatory message.
+        """
+        if scope.certainty != "exact":
+            return self.unknown
+        if self.allowedScopes is not None and scope not in self.allowedScopes:
+            return (
+                ListenerAdmissionDecision.REJECT,
+                "binding {} is not approved".format(scope),
+            )
+        if self.allowedRoles is not None:
+            disallowed = set(scope.roles) - self.allowedRoles
+            if disallowed:
+                return (
+                    ListenerAdmissionDecision.REJECT,
+                    "role(s) not approved: {}".format(", ".join(sorted(disallowed))),
+                )
+        return ListenerAdmissionDecision.ACCEPT
+
+
+@dataclass(frozen=True)
+class ListenerEntry:
+    """
+    A record of one reactor entry point invoked to create a listener.
+
+    @ivar name: The logical listener name supplied to the handover.
+    @ivar scope: The binding that was approved for this entry.
+    @ivar method: The reactor method invoked, such as C{"listenTCP"}.
+    @ivar args: Positional arguments passed to the reactor method.
+    @ivar kwargs: Keyword arguments passed to the reactor method.
+    """
+
+    name: str
+    scope: ListenerScope
+    method: str
+    args: tuple[object, ...]
+    kwargs: Mapping[str, object]
+
+
+@dataclass(frozen=True)
+class ListenerHandoverReceipt:
+    """
+    The recorded outcome of one attempted handover.
+
+    @ivar name: The logical listener name.
+    @ivar proposed: The binding scope that was checked.
+    @ivar decision: The admission decision constant.
+    @ivar message: The explanation supplied by the policy, if any.
+    @ivar entry: The reactor entry point actually invoked, or L{None} if the
+        handover was refused or failed.
+    @ivar retained: C{True} if a previously approved listener was kept in
+        service because the handover was refused.
+    @ivar failure: The failure that occurred while invoking the reactor, if
+        any; when set, C{entry} is L{None}.
+    """
+
+    name: str
+    proposed: ListenerScope
+    decision: NamedConstant
+    message: str | None
+    entry: ListenerEntry | None
+    retained: bool
+    failure: Failure | None = None
+
+
+@dataclass
+class _HandoverState:
+    port: IListeningPort | None = None
+    scope: ListenerScope | None = None
+
+
+@implementer(IListeningPort)
+class _HandoverPort:
+    """
+    A listening port that remembers whether it is still accepting new
+    connections.
+
+    The underlying port is not stopped when the listener is paused; accepted
+    connections therefore remain usable.  New connections are refused at the
+    factory boundary for as long as the listener is paused.
+    """
+
+    def __init__(self, port: IListeningPort, factory: IProtocolFactory) -> None:
+        self._port = port
+        self._factory = factory
+        self.accepting = True
+
+    def startListening(self) -> None:
+        self._port.startListening()
+
+    def stopListening(self) -> Deferred[None] | None:
+        self.accepting = False
+        return self._port.stopListening()
+
+    def getHost(self) -> IAddress:
+        return self._port.getHost()
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._port, name)
+
+
+@implementer(IProtocolFactory)
+class _GatedFactory:
+    """
+    Wrap a protocol factory and suppress new connections when the associated
+    handover pauses its listener.
+
+    Existing connections are unaffected: only the creation of new protocols
+    is gated.
+    """
+
+    def __init__(
+        self,
+        wrappedFactory: IProtocolFactory,
+        handover: ListenerHandover,
+        name: str,
+    ) -> None:
+        self._wrappedFactory = wrappedFactory
+        self._handover = handover
+        self._name = name
+
+    def buildProtocol(self, addr: IAddress) -> IProtocol | None:
+        if not self._handover._isAccepting(self._name):
+            return None
+        return self._handover._buildProtocol(self._name, self._wrappedFactory, addr)
+
+    def doStart(self) -> None:
+        self._wrappedFactory.doStart()
+
+    def doStop(self) -> None:
+        self._wrappedFactory.doStop()
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._wrappedFactory, name)
+
+
+class ListenerHandoverPlan:
+    """
+    A proposed handover of one named listener.
+
+    A plan binds an endpoint to a logical listener name at construction time,
+    but performs no admission check and no binding until it is passed to
+    L{ListenerHandover.handover} (or L{ListenerHandover.initial}).
+
+    @ivar endpoint: The endpoint that would be used to listen.
+    @ivar name: The logical listener name that will be handed over.
+    @ivar scope: The binding scope as inspected by L{listenerScope}; this is
+        the scope that admission will evaluate.
+    @ivar verified: C{True} if the scope is exact and can be admitted without
+        manual confirmation.
+    """
+
+    def __init__(
+        self,
+        name: str,
+        endpoint: IStreamServerEndpoint,
+        *,
+        roles: Iterable[str] = (),
+    ) -> None:
+        self.name = name
+        self.endpoint = endpoint
+        self.scope = listenerScope(endpoint, roles=roles)
+        self.verified = self.scope.certainty == "exact"
+
+
+class ListenerHandover:
+    """
+    Coordinate policy-checked handovers between server endpoints.
+
+    A handover is only attempted after the proposed binding has been admitted
+    by the configured L{ListenerAdmission}.  When it is refused, the previous
+    listener is left running, including all of its accepted connections.
+    When a handover is approved, the new listener is started before the old
+    one is stopped; if the new one cannot be started, the old one is retained
+    and the failure is reported.
+
+    The controller keeps a record of each admission decision, the reactor
+    entry point that was actually invoked, and the listeners that remain
+    available for new connections.
+
+    @ivar admission: The policy used for all handovers.
+
+    @ivar entries: All reactor entry points that have been invoked, in order.
+
+    @ivar receipts: One receipt per attempted handover, in order.
+    """
+
+    def __init__(self, admission: ListenerAdmission | None = None) -> None:
+        self.admission = admission if admission is not None else ListenerAdmission()
+        self.entries: list[ListenerEntry] = []
+        self.receipts: list[ListenerHandoverReceipt] = []
+        self._states: dict[str, _HandoverState] = {}
+        self._ports: dict[str, _HandoverPort] = {}
+        self._plans: dict[str, ListenerHandoverPlan] = {}
+        self._connections: dict[str, int] = {}
+
+    def plan(
+        self,
+        name: str,
+        endpoint: IStreamServerEndpoint,
+        *,
+        roles: Iterable[str] = (),
+    ) -> ListenerHandoverPlan:
+        """
+        Describe a handover without performing it.
+
+        @param name: The logical listener name.
+        @param endpoint: The endpoint that would be used.
+        @param roles: Symbolic roles to attach to the proposed binding.
+        """
+        return ListenerHandoverPlan(name, endpoint, roles=roles)
+
+    def initial(
+        self,
+        name: str,
+        endpoint: IStreamServerEndpoint,
+        factory: IProtocolFactory,
+        *,
+        roles: Iterable[str] = (),
+    ) -> Deferred[IListeningPort]:
+        """
+        Admit and start the first listener for C{name}.
+
+        This has the same semantics as moving from no listener to a listener:
+        if admission is refused, nothing is bound and the returned Deferred
+        errbacks with L{ListenerHandoverRejected}.
+        """
+        return self.handover(self.plan(name, endpoint, roles=roles), factory)
+
+    def handover(
+        self,
+        plan: ListenerHandoverPlan,
+        factory: IProtocolFactory,
+        *,
+        onHandover: Callable[[], None] | None = None,
+    ) -> Deferred[IListeningPort]:
+        """
+        Attempt the handover described by C{plan}.
+
+        If the proposed binding is the same address as the current listener,
+        the old listener is stopped after admission but before the new one is
+        started; if the new one cannot be started, the old binding is restored
+        before the failure is reported.  Accepted connections on the old
+        listener are never closed by this method, so they remain usable.
+
+        @param plan: The proposed handover.
+
+        @param factory: The protocol factory for the new listener.  It is
+            wrapped so that new connections can be paused without closing
+            existing ones.
+
+        @param onHandover: An optional callable invoked after the new
+            listener is accepting and before any remaining old listener is
+            stopped; tests and operators can use this hook to observe the
+            overlap.
+
+        @return: A Deferred firing with the new L{IListeningPort}; it
+            errbacks with L{ListenerHandoverRejected} when the handover was
+            refused, with the original failure when the reactor failed, or
+            with L{CancelledError} when it was cancelled before the new
+            listener was started.
+        """
+        state = self._states.setdefault(plan.name, _HandoverState())
+        previousPlan = self._plans.get(plan.name)
+        self._plans[plan.name] = plan
+        proposed = plan.scope
+        decision, message = self._decide(plan.name, proposed, state)
+        hadListener = state.port is not None
+        if decision is not ListenerAdmissionDecision.ACCEPT:
+            self.receipts.append(
+                ListenerHandoverReceipt(
+                    plan.name, proposed, decision, message, None, hadListener
+                )
+            )
+            return defer.fail(
+                error.ListenerHandoverRejected(
+                    message or "handover refused", proposed, hadListener
+                )
+            )
+
+        sameBinding = (
+            state.scope is not None
+            and state.scope.binding == proposed.binding
+            and proposed.kind != "UNKNOWN"
+        )
+        oldPort = state.port
+        stoppedBefore: Deferred[None] | None = None
+        if sameBinding and oldPort is not None:
+            # The old socket must be released before the new one can bind the
+            # same address.  Accepted connections keep their transports and
+            # are unaffected by stopListening.
+            oldPort.accepting = False
+            self._ports.pop(plan.name, None)
+            stoppedBefore = oldPort.stopListening()
+            if stoppedBefore is not None:
+                stoppedBefore.addErrback(lambda ignored: None)
+            state.port = None
+            state.scope = None
+
+        gate = _GatedFactory(factory, self, plan.name)
+        listening = defer.maybeDeferred(plan.endpoint.listen, gate)
+        result: Deferred[IListeningPort] = Deferred(
+            canceller=lambda deferred: listening.cancel()
+        )
+
+        def restoreOld() -> None:
+            # Same-binding start failed after the old listener was closed.
+            # Put the old binding back so the service remains reachable.
+            if not sameBinding or oldPort is None or previousPlan is None:
+                return
+            state.port = oldPort
+            state.scope = previousPlan.scope
+            self._ports[plan.name] = oldPort
+            self._plans[plan.name] = previousPlan
+            oldPort.accepting = True
+
+            def restart() -> None:
+                defer.maybeDeferred(oldPort.startListening).addErrback(
+                    lambda ignored: None
+                )
+
+            if stoppedBefore is not None:
+                stoppedBefore.addBoth(lambda ignored: restart())
+            else:
+                restart()
+
+        def accepted(port: IListeningPort) -> None:
+            if result.called:
+                # The handover was cancelled while the listener was starting.
+                # Do not expose this one.
+                stopped = port.stopListening()
+                if stopped is not None:
+                    stopped.addErrback(lambda ignored: None)
+                restoreOld()
+                return
+            try:
+                gated = self._adopt(
+                    plan, factory, gate, port, decision, message, False
+                )
+            except BaseException:
+                # Do not leave a listener running that the receipt cannot
+                # account for.
+                port.stopListening()
+                raise
+
+            if onHandover is not None:
+                onHandover()
+            if not result.called:
+                result.callback(gated)
+
+        def refused(f: Failure) -> None:
+            restoreOld()
+            self.receipts.append(
+                ListenerHandoverReceipt(
+                    plan.name,
+                    proposed,
+                    decision,
+                    message,
+                    None,
+                    hadListener or sameBinding,
+                    failure=f,
+                )
+            )
+            if not result.called:
+                result.errback(f)
+
+        listening.addCallbacks(accepted, refused)
+        return result
+
+    def _adopt(
+        self,
+        plan: ListenerHandoverPlan,
+        factory: IProtocolFactory,
+        gate: _GatedFactory,
+        port: IListeningPort,
+        decision: NamedConstant,
+        message: str | None,
+        retained: bool,
+    ) -> _HandoverPort:
+        """
+        Take responsibility for a freshly started port: record it and retire
+        the listener it replaces.
+        """
+        state = self._states[plan.name]
+        gated = _HandoverPort(port, factory)
+        entry = self._describeEntry(plan.name, plan.scope, plan.endpoint, gate)
+        self.entries.append(entry)
+        self.receipts.append(
+            ListenerHandoverReceipt(
+                plan.name, plan.scope, decision, message, entry, retained
+            )
+        )
+        self._ports[plan.name] = gated
+        oldPort = state.port
+        state.port = gated
+        state.scope = plan.scope
+        if oldPort is not None:
+            oldPort.accepting = False
+            stopped = oldPort.stopListening()
+            if stopped is not None:
+                stopped.addErrback(lambda ignored: None)
+        return gated
+
+    def _decide(
+        self,
+        name: str,
+        scope: ListenerScope,
+        state: _HandoverState,
+    ) -> tuple[NamedConstant, str | None]:
+        context: dict[str, object] = {
+            "name": name,
+            "current": state.scope,
+            "initial": state.port is None,
+        }
+        outcome = self.admission.check(scope, context)
+        if isinstance(outcome, tuple):
+            decision, message = outcome
+        else:
+            decision, message = outcome, None
+        return decision, message
+
+    def _describeEntry(
+        self,
+        name: str,
+        scope: ListenerScope,
+        endpoint: IStreamServerEndpoint,
+        factory: IProtocolFactory,
+    ) -> ListenerEntry:
+        return _entryForEndpoint(endpoint, factory, name, scope)
+
+    def _isAccepting(self, name: str) -> bool:
+        port = self._ports.get(name)
+        return port is None or port.accepting
+
+    def _buildProtocol(
+        self, name: str, factory: IProtocolFactory, addr: IAddress
+    ) -> IProtocol | None:
+        protocol = factory.buildProtocol(addr)
+        if protocol is not None:
+            self._connections[name] = self._connections.get(name, 0) + 1
+            originalLost = protocol.connectionLost
+
+            def connectionLost(reason: Failure) -> None:
+                self._connections[name] = max(0, self._connections.get(name, 0) - 1)
+                originalLost(reason)
+
+            protocol.connectionLost = connectionLost  # type: ignore[method-assign]
+        return protocol
+
+    def pause(self, name: str) -> None:
+        """
+        Stop accepting new connections for C{name} without disturbing existing
+        ones or closing the underlying listening port.
+
+        @raise KeyError: If C{name} has no active listener.
+        """
+        self._ports[name].accepting = False
+
+    def resume(self, name: str) -> None:
+        """
+        Resume accepting new connections for C{name}.
+
+        @raise KeyError: If C{name} has no active listener.
+        """
+        self._ports[name].accepting = True
+
+    def gate(self, name: str) -> _GatedFactory:
+        """
+        @return: A factory that applies this controller's admission rules.
+
+        It is equivalent to the factory handed to the reactor, so callers can
+        use it to observe or drive connection admission while the controller
+        manages pause and resume.
+
+        @raise KeyError: If C{name} has no active listener.
+        """
+        port = self._ports[name]
+        return _GatedFactory(port._factory, self, name)
+
+    def accepting(self, name: str) -> bool:
+        """
+        @return: C{True} if C{name} is currently accepting new connections;
+            C{False} otherwise.
+        """
+        port = self._ports.get(name)
+        return port is not None and port.accepting
+
+    def connections(self, name: str) -> int:
+        """
+        @return: The number of accepted connections for C{name} that have not
+            yet been lost.  Connections accepted by a superseded listener
+            remain counted, because they remain usable.
+        """
+        return self._connections.get(name, 0)
+
+    def entryPoint(self, name: str) -> ListenerEntry | None:
+        """
+        @return: The reactor entry point most recently invoked for C{name},
+            or L{None} if it has never been invoked.
+        """
+        for entry in reversed(self.entries):
+            if entry.name == name:
+                return entry
+        return None
+
+    def receipt(self, name: str) -> ListenerHandoverReceipt | None:
+        """
+        @return: The most recent handover receipt for C{name}, if any.
+        """
+        for receipt in reversed(self.receipts):
+            if receipt.name == name:
+                return receipt
+        return None
+
+    def stop(self, name: str) -> Deferred[None] | None:
+        """
+        Stop the active listener for C{name}, if any.
+
+        @return: The result of L{IListeningPort.stopListening}, or L{None} if
+            no listener was active.
+        """
+        state = self._states.get(name)
+        if state is None or state.port is None:
+            return None
+        port = state.port
+        state.port = None
+        state.scope = None
+        return port.stopListening()
+
+
+class ListenerConfigSwitch:
+    """
+    Read listener descriptions from a mutable configuration and hand the
+    approved ones to a L{ListenerHandover}.
+
+    A configuration is a mapping of logical listener name to a strports
+    description (as accepted by L{serverFromString}) and optional roles.  The
+    description is parsed without listening, the real binding is extracted
+    through wrappers, and only an approved binding results in a reactor call.
+
+    @ivar handover: The controller that owns admission and listener state.
+
+    @ivar descriptions: The current description for each listener name.
+    """
+
+    _lastApplied: dict[str, tuple[str, tuple[str, ...]]]
+
+    def __init__(
+        self,
+        handover: ListenerHandover,
+        descriptions: Mapping[str, str] | None = None,
+    ) -> None:
+        self.handover = handover
+        self.descriptions: dict[str, str] = dict(descriptions or {})
+        self._lastApplied = {}
+
+    def apply(
+        self,
+        reactor: interfaces.IReactorTCP,
+        factory: IProtocolFactory,
+        roles: Mapping[str, Iterable[str]] | None = None,
+    ) -> Deferred[dict[str, IListeningPort | Failure]]:
+        """
+        Apply the current descriptions.
+
+        Each description is parsed and admitted independently.  A listener
+        with no description is stopped; a refused or failed description
+        leaves the running listener in place.
+
+        @param reactor: The reactor used to construct endpoints; it is not
+            called unless a binding is admitted.
+
+        @param factory: The protocol factory for every listener.
+
+        @param roles: Optional roles per listener name.
+
+        @return: A Deferred firing with a mapping of listener name to either
+            the new L{IListeningPort} or the L{Failure} for that name.  The
+            Deferred never fails as a whole, so one refused listener does not
+            hide the outcome of another.
+        """
+        roles = roles or {}
+        outcomes: dict[str, IListeningPort | Failure] = {}
+        pending: list[Deferred[None]] = []
+
+        for name in list(self.descriptions):
+            state = self.handover._states.get(name)
+            applied = (self.descriptions[name], tuple(roles.get(name, ())))
+            if (
+                state is not None
+                and state.port is not None
+                and self._lastApplied.get(name) == applied
+            ):
+                # Unchanged and already listening; do not re-listen.
+                outcomes[name] = self.handover._ports[name]
+                continue
+            description = self.descriptions[name]
+            try:
+                endpoint = serverFromString(reactor, description)
+            except BaseException:
+                outcomes[name] = Failure()
+                continue
+            plan = self.handover.plan(name, endpoint, roles=roles.get(name, ()))
+            pending.append(
+                self.handover.handover(plan, factory).addCallbacks(
+                    lambda port, name=name: outcomes.__setitem__(name, port),
+                    lambda f, name=name: outcomes.__setitem__(name, f),
+                )
+            )
+
+        combined: Deferred[dict[str, IListeningPort | Failure]] = Deferred()
+
+        def done(ignored: object) -> None:
+            for name in list(self.handover._states):
+                if name not in self.descriptions:
+                    self.handover.stop(name)
+            combined.callback(outcomes)
+
+        def record(ignored: object) -> None:
+            self._lastApplied = {
+                name: (description, tuple(roles.get(name, ())))
+                for name, description in self.descriptions.items()
+                if name in outcomes
+                and interfaces.IListeningPort.providedBy(outcomes[name])
+            }
+            done(ignored)
+
+        if pending:
+            waiting = defer.DeferredList(pending, consumeErrors=True)
+        else:
+            waiting = defer.succeed(None)
+        waiting.addBoth(lambda ignored: record(ignored))
+        return combined
+
+    def switchTo(self, name: str, description: str) -> None:
+        """
+        Replace the description for C{name}; the change takes effect on the
+        next call to L{apply}.
+        """
+        self.descriptions[name] = description
+
+
 def connectProtocol(endpoint, protocol):
     """
     Connect a protocol instance to an endpoint.
@@ -2301,10 +3249,14 @@ class _WrapperEndpoint:
         ).addCallback(lambda protocol: protocol.wrappedProtocol)
 
 
-@implementer(interfaces.IStreamServerEndpoint)
+@implementer(interfaces.IStreamServerEndpoint, interfaces.ITransparentServerEndpoint)
 class _WrapperServerEndpoint:
     """
     A server endpoint that wraps another server endpoint.
+
+    Since the wrapper does not change where the wrapped endpoint binds, it is
+    transparent for admission purposes: the wrapped endpoint is the one that
+    determines the binding scope.
     """
 
     def __init__(self, wrappedEndpoint, wrapperFactory):
@@ -2313,6 +3265,13 @@ class _WrapperServerEndpoint:
         """
         self._wrappedEndpoint = wrappedEndpoint
         self._wrapperFactory = wrapperFactory
+
+    @property
+    def wrappedEndpoint(self) -> IStreamServerEndpoint:
+        """
+        The endpoint which performs the actual bind.
+        """
+        return self._wrappedEndpoint
 
     def listen(self, protocolFactory):
         """

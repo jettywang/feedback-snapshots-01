@@ -49,12 +49,14 @@ from twisted.internet.endpoints import (
     _WrapperEndpoint,
     wrapClientTLS,
 )
+from twisted.internet.defer import CancelledError, Deferred
 from twisted.internet.error import ConnectingCancelledError, ConnectionLost
 from twisted.internet.interfaces import (
     IAddress,
     IConsumer,
     IHandshakeListener,
     IHostnameResolver,
+    IListeningPort,
     IProtocolFactory,
     IPushProducer,
     IReactorPluggableNameResolver,
@@ -3531,6 +3533,726 @@ class UNIXEndpointsTests(EndpointTestCaseMixin, unittest.TestCase):
             ),
             address,
         )
+
+
+@implementer(IListeningPort)
+class RecordingPort:
+    """
+    An L{IListeningPort} that records close actions performed through it.
+    """
+
+    def __init__(self, reactor, host):
+        self._reactor = reactor
+        self._host = host
+        self.stopped = 0
+
+    def startListening(self):
+        pass
+
+    def stopListening(self):
+        self.stopped += 1
+        self._reactor.closed.append(self)
+        return None
+
+    def getHost(self):
+        return self._host
+
+
+class RecordingReactor:
+    """
+    A reactor double that records only listen calls and close actions.
+
+    Each call to a C{listen*} method appends a L{RecordingPort} bound to the
+    requested address; closing a port appends that port to C{closed}.
+
+    @ivar listens: A list of C{(methodName, port, kwargs)} tuples, in call
+        order.
+
+    @ivar closed: The ports on which C{stopListening} was called.
+    """
+
+    def __init__(self, af=AF_INET):
+        self._af = af
+        self.listens = []
+        self.closed = []
+
+    def _record(self, method, port, interface, **kwargs):
+        if isIPv6Address(interface or ""):
+            host = IPv6Address("TCP", interface or "::", port)
+        else:
+            host = IPv4Address("TCP", interface or "0.0.0.0", port)
+        self.listens.append((method, port, dict(kwargs, interface=interface)))
+        return RecordingPort(self, host)
+
+    def listenTCP(self, port, factory, backlog=50, interface=""):
+        return self._record(
+            "listenTCP", port, interface, backlog=backlog, factory=factory
+        )
+
+    def listenSSL(self, port, factory, contextFactory, backlog=50, interface=""):
+        return self._record(
+            "listenSSL",
+            port,
+            interface,
+            backlog=backlog,
+            factory=factory,
+            contextFactory=contextFactory,
+        )
+
+
+class ListenerScopeTests(unittest.TestCase):
+    """
+    Tests for L{listenerScope} and the admission policy.
+    """
+
+    def test_tcp4(self):
+        """
+        A TCP4 endpoint's scope includes its address, port, family, and roles.
+        """
+        scope = endpoints.listenerScope(
+            endpoints.TCP4ServerEndpoint(None, 7000, interface="10.0.0.5"),
+            roles=["internal"],
+        )
+        self.assertEqual(scope.kind, "TCP")
+        self.assertEqual(scope.address, "10.0.0.5")
+        self.assertEqual(scope.port, 7000)
+        self.assertEqual(scope.family, AF_INET)
+        self.assertEqual(scope.roles, ("internal",))
+        self.assertEqual(scope.certainty, "exact")
+
+    def test_wrapperTransparent(self):
+        """
+        A generic protocol wrapper reports the binding of its wrapped
+        endpoint, not the wrapper itself.
+        """
+        wrapped = endpoints.TCP4ServerEndpoint(None, 8443, interface="::1")
+        wrapper = endpoints._WrapperServerEndpoint(wrapped, object())
+        self.assertEqual(
+            endpoints.listenerScope(wrapper),
+            endpoints.listenerScope(wrapped),
+        )
+
+    def test_nestedWrappers(self):
+        """
+        Nested transparent wrappers resolve to the same binding as the inner
+        endpoint.
+        """
+        inner = endpoints.UNIXServerEndpoint(None, "/var/run/example.sock")
+        wrapped = endpoints._WrapperServerEndpoint(
+            endpoints._WrapperServerEndpoint(inner, object()), object()
+        )
+        self.assertEqual(
+            endpoints.listenerScope(wrapped), endpoints.listenerScope(inner)
+        )
+
+    def test_unknownIsNotGuessed(self):
+        """
+        An endpoint that does not describe its binding produces an unknown
+        scope with a reason, rather than an exception or a guessed address.
+        """
+        scope = endpoints.listenerScope(object())
+        self.assertEqual(scope.certainty, "unknown")
+        self.assertIsNone(scope.address)
+        self.assertIn("does not describe", scope.reason)
+
+    def test_unknownRefusedByDefault(self):
+        """
+        The default admission policy refuses a handover whose binding cannot
+        be determined.
+        """
+        admission = endpoints.ListenerAdmission()
+        decision = admission.check(endpoints.listenerScope(object()), {})
+        self.assertIs(decision, endpoints.ListenerAdmissionDecision.REJECT)
+
+    def test_roleOutsideAllowlistRejected(self):
+        """
+        A scope carrying a role that was not approved is refused, with a
+        message naming the role.
+        """
+        admission = endpoints.ListenerAdmission(allowedRoles=["internal"])
+        scope = endpoints.listenerScope(
+            endpoints.TCP4ServerEndpoint(None, 7000, interface="0.0.0.0"),
+            roles=["internal", "public"],
+        )
+        decision, message = admission.check(scope, {})
+        self.assertIs(decision, endpoints.ListenerAdmissionDecision.REJECT)
+        self.assertIn("public", message)
+
+
+class ListenerHandoverTests(unittest.TestCase):
+    """
+    Acceptance tests for L{ListenerHandover} using the recording reactor
+    double.
+    """
+
+    def setUp(self):
+        self.reactor = RecordingReactor()
+        self.reactor.listens = []
+        self.reactor.closed = []
+        self.internal = endpoints.TCP4ServerEndpoint(
+            self.reactor, 7000, interface="10.0.0.5"
+        )
+        self.public = endpoints.TCP4ServerEndpoint(
+            self.reactor, 8080, interface="0.0.0.0"
+        )
+        self.factory = Factory.forProtocol(Protocol)
+
+    def _admission(self):
+        return endpoints.ListenerAdmission(
+            allowedScopes=[
+                endpoints.ListenerScope(
+                    "TCP", "10.0.0.5", 7000, AF_INET, ("internal",)
+                ),
+                endpoints.ListenerScope(
+                    "TCP", "10.0.0.9", 7000, AF_INET, ("internal",)
+                ),
+                endpoints.ListenerScope("TCP", "0.0.0.0", 8080, AF_INET, ("internal",)),
+            ]
+        )
+
+    def test_initialTwoListeners(self):
+        """
+        Two listeners can be admitted and bound independently; the recorded
+        entries name the reactor method and the approved scope.
+        """
+        handover = endpoints.ListenerHandover(self._admission())
+        internalPort = self.successResultOf(
+            handover.initial(
+                "internal", self.internal, self.factory, roles=["internal"]
+            )
+        )
+        publicPort = self.successResultOf(
+            handover.initial("public", self.public, self.factory, roles=["internal"])
+        )
+        self.assertIsNot(internalPort, publicPort)
+        self.assertEqual(
+            [name for name, _, _ in self.reactor.listens], ["listenTCP", "listenTCP"]
+        )
+        self.assertIs(handover.entryPoint("internal").method, "listenTCP")
+        self.assertEqual(
+            dict(handover.entryPoint("internal").kwargs)["interface"], "10.0.0.5"
+        )
+
+    def test_twoHandovers(self):
+        """
+        Moving one listener twice keeps the other listener untouched.  Each
+        admitted move invokes exactly one new reactor entry point and closes
+        exactly one previous listener.
+        """
+        handover = endpoints.ListenerHandover(self._admission())
+        self.successResultOf(
+            handover.initial(
+                "internal", self.internal, self.factory, roles=["internal"]
+            )
+        )
+        publicPort = self.successResultOf(
+            handover.initial("public", self.public, self.factory, roles=["internal"])
+        )
+        publicListens = len(self.reactor.listens)
+
+        movedOnce = endpoints.TCP4ServerEndpoint(
+            self.reactor, 7000, interface="10.0.0.9"
+        )
+        first = self.successResultOf(
+            handover.handover(
+                handover.plan("internal", movedOnce, roles=["internal"]),
+                self.factory,
+            )
+        )
+        second = self.successResultOf(
+            handover.handover(
+                handover.plan("internal", self.internal, roles=["internal"]),
+                self.factory,
+            )
+        )
+
+        # Two moves, two listen entries; the public listener was never moved.
+        self.assertEqual(len(self.reactor.listens), publicListens + 2)
+        self.assertEqual(
+            [
+                entry.scope.address
+                for entry in handover.entries
+                if entry.name == "internal"
+            ],
+            ["10.0.0.5", "10.0.0.9", "10.0.0.5"],
+        )
+        # The public listener was not closed.
+        self.assertNotIn(publicPort, self.reactor.closed)
+        # Exactly the two superseded internal ports were closed.
+        self.assertEqual(len(self.reactor.closed), 2)
+        self.assertEqual(handover.entryPoint("public").scope.address, "0.0.0.0")
+        self.assertIsNot(first, second)
+
+    def test_refusedHandoverRetainsListenerAndConnections(self):
+        """
+        An unapproved address does not trigger a listen call and leaves the
+        current listener and its accepted connections in service.
+        """
+        handover = endpoints.ListenerHandover(self._admission())
+        port = self.successResultOf(
+            handover.initial(
+                "internal", self.internal, self.factory, roles=["internal"]
+            )
+        )
+        protocol = handover.gate("internal").buildProtocol(
+            IPv4Address("TCP", "10.0.0.1", 1234)
+        )
+        self.assertIsNotNone(protocol)
+        self.assertEqual(handover.connections("internal"), 1)
+
+        unapproved = endpoints.TCP4ServerEndpoint(
+            self.reactor, 7000, interface="0.0.0.0"
+        )
+        bound = len(self.reactor.listens)
+        failure = self.failureResultOf(
+            handover.handover(
+                handover.plan("internal", unapproved, roles=["internal"]),
+                self.factory,
+            ),
+            error.ListenerHandoverRejected,
+        )
+        self.assertTrue(failure.value.current)
+        self.assertEqual(len(self.reactor.listens), bound)
+        self.assertEqual(len(self.reactor.closed), 0)
+        self.assertTrue(handover.accepting("internal"))
+        self.assertEqual(handover.connections("internal"), 1)
+        protocol.connectionLost(Failure(ConnectionLost()))
+        self.assertEqual(handover.connections("internal"), 0)
+
+        receipt = handover.receipt("internal")
+        self.assertIs(receipt.decision, endpoints.ListenerAdmissionDecision.REJECT)
+        self.assertIsNone(receipt.entry)
+        self.assertTrue(receipt.retained)
+
+    def test_unknownWrapperRefusedWithoutListen(self):
+        """
+        A wrapper that does not disclose its binding is refused by default;
+        no listen call occurs and the current listener stays up.
+        """
+        handover = endpoints.ListenerHandover()
+        port = self.successResultOf(
+            handover.initial(
+                "internal", self.internal, self.factory, roles=["internal"]
+            )
+        )
+        opaque = object()
+        self.failureResultOf(
+            handover.handover(handover.plan("internal", opaque), self.factory),
+            error.ListenerHandoverRejected,
+        )
+        self.assertEqual(len(self.reactor.listens), 1)
+        self.assertTrue(handover.accepting("internal"))
+        self.assertTrue(handover.receipt("internal").retained)
+
+    def test_pauseAndResumeGatesNewConnections(self):
+        """
+        Pausing a listener refuses new protocols while leaving existing
+        connections alone; resuming accepts them again.
+        """
+        handover = endpoints.ListenerHandover(self._admission())
+        self.successResultOf(
+            handover.initial(
+                "internal", self.internal, self.factory, roles=["internal"]
+            )
+        )
+        gate = handover.gate("internal")
+
+        existing = gate.buildProtocol(IPv4Address("TCP", "10.0.0.1", 1))
+        self.assertIsNotNone(existing)
+        handover.pause("internal")
+        self.assertIsNone(gate.buildProtocol(IPv4Address("TCP", "10.0.0.2", 2)))
+        self.assertEqual(handover.connections("internal"), 1)
+
+        handover.resume("internal")
+        self.assertIsNotNone(gate.buildProtocol(IPv4Address("TCP", "10.0.0.3", 3)))
+        self.assertEqual(handover.connections("internal"), 2)
+        existing.connectionLost(Failure(ConnectionLost()))
+        self.assertEqual(handover.connections("internal"), 1)
+
+    def test_cancelledStartStopsHalfStartedListener(self):
+        """
+        Cancelling before the new listener is running does not call the old
+        listener's close action and does not expose the new binding.
+        """
+        handover = endpoints.ListenerHandover(
+            endpoints.ListenerAdmission(
+                allowedScopes=[
+                    endpoints.ListenerScope(
+                        "TCP", "10.0.0.5", 7000, AF_INET, ("internal",)
+                    ),
+                    endpoints.ListenerScope(
+                        "TCP", "10.0.0.11", 7000, AF_INET, ("internal",)
+                    ),
+                ]
+            )
+        )
+        self.successResultOf(
+            handover.initial(
+                "internal", self.internal, self.factory, roles=["internal"]
+            )
+        )
+
+        class SlowEndpoint:
+            def listen(self, factory):
+                self.pending = Deferred()
+                return self.pending
+
+            def _listenEntry(self, factory):
+                return ("listen", (factory,), {})
+
+            def _scope(self):
+                return endpoints.ListenerScope(
+                    "TCP", "10.0.0.11", 7000, AF_INET, ("internal",)
+                )
+
+        slow = SlowEndpoint()
+        plan = endpoints.ListenerHandoverPlan.__new__(endpoints.ListenerHandoverPlan)
+        plan.name = "internal"
+        plan.endpoint = slow
+        plan.scope = slow._scope()
+        plan.verified = True
+        result = handover.handover(plan, self.factory)
+        result.cancel()
+        self.failureResultOf(result, CancelledError)
+        self.assertEqual(len(self.reactor.closed), 0)
+        self.assertTrue(handover.accepting("internal"))
+
+
+class ListenerHandoverRestartTests(unittest.TestCase):
+    """
+    Tests for handovers that keep the same address (a configuration switch)
+    as well as moves to a new address.
+    """
+
+    def setUp(self):
+        self.reactor = RecordingReactor()
+        self.factory = Factory.forProtocol(Protocol)
+
+    def _admission(self):
+        return endpoints.ListenerAdmission(
+            allowedScopes=[
+                endpoints.ListenerScope(
+                    "TCP", "10.0.0.5", 7000, AF_INET, ("internal",)
+                ),
+                endpoints.ListenerScope(
+                    "TCP", "10.0.0.9", 7000, AF_INET, ("internal",)
+                ),
+            ]
+        )
+
+    def test_sameBindingRestartsAfterAdmission(self):
+        """
+        A configuration switch on the same address stops the old socket
+        after admission and before the new listen, and the old accepted
+        connection is still processable afterwards.
+        """
+        handover = endpoints.ListenerHandover(self._admission())
+        firstEndpoint = endpoints.TCP4ServerEndpoint(
+            self.reactor, 7000, interface="10.0.0.5"
+        )
+        firstPort = self.successResultOf(
+            handover.initial(
+                "internal", firstEndpoint, self.factory, roles=["internal"]
+            )
+        )
+        protocol = handover.gate("internal").buildProtocol(
+            IPv4Address("TCP", "10.0.0.1", 1111)
+        )
+        self.assertEqual(handover.connections("internal"), 1)
+
+        # A configuration switch that keeps the same address but changes the
+        # protocol wrapping; the scope (and therefore admission) is unchanged.
+        switched = endpoints._WrapperServerEndpoint(
+            endpoints.TCP4ServerEndpoint(self.reactor, 7000, interface="10.0.0.5"),
+            lambda f: f,
+        )
+        secondPort = self.successResultOf(
+            handover.handover(
+                handover.plan("internal", switched, roles=["internal"]),
+                self.factory,
+            )
+        )
+
+        self.assertEqual(len(self.reactor.listens), 2)
+        self.assertEqual(
+            [getattr(closed, "_port", closed) for closed in self.reactor.closed],
+            [firstPort._port],
+        )
+        self.assertIsNot(secondPort, firstPort)
+        # Existing connection is preserved and can still be used.
+        self.assertEqual(handover.connections("internal"), 1)
+        protocol.dataReceived(b"still here")
+        protocol.connectionLost(Failure(ConnectionLost()))
+        self.assertEqual(handover.connections("internal"), 0)
+        receipt = handover.receipt("internal")
+        self.assertIs(receipt.decision, endpoints.ListenerAdmissionDecision.ACCEPT)
+        self.assertFalse(receipt.retained)
+        self.assertEqual(receipt.entry.method, "listenTCP")
+
+        # New connections are accepted through the new listener.
+        self.assertIsNotNone(
+            handover.gate("internal").buildProtocol(
+                IPv4Address("TCP", "10.0.0.2", 2222)
+            )
+        )
+
+    def test_sameBindingFailureRestoresOldListener(self):
+        """
+        If the restarted listener cannot be started, the previous listener is
+        put back into service and the failure is reported.
+        """
+        handover = endpoints.ListenerHandover(self._admission())
+        firstEndpoint = endpoints.TCP4ServerEndpoint(
+            self.reactor, 7000, interface="10.0.0.5"
+        )
+        firstPort = self.successResultOf(
+            handover.initial(
+                "internal", firstEndpoint, self.factory, roles=["internal"]
+            )
+        )
+
+        class FailingEndpoint:
+            def __init__(self):
+                self.calls = 0
+
+            def listen(self, factory):
+                self.calls += 1
+                return defer.fail(error.CannotListenError("10.0.0.5", 7000, None))
+
+            def _listenEntry(self, factory):
+                return ("listenTCP", (7000, factory), {"interface": "10.0.0.5"})
+
+            def _scope(self):
+                return endpoints.ListenerScope(
+                    "TCP", "10.0.0.5", 7000, AF_INET, ("internal",)
+                )
+
+        failing = FailingEndpoint()
+        plan = endpoints.ListenerHandoverPlan.__new__(endpoints.ListenerHandoverPlan)
+        plan.name = "internal"
+        plan.endpoint = failing
+        plan.scope = failing._scope()
+        plan.verified = True
+        self.failureResultOf(
+            handover.handover(plan, self.factory), error.CannotListenError
+        )
+        # The old listener's socket was closed once and then restarted.
+        self.assertEqual(firstPort._port.stopped, 1)
+        self.assertTrue(handover.accepting("internal"))
+        self.assertIs(handover._ports["internal"], firstPort)
+        receipt = handover.receipt("internal")
+        self.assertIsNotNone(receipt.failure)
+        self.assertTrue(receipt.retained)
+        self.assertIs(
+            receipt.decision,
+            endpoints.ListenerAdmissionDecision.ACCEPT,
+        )
+        self.assertEqual(handover._plans["internal"].scope, failing._scope())
+
+    def test_unknownPolicyCanAccept(self):
+        """
+        An operator may explicitly choose to accept a handover whose binding
+        cannot be determined; the receipt records that the scope was unknown.
+        """
+        handover = endpoints.ListenerHandover(
+            endpoints.ListenerAdmission(
+                unknown=endpoints.ListenerAdmissionDecision.ACCEPT
+            )
+        )
+        endpoint = object()
+        plan = endpoints.ListenerHandoverPlan.__new__(endpoints.ListenerHandoverPlan)
+        plan.name = "public"
+        plan.endpoint = endpoint
+        plan.scope = endpoints.listenerScope(endpoint)
+        plan.verified = False
+
+        test = self
+
+        class Opaque:
+            def listen(self, factory):
+                return defer.succeed(RecordingPort(test.reactor, None))
+
+        plan.endpoint = Opaque()
+        self.successResultOf(handover.handover(plan, self.factory))
+        receipt = handover.receipt("public")
+        self.assertIs(receipt.decision, endpoints.ListenerAdmissionDecision.ACCEPT)
+        self.assertEqual(receipt.proposed.certainty, "unknown")
+
+
+class ListenerConfigSwitchTests(unittest.TestCase):
+    """
+    Tests for switching a running listener between strports descriptions.
+    """
+
+    def setUp(self):
+        self.reactor = RecordingReactor()
+        self.handover = endpoints.ListenerHandover(
+            endpoints.ListenerAdmission(
+                allowedScopes=[
+                    endpoints.ListenerScope(
+                        "TCP", "10.0.0.5", 7000, AF_INET, ("internal",)
+                    ),
+                    endpoints.ListenerScope(
+                        "TCP", "10.0.0.9", 7000, AF_INET, ("internal",)
+                    ),
+                    endpoints.ListenerScope(
+                        "TCP", "0.0.0.0", 8080, AF_INET, ("public",)
+                    ),
+                ]
+            )
+        )
+        self.config = endpoints.ListenerConfigSwitch(
+            self.handover,
+            {
+                "internal": "tcp:7000:interface=10.0.0.5",
+                "public": "tcp:8080:interface=0.0.0.0",
+            },
+        )
+        self.factory = Factory.forProtocol(Protocol)
+        self.roles = {"internal": ["internal"], "public": ["public"]}
+
+    def test_applyAndSwitch(self):
+        """
+        Applying a config listens for both approved listeners; switching one
+        description to another approved address moves only that listener.
+        """
+        first = self.successResultOf(
+            self.config.apply(self.reactor, self.factory, self.roles)
+        )
+        self.assertEqual(set(first), {"internal", "public"})
+        self.assertEqual(len(self.reactor.listens), 2)
+
+        self.config.switchTo("internal", "tcp:7000:interface=10.0.0.9")
+        second = self.successResultOf(
+            self.config.apply(self.reactor, self.factory, self.roles)
+        )
+        self.assertEqual(len(self.reactor.listens), 3)
+        self.assertEqual(
+            [entry.scope.address for entry in self.handover.entries],
+            ["10.0.0.5", "0.0.0.0", "10.0.0.9"],
+        )
+        self.assertIsNot(first["internal"], second["internal"])
+
+    def test_unapprovedDescriptionNeverListens(self):
+        """
+        Switching a listener to a description whose binding is not approved
+        returns a failure for that name and never calls the reactor.
+        """
+        self.successResultOf(self.config.apply(self.reactor, self.factory, self.roles))
+        before = len(self.reactor.listens)
+        self.config.switchTo("internal", "tcp:7000:interface=0.0.0.0")
+        outcomes = self.successResultOf(
+            self.config.apply(self.reactor, self.factory, self.roles)
+        )
+        self.assertEqual(len(self.reactor.listens), before)
+        failure = outcomes["internal"]
+        self.assertIsInstance(failure.value, error.ListenerHandoverRejected)
+        self.assertTrue(self.handover.accepting("internal"))
+        self.assertEqual(self.handover.entryPoint("internal").scope.address, "10.0.0.5")
+
+    def test_removedDescriptionStopsListener(self):
+        """
+        Removing a description from the config stops only that listener.
+        """
+        self.successResultOf(self.config.apply(self.reactor, self.factory, self.roles))
+        del self.config.descriptions["public"]
+        self.successResultOf(self.config.apply(self.reactor, self.factory, self.roles))
+        self.assertFalse(self.handover.accepting("public"))
+        self.assertTrue(self.handover.accepting("internal"))
+
+    def test_wrappedDescriptionBindsInnerAddress(self):
+        """
+        A wrapped description (HAProxy over TCP) is admitted against the
+        inner TCP binding, and the entry point is the real reactor call.
+        """
+        self.config = endpoints.ListenerConfigSwitch(
+            self.handover,
+            {"internal": "haproxy:tcp:7000:interface=10.0.0.5"},
+        )
+        outcomes = self.successResultOf(
+            self.config.apply(self.reactor, self.factory, self.roles)
+        )
+        self.assertNotIsInstance(outcomes["internal"], Failure)
+        self.assertEqual(len(self.reactor.listens), 1)
+        method, port, kwargs = self.reactor.listens[0]
+        self.assertEqual(method, "listenTCP")
+        self.assertEqual(port, 7000)
+        entry = self.handover.entryPoint("internal")
+        self.assertEqual(entry.scope.address, "10.0.0.5")
+        self.assertEqual(dict(entry.kwargs)["interface"], "10.0.0.5")
+
+
+class ListenerHandoverTLSWrapperTests(unittest.TestCase):
+    """
+    End-to-end check that an admission-approved TLS wrapper binds the
+    address it discloses and reports the real entry point.
+    """
+
+    def test_pausedListenerRefusesThroughRealGate(self):
+        """
+        The factory handed to the reactor is the same gate used by
+        L{ListenerHandover.pause}, so a paused listener refuses new protocols
+        without closing existing ones.
+        """
+        reactor = RecordingReactor()
+        handover = endpoints.ListenerHandover(
+            endpoints.ListenerAdmission(
+                allowedScopes=[
+                    endpoints.ListenerScope(
+                        "TCP", "10.0.0.7", 9443, AF_INET, ("internal",)
+                    )
+                ]
+            )
+        )
+        self.successResultOf(
+            handover.initial(
+                "internal",
+                endpoints.TCP4ServerEndpoint(reactor, 9443, interface="10.0.0.7"),
+                Factory.forProtocol(Protocol),
+                roles=["internal"],
+            )
+        )
+        gate = reactor.listens[0][2]["factory"]
+        address = IPv4Address("TCP", "10.0.0.1", 1234)
+        existing = gate.buildProtocol(address)
+        self.assertIsNotNone(existing)
+        handover.pause("internal")
+        self.assertIsNone(gate.buildProtocol(address))
+        handover.resume("internal")
+        self.assertIsNotNone(gate.buildProtocol(address))
+        existing.connectionLost(Failure(ConnectionLost()))
+        self.assertEqual(handover.connections("internal"), 1)
+
+    def test_wrappedScopeMatchesEntry(self):
+        """
+        A generic wrapper around a TCP endpoint produces one listen call on
+        the wrapped address, and the receipt's entry matches it.
+        """
+        reactor = RecordingReactor()
+        inner = endpoints.TCP4ServerEndpoint(reactor, 9443, interface="10.0.0.7")
+        wrapped = endpoints._WrapperServerEndpoint(inner, lambda f: f)
+        handover = endpoints.ListenerHandover(
+            endpoints.ListenerAdmission(
+                allowedScopes=[
+                    endpoints.ListenerScope(
+                        "TCP", "10.0.0.7", 9443, AF_INET, ("internal",)
+                    )
+                ]
+            )
+        )
+        self.successResultOf(
+            handover.initial(
+                "internal", wrapped, Factory.forProtocol(Protocol), roles=["internal"]
+            )
+        )
+        self.assertEqual(len(reactor.listens), 1)
+        method, port, kwargs = reactor.listens[0]
+        self.assertEqual(method, "listenTCP")
+        self.assertEqual(port, 9443)
+        entry = handover.entryPoint("internal")
+        self.assertEqual(entry.method, "listenTCP")
+        self.assertEqual(entry.args[0], 9443)
+        self.assertEqual(dict(entry.kwargs)["interface"], "10.0.0.7")
 
 
 class ParserTests(unittest.TestCase):

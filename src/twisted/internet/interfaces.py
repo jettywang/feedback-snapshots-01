@@ -2761,6 +2761,28 @@ class IStreamServerEndpoint(Interface):
         """
 
 
+class ITransparentServerEndpoint(Interface):
+    """
+    A stream server endpoint which defers its binding address to another
+    endpoint.
+
+    Wrappers such as TLS or PROXY-protocol endpoints do not select the address
+    that is actually bound; they only alter the protocols and factories around
+    a single underlying server endpoint.  Implementations of this interface
+    expose that underlying endpoint so admission decisions can be made against
+    the address that will really be bound, rather than against the wrapper.
+
+    @since: 27.1
+    """
+
+    wrappedEndpoint = Attribute(
+        """
+        The L{IStreamServerEndpoint} that this endpoint wraps, and which is
+        responsible for the actual bind.
+        """
+    )
+
+
 class IStreamServerEndpointStringParser(Interface):
     """
     An L{IStreamServerEndpointStringParser} is like an
