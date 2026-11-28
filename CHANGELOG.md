@@ -3,6 +3,7 @@
 ## HEAD
 
 ### User-facing changes
+- [FEATURE] emit a tag approval audit record during `repair` describing the selected strategy, proven compatibility, and every publishable tag (canonical name plus registered aliases), and refuse to write a wheel when a tag is not on the configured approval registry
 - [BUGFIX] avoid duplicating the wheel component in SBOMs ([#750](https://github.com/pypa/auditwheel/issues/750))
 
 ## 6.8.2

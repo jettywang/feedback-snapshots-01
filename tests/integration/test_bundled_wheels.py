@@ -372,3 +372,61 @@ def test_symbol_blacklist(
     assert main() == 0
     captured = capsys.readouterr()
     assert "black-listed symbol dependencies" in captured.out.replace("\n", " ")
+
+
+def _repair_args(wheel, wheel_dir, plat):
+    return Namespace(
+        LIB_SDIR=".libs",
+        ONLY_PLAT=False,
+        PLAT=plat,
+        STRIP=False,
+        UPDATE_TAGS=True,
+        WHEEL_DIR=wheel_dir,
+        WHEEL_FILE=[wheel],
+        EXCLUDE=[],
+        LDPATHS=None,
+        DISABLE_ISA_EXT_CHECK=False,
+        ZIP_COMPRESSION_LEVEL=6,
+        PATCHER="none",
+        cmd="repair",
+        func=Mock(),
+        prog="auditwheel",
+        verbose=1,
+    )
+
+
+def test_repair_blocks_unregistered_tag(monkeypatch, tmp_path, caplog):
+    # A network that has only registered musllinux_1_1 must reject a wheel
+    # whose proven (and only) tag is musllinux_1_2, locating the exact tag.
+    from auditwheel.policy import audit as audit_mod
+
+    wheel = BUNDLED_WHEELS / "musllinux_1_2/testsimple-0.0.1-cp312-cp312-linux_x86_64.whl"
+    out_dir = tmp_path / "out"
+
+    monkeypatch.setattr(
+        main_repair,
+        "_default_registry",
+        lambda policies: audit_mod.restrict_registry(policies, ["linux", "musllinux_1_1"]),
+    )
+
+    with pytest.raises(audit_mod.UnregisteredTagError, match="musllinux_1_2_x86_64"):
+        main_repair.execute(_repair_args(wheel, out_dir, "auto"), Mock())
+
+    assert not out_dir.exists() or not list(out_dir.glob("*.whl"))
+    assert "musllinux_1_2_x86_64" in caplog.text
+    assert '"approved": false' in caplog.text
+
+
+def test_repair_allows_registered_tag(tmp_path, caplog):
+    # With the default (full) registry the same wheel is repaired and the
+    # audit record marks every emitted tag as approved.
+    wheel = BUNDLED_WHEELS / "musllinux_1_2/testsimple-0.0.1-cp312-cp312-linux_x86_64.whl"
+    out_dir = tmp_path / "out"
+
+    main_repair.execute(_repair_args(wheel, out_dir, "auto"), Mock())
+
+    outputs = list(out_dir.glob("*.whl"))
+    assert len(outputs) == 1
+    assert outputs[0].name == "testsimple-0.0.1-cp312-cp312-musllinux_1_2_x86_64.whl"
+    assert '"approved": true' in caplog.text
+    assert "musllinux_1_2_x86_64" in caplog.text

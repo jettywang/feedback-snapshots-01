@@ -9,16 +9,27 @@ from typing import Any
 
 from packaging.utils import InvalidWheelFilename
 
-from auditwheel import options
+from auditwheel import json, options
 from auditwheel.architecture import Architecture
 from auditwheel.error import NonPlatformWheelError, WheelToolsError
 from auditwheel.libc import Libc
 from auditwheel.patcher import ElfPatcher
 from auditwheel.policy import WheelPolicies
+from auditwheel.policy.audit import AUTO_POLICY, TagRegistry, audit_request, ensure_approved
 from auditwheel.tools import EnvironmentDefault
 from auditwheel.wheeltools import get_wheel_architecture, get_wheel_libc
 
 logger = logging.getLogger(__name__)
+
+
+def _default_registry(policies: WheelPolicies) -> TagRegistry:
+    """The approval registry used for a repair.
+
+    Defaults to every canonical policy name and registered alias. A locked-down
+    deployment can monkeypatch this to return a narrower :class:`TagRegistry`
+    (see :func:`auditwheel.policy.audit.restrict_registry`).
+    """
+    return TagRegistry.from_policies(policies)
 
 
 def configure_parser(sub_parsers: Any) -> None:  # noqa: ANN401
@@ -279,6 +290,22 @@ def execute(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
                 *wheel_abi.overall_policy.aliases,
                 *abis,
             ]
+
+        audit = audit_request(
+            policies,
+            wheel_name=wheel_filename,
+            requested=None if plat_base == AUTO_POLICY else plat_base,
+            requested_policy=requested_policy,
+            proven_policy=wheel_abi.overall_policy,
+            proven_is_compatible=wheel_abi.overall_policy != policies.linux,
+            graft_policy=wheel_abi.graft_policy,
+            registry=_default_registry(policies),
+        )
+        # Emit a machine-readable record of the chosen strategy and every tag
+        # (canonical + registered aliases) the repaired wheel may carry.
+        logger.info("Tag approval audit: %s", json.dumps(audit.as_dict()))
+        # Block any tag that is not on the registry before a wheel is written.
+        ensure_approved(audit)
 
         patcher = ElfPatcher.get_patcher(args.PATCHER, requested_policy.name)
         out_wheel = repair_wheel(
