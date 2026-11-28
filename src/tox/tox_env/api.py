@@ -202,6 +202,13 @@ class ToxEnv(ABC):  # ruff:ignore[too-many-public-methods]  # public facade
             desc="environment variable patterns to exclude after pass_env glob expansion",
         )
         self.conf.add_config(
+            keys=["stage_pass_env"],
+            of_type=dict[str, list[str]],
+            default={},
+            desc="environment variable patterns to pass only to commands of the given stage (deps or commands)",
+            post_process=self._stage_pass_env_post_process,
+        )
+        self.conf.add_config(
             "parallel_show_output",
             of_type=bool,
             default=False,
@@ -295,6 +302,13 @@ class ToxEnv(ABC):  # ruff:ignore[too-many-public-methods]  # public facade
                 ],
             )
         return env
+
+    @staticmethod
+    def _stage_pass_env_post_process(value: dict[str, list[str]]) -> dict[str, list[str]]:
+        if unknown := sorted(set(value) - _ENV_STAGES):
+            msg = f"stage_pass_env stages must be one of {', '.join(sorted(_ENV_STAGES))}, found {', '.join(unknown)}"
+            raise Fail(msg)
+        return value
 
     def _recreate_default(  # override signature
         self,
@@ -448,6 +462,7 @@ class ToxEnv(ABC):  # ruff:ignore[too-many-public-methods]  # public facade
         executor: Execute | None = None,
         *,
         capture: bool = False,
+        stage: str | None = None,
     ) -> Outcome:
         """Execute a command and wait for its outcome.
 
@@ -458,6 +473,7 @@ class ToxEnv(ABC):  # ruff:ignore[too-many-public-methods]  # public facade
         :param run_id: label for command logs
         :param executor: executor override, or ``None`` for this environment's executor
         :param capture: capture output even in no-capture mode
+        :param stage: run stage the command belongs to, scoping ``stage_pass_env`` variables
 
         :returns: completed command outcome
 
@@ -466,7 +482,7 @@ class ToxEnv(ABC):  # ruff:ignore[too-many-public-methods]  # public facade
         :raises RuntimeError: when the execution produced no outcome
 
         """
-        with self.execute_async(cmd, stdin, show, cwd, run_id, executor, capture=capture) as status:
+        with self.execute_async(cmd, stdin, show, cwd, run_id, executor, capture=capture, stage=stage) as status:
             while status.wait() is None:
                 pass  # pragma: no cover  # untested error path
         if status.outcome is None:  # pragma: no cover # this should not happen
@@ -484,6 +500,7 @@ class ToxEnv(ABC):  # ruff:ignore[too-many-public-methods]  # public facade
         executor: Execute | None = None,
         *,
         capture: bool = False,
+        stage: str | None = None,
     ) -> Generator[ExecuteStatus, None, None]:
         """Run a command while exposing its execution status.
 
@@ -494,6 +511,7 @@ class ToxEnv(ABC):  # ruff:ignore[too-many-public-methods]  # public facade
         :param run_id: label for command logs
         :param executor: executor override, or ``None`` for this environment's executor
         :param capture: capture output even in no-capture mode
+        :param stage: run stage the command belongs to, scoping ``stage_pass_env`` variables
 
         :raises SystemExit: if execution was interrupted
         :raises ValueError: if the command is empty
@@ -508,9 +526,8 @@ class ToxEnv(ABC):  # ruff:ignore[too-many-public-methods]  # public facade
             cwd = cast("Path", self.core["tox_root"])
         if show is None:
             show = self.options.verbosity > 3  # ruff:ignore[magic-value-comparison]  # fixed protocol value
-        request = ExecuteRequest(
-            cmd, cwd, self.environment_variables, stdin, run_id, allow=self._allow_externals, capture=capture
-        )
+        env, redact_env = self._environment_variables_for_stage(stage)
+        request = ExecuteRequest(cmd, cwd, env, stdin, run_id, allow=self._allow_externals, capture=capture)
         if request.cwd == _CWD:
             repr_cwd = ""
         else:
@@ -534,7 +551,30 @@ class ToxEnv(ABC):  # ruff:ignore[too-many-public-methods]  # public facade
             self._hidden_outcomes.append(execute_status.outcome)
         if self.journal and execute_status.outcome is not None:
             self.journal.add_execute(execute_status.outcome, run_id)
-        self._log_execute(request, execute_status)
+        self._log_execute(request, execute_status, redact_env)
+
+    def _environment_variables_for_stage(self, stage: str | None) -> tuple[dict[str, str], frozenset[str]]:
+        """Build the environment for a command of ``stage``, overlaying ``stage_pass_env`` variables.
+
+        The overlay is resolved per command from the parent process environment, so the shared cache built from
+        ``pass_env`` and ``set_env`` never holds stage-scoped values and a retried stage resolves them again.
+
+        :param stage: run stage of the command, or ``None`` for the unscoped environment
+
+        :returns: the environment to use and the stage-scoped variable names to redact in diagnostics
+
+        """
+        env = self.environment_variables
+        if stage is None or not (patterns := self.conf["stage_pass_env"].get(stage)):
+            return env, frozenset()
+        extra = self._load_pass_env(list(patterns))
+        if disallow := self.conf["disallow_pass_env"]:
+            disallow_patterns = [re.compile(fnmatch.translate(e), re.IGNORECASE) for e in disallow]
+            extra = {k: v for k, v in extra.items() if not any(p.match(k) for p in disallow_patterns)}
+        if not extra:
+            return env, frozenset()
+        # pass_env and set_env keep their normal authority: on a name clash the base environment wins
+        return {**extra, **env}, frozenset(extra)
 
     @property
     def environment_variables(self) -> dict[str, str]:
@@ -620,19 +660,23 @@ class ToxEnv(ABC):  # ruff:ignore[too-many-public-methods]  # public facade
         ) as execute_status:
             yield execute_status
 
-    def _log_execute(self, request: ExecuteRequest, status: ExecuteStatus) -> None:
+    def _log_execute(self, request: ExecuteRequest, status: ExecuteStatus, redact_env: frozenset[str]) -> None:
         self._log_id += 1
-        self._write_execute_log(self.name, self.env_log_dir / f"{self._log_id}-{request.run_id}.log", request, status)
+        self._write_execute_log(
+            self.name, self.env_log_dir / f"{self._log_id}-{request.run_id}.log", request, status, redact_env
+        )
 
     @staticmethod
-    def _write_execute_log(env_name: str, log_file: Path, request: ExecuteRequest, status: ExecuteStatus) -> None:
+    def _write_execute_log(
+        env_name: str, log_file: Path, request: ExecuteRequest, status: ExecuteStatus, redact_env: frozenset[str]
+    ) -> None:
         if not log_file.parent.exists():
             log_file.parent.mkdir(parents=True, exist_ok=True)
         with log_file.open("wt", encoding="utf-8") as file:
             file.write(f"name: {env_name}\n")
             file.write(f"run_id: {request.run_id}\n")
             msg = "".join(
-                f"env {env_key}: {redact_value(name=env_key, value=env_value)}\n"
+                f"env {env_key}: {_shown_env_value(env_key, env_value, redact_env)}\n"
                 for env_key, env_value in sorted(request.env.items())
             )
             file.write(msg)
@@ -739,6 +783,17 @@ class _Interruption:
 
 
 _CWD: Final[Path] = Path.cwd()
+
+#: run stages ``stage_pass_env`` can scope variables to: dependency installation and the test commands
+_ENV_STAGES: Final[frozenset[str]] = frozenset({"deps", "commands"})
+
+
+def _shown_env_value(key: str, value: str, redact_env: frozenset[str]) -> str:
+    # stage-scoped variables hold stage-only credentials, so their values never reach the shared log
+    if key in redact_env:
+        return "*" * len(value)
+    return redact_value(name=key, value=value)
+
 
 __all__ = [
     "ToxEnv",

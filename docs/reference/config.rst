@@ -1063,6 +1063,38 @@ Base options
     In this example, all environment variables matching ``FOO_*`` are passed through except ``FOO_SECRET``.
 
 .. conf::
+    :keys: stage_pass_env
+    :default: <empty dict>
+    :version_added: 4.68
+
+    Environment variable patterns to pass through only to commands of a given run stage, keyed by stage name. Uses the
+    same :py:mod:`fnmatch` wildcard syntax as :ref:`pass_env`, and :ref:`disallow_pass_env` excludes matches here too.
+    The supported stages are:
+
+    - ``deps`` - the dependency installation commands (the installer and its package listing)
+    - ``commands`` - the test commands (``commands_pre``, ``commands``, ``commands_post``, ``extra_setup_commands``)
+
+    .. tab:: TOML
+
+       .. code-block:: toml
+
+          [env_run_base]
+          stage_pass_env = { deps = ["CI_PUBLISH_TOKEN"] }
+
+    .. tab:: INI (deprecated)
+
+       .. code-block:: ini
+
+          [testenv]
+          stage_pass_env =
+              deps = CI_PUBLISH_TOKEN
+
+    Unlike :ref:`pass_env`, which applies to every command, a variable listed here reaches only the commands of its
+    stage. This lets CI hand a short-lived credential to the install stage of a shared tox process without exposing it
+    to the test commands. The values of stage-scoped variables are always masked in the command logs tox writes. On a
+    name clash :ref:`pass_env` and :ref:`set_env` keep their normal authority and win over the stage-scoped value.
+
+.. conf::
     :keys: set_env, setenv
     :version_added: 1.0
 

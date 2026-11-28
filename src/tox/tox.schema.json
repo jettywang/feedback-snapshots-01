@@ -241,6 +241,16 @@
           },
           "description": "environment variable patterns to exclude after pass_env glob expansion"
         },
+        "stage_pass_env": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "array",
+            "items": {
+              "$ref": "#/definitions/subs"
+            }
+          },
+          "description": "environment variable patterns to pass only to commands of the given stage (deps or commands)"
+        },
         "parallel_show_output": {
           "type": "boolean",
           "description": "if set to True the content of the output will always be shown  when running in parallel mode"

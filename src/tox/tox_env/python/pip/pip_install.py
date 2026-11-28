@@ -93,7 +93,9 @@ class PythonInstallerListDependencies(Installer[Python], ABC):
     @override
     def installed(self) -> list[str]:
         cmd = self._env.conf.get("list_dependencies_command", Command)
-        result = self._env.execute(cmd=cmd.args, stdin=StdinSource.OFF, run_id="freeze", show=False, capture=True)
+        result = self._env.execute(
+            cmd=cmd.args, stdin=StdinSource.OFF, run_id="freeze", show=False, capture=True, stage="deps"
+        )
         result.assert_success()
         return result.out.splitlines()
 
@@ -300,7 +302,9 @@ class Pip(PythonInstallerListDependencies):
             if constraints_file.exists():
                 deps = [*deps, f"-c{constraints_file}"]
 
-        outcome = self._env.execute(self.build_install_cmd(deps), stdin=StdinSource.OFF, run_id=f"install_{of_type}")
+        outcome = self._env.execute(
+            self.build_install_cmd(deps), stdin=StdinSource.OFF, run_id=f"install_{of_type}", stage="deps"
+        )
         outcome.assert_success()
 
         if (

@@ -149,6 +149,7 @@ def run_command_set(  # ruff:ignore[too-many-arguments]  # public signature
             stdin=StdinSource.USER if getattr(tox_env.options, "no_capture", False) else StdinSource.user_only(),
             show=True,
             run_id=run_id,
+            stage="commands",
         )
 
     exit_code = Outcome.OK
