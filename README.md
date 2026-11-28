@@ -539,6 +539,25 @@ Net::HTTP.get('www.example.com', '/')    # ===> "abc\n"
 Net::HTTP.get('www.example.com', '/')    # ===> "def\n"
 ```
 
+### When a stubbed response is consumed
+
+A response from a finite sequence (`to_return(...).then.to_return(...)`, `.times(n)`, etc.)
+is **consumed at selection time**: as soon as a request matches the stub, WebMock advances
+the sequence — before any response body bytes are delivered to the client and before
+`after_request` callbacks run. This gives streaming clients and retry logic deterministic
+bookkeeping:
+
+* **Streaming interruption**: if a client stops reading the response body early
+  (e.g. breaks out of `read_body` after the first chunk), the response stays consumed.
+  The next matching request uses the next response in the sequence
+  (or the last one, repeated, once the sequence is exhausted).
+* **`after_request` failures**: callbacks run after selection. If a callback raises,
+  the exception propagates to the caller, but the response stays consumed
+  and the request stays recorded.
+* **Request counting**: every request is recorded before a response is selected, so
+  `assert_requested` / `have_been_requested` counts reflect attempts exactly —
+  a retry never makes an earlier attempt "not happen".
+
 ### Removing unused stubs
 
 ```ruby

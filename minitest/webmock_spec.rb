@@ -58,3 +58,68 @@ require File.expand_path(File.dirname(__FILE__) + '/test_helper')
     end
   end
 
+  describe "WebMock stubbed response consumption contract" do
+    include HttpRequestTestHelper
+
+    def stream_get(uri_string, max_chunks: nil)
+      uri = URI.parse(uri_string)
+      chunks = []
+      Net::HTTP.start(uri.host, uri.port) do |http|
+        http.request_get(uri.path) do |response|
+          response.read_body do |chunk|
+            chunks << chunk
+            break if max_chunks && chunks.size >= max_chunks
+          end
+        end
+      end
+      chunks.join
+    end
+
+    it "consumes one response per request when the stream completes" do
+      stub_request(:get, "http://www.example.com/stream").
+        to_return(body: "first").then.
+        to_return(body: "second")
+
+      assert_equal "first", stream_get("http://www.example.com/stream")
+      assert_equal "second", stream_get("http://www.example.com/stream")
+      # sequence exhausted: the last response is repeated
+      assert_equal "second", stream_get("http://www.example.com/stream")
+      assert_requested(:get, "http://www.example.com/stream", times: 3)
+    end
+
+    it "keeps the response consumed when the client stops reading after the first chunk" do
+      stub_request(:get, "http://www.example.com/stream").
+        to_return(body: "chunk-one").then.
+        to_return(body: "chunk-two")
+
+      assert_equal "chunk-one", stream_get("http://www.example.com/stream", max_chunks: 1)
+
+      # the aborted response is not replayed: the next request gets the next response
+      assert_equal "chunk-two", http_request(:get, "http://www.example.com/stream").body
+      assert_requested(:get, "http://www.example.com/stream", times: 2)
+    end
+
+    it "keeps the response consumed and the request counted when an after_request callback raises" do
+      callback_order = []
+      WebMock.after_request do |request_signature, _response|
+        callback_order << request_signature.uri.to_s
+        raise "callback boom" if callback_order.size == 1
+      end
+
+      stub_request(:get, "http://www.example.com/stream").
+        to_return(body: "first").then.
+        to_return(body: "second")
+
+      error = assert_raises(RuntimeError) { http_request(:get, "http://www.example.com/stream") }
+      assert_equal "callback boom", error.message
+
+      # the failed callback did not roll anything back: the retry gets the next response
+      assert_equal "second", http_request(:get, "http://www.example.com/stream").body
+      assert_requested(:get, "http://www.example.com/stream", times: 2)
+      assert_equal(
+        ["http://www.example.com:80/stream", "http://www.example.com:80/stream"],
+        callback_order
+      )
+    end
+  end
+
