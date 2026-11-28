@@ -2,6 +2,7 @@ require 'spec_helper'
 require 'acceptance/shared/enabling_and_disabling_webmock'
 require 'acceptance/shared/returning_declared_responses'
 require 'acceptance/shared/callbacks'
+require 'acceptance/shared/callback_views'
 require 'acceptance/shared/request_expectations'
 require 'acceptance/shared/stubbing_requests'
 require 'acceptance/shared/allowing_and_disabling_net_connect'
@@ -42,6 +43,8 @@ shared_examples "with WebMock" do |*adapter_info|
     include_context "request expectations", *adapter_info
 
     include_context "callbacks", *adapter_info
+
+    include_context "callback views", *adapter_info
 
     include_context "enabled and disabled webmock", *adapter_info
 

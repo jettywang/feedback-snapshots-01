@@ -1,5 +1,13 @@
 # Changelog
 
+# Unreleased
+
+* Add limited request/response views to `after_request` callbacks
+
+    `WebMock.after_request` now accepts `shared_view: {request: [...], response: [...]}` to give an observer only the listed fields. Request views can expose `method`, `uri`, `body` and `headers`; response views can expose `status`, `headers` and `body`.
+
+    Each observer receives its own copy, so changing a view cannot alter the recorded request, the stub registry, or what later callbacks see. An error raised by a `shared_view` callback does not prevent later callbacks from running. Callbacks registered without `shared_view` keep receiving the full request signature and response.
+
 # 3.35.0
 
 * Fix `get_file` with Patron 1.1 (#1147)

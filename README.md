@@ -981,6 +981,28 @@ WebMock.after_request(except: [:patron],
 end
 ```
 
+#### pass limited request and response views to untrusted callbacks
+
+A callback registered with `shared_view` receives read-only projections with
+only the listed fields instead of the real request signature and response.
+Allowed request fields are `method`, `uri`, `body` and `headers`; allowed
+response fields are `status`, `headers` and `body`.
+
+```ruby
+WebMock.after_request(
+  shared_view: {request: [:method, :uri], response: [:status]}
+) do |request, response|
+  puts "#{request.method} #{request.uri} returned #{response.status[0]}"
+end
+```
+
+Each callback gets its own copy of the view, so writing to a field it can see
+does not change the request registry, the stub registry, later callbacks or the
+executed request counts. An error raised by a `shared_view` callback is
+contained and does not stop later callbacks. Callbacks registered without
+`shared_view` keep receiving the full `WebMock::RequestSignature` and
+`WebMock::Response`, and their errors still propagate.
+
 ## Bugs and Issues
 
 Please submit them here [http://github.com/bblimke/webmock/issues](http://github.com/bblimke/webmock/issues)
