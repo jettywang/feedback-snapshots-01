@@ -53,6 +53,17 @@ environment names (``tox run -e`` lists environments from your tox configuration
 tox ships a Unix man page accessible via ``man tox`` (see :ref:`howto` for setup). The man page source is at
 ``docs/man/tox.1.rst`` and can be regenerated from the CLI parser with ``tox run -e manpage``.
 
+.. _cli-execution-plan:
+
+******************************
+ Execution plan approval
+******************************
+
+``tox plan -e ... -o plan.json`` records the execution plan of a run without running any project command. ``tox run`` and
+``tox run-parallel`` accept the approved file with ``--plan plan.json``: they compare what they are about to execute
+against it before the first command runs and stop, naming the changed premise, when it no longer matches. ``--plan-out``
+records the approved facts together with the commands that actually executed. See :ref:`howto_plan` for the workflow.
+
 **********************
  Command-line options
 **********************

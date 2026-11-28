@@ -10,6 +10,7 @@ from tox.session.cmd.exec_ import exec_
 from tox.session.cmd.legacy import legacy
 from tox.session.cmd.list_env import list_env
 from tox.session.cmd.man import setup_man
+from tox.session.cmd.plan import plan_command
 from tox.session.cmd.quickstart import quickstart
 from tox.session.cmd.run.parallel import run_parallel
 from tox.session.cmd.run.sequential import run_sequential
@@ -34,6 +35,8 @@ def core_handlers() -> dict[str, Callable[[State], int]]:
         "r": run_sequential,
         "run-parallel": run_parallel,
         "p": run_parallel,
+        "plan": plan_command,
+        "pl": plan_command,
         "d": devenv,
         "devenv": devenv,
         "q": quickstart,

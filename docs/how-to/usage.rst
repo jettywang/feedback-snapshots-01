@@ -165,6 +165,50 @@ The ``tox exec`` subcommand runs an arbitrary command inside a tox environment w
 The command must be in the environment's ``PATH`` or listed in :ref:`allowlist_externals`. ``tox exec`` is useful for
 debugging, running one-off scripts, or interactively exploring an environment without modifying your configuration.
 
+.. _howto_plan:
+
+******************************************************
+ Approve an execution plan before a run (tox plan)
+******************************************************
+
+CI can record the execution plan of a tox run, have a person or a policy approve it, and only then let the run execute.
+The plan names the environments the run selects (the final expansion of ``-e``, labels and factors), the order they run
+in, the environments they depend on, the packaging environments they build through, and the commands, working
+directory, dependencies and variables of every environment that runs project code.
+
+Record the plan without running anything:
+
+.. code-block:: bash
+
+    tox plan -e 3.13,3.13-cov -o approved.json
+
+The preview resolves configuration and environment selection, but starts no process: it cannot run a project command,
+install dependencies or build the package. Hand the file to your approval step, then run against it:
+
+.. code-block:: bash
+
+    tox run -e 3.13,3.13-cov --plan approved.json --plan-out executed.json
+
+Before the first environment runs, tox compares what it is about to do against the approved plan. When the selected
+targets, the order, a command, the working directory, the dependencies or the variables changed since the plan was
+approved, the run stops and names the premise that changed, for example:
+
+.. code-block:: text
+
+    the run does not match the approved execution plan:
+      b: commands changed
+        approved: python -c 'print("run b")'
+        actual:   pytest
+
+The parallel command (``tox run-parallel``) checks the same plan; the order in the plan is the order the environments
+become ready, so a serial and a parallel run of an unchanged configuration both match it.
+
+Once the run ends, ``--plan-out`` writes the approved facts together with the commands that actually executed. Each
+executed command carries the ``fact`` it belongs to (``commands[0]`` for the first test command, ``setup`` for the
+environment preparation) and a ``match`` telling whether it matched the approved premise, so every logged command can be
+checked against what was approved. Use ``tox plan --check approved.json`` to compare the current configuration against
+an approved plan without running.
+
 .. _howto_editor_env:
 
 ***************************************

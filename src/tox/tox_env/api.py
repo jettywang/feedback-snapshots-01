@@ -97,6 +97,7 @@ class ToxEnv(ABC):  # ruff:ignore[too-many-public-methods]  # public facade
         self._suspended_out_err: OutErr | None = None
         self._interruption = _Interruption()
         self._log_id = 0
+        self._plan_record: Callable[[str, ExecuteRequest, ExecuteStatus], None] | None = None
 
     @override
     def __repr__(self) -> str:
@@ -534,7 +535,17 @@ class ToxEnv(ABC):  # ruff:ignore[too-many-public-methods]  # public facade
             self._hidden_outcomes.append(execute_status.outcome)
         if self.journal and execute_status.outcome is not None:
             self.journal.add_execute(execute_status.outcome, run_id)
+        if self._plan_record is not None:
+            self._plan_record(self.name, request, execute_status)
         self._log_execute(request, execute_status)
+
+    def plan_record(self, recorder: Callable[[str, ExecuteRequest, ExecuteStatus], None] | None) -> None:
+        """Record the commands the environment executes, when a run checks an execution plan.
+
+        :param recorder: the callback that receives each execution, ``None`` to stop recording
+
+        """
+        self._plan_record = recorder
 
     @property
     def environment_variables(self) -> dict[str, str]:

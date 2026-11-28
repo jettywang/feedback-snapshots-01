@@ -14,6 +14,7 @@ __lazy_modules__ = [
     "tox.execute",
     "tox.journal",
     "tox.report",
+    "tox.session.plan",
     "tox.tox_env.errors",
     "tox.util.graph",
     "tox.util.venv_redirect",
@@ -124,6 +125,25 @@ def env_run_create_flags(
             help="if recreate is set do not recreate packaging tox environment(s)",
             action="store_true",
         )
+    if mode in {"run", "run-parallel", "legacy"}:
+        parser.add_argument(
+            "--plan",
+            "--plan-check",
+            dest="plan_check",
+            metavar="path",
+            of_type=Path,
+            default=None,
+            help="check the run against the approved execution plan at this path before executing anything",
+        )
+        parser.add_argument(
+            "--plan-out",
+            "--plan-write",
+            dest="plan_out",
+            metavar="path",
+            of_type=Path,
+            default=None,
+            help="write the execution plan, and the commands the run executed, to this path",
+        )
     if mode not in {"devenv", "config", "depends"}:
         parser.add_argument(
             "--skip-pkg-install",
@@ -219,6 +239,13 @@ def execute(  # keeps the signature
     for name in to_run_list:
         cast("RunToxEnv", state.envs[name]).mark_active()
     _venv_redirect_enabled(state, _env_dirs(state))  # reject a conflicting setting before any environment runs
+    plan_check = _plan_check(state, to_run_list)
+    if isinstance(plan_check, int):  # the plan check refused the run before any project code ran
+        return plan_check
+    plan_record, plan_approved, plan_changes = plan_check
+    if plan_record is not None:
+        _attach_plan_recorder(state, to_run_list, plan_record)
+        _record_plan_variables(state, to_run_list)
 
     scheduler_error: list[BaseException] = []
 
@@ -279,6 +306,9 @@ def execute(  # keeps the signature
         ordered_results = _order_results(state, results, to_run_list)
         # write the journal
         write_journal(state.conf.options.result_json, state._journal)  # ruff:ignore[private-member-access]
+        # report what the approved plan expected against what ran
+        if plan_record is not None:  # pragma: no branch  # only runs when a plan is approved
+            _write_plan_record(state, plan_record, plan_approved, plan_changes, ordered_results)
         # let editors discover an environment
         _record_venv_redirect(state)
         # warn about unused config keys
@@ -295,6 +325,86 @@ def execute(  # keeps the signature
         if has_previous:
             signal(SIGINT, previous)
     return exit_code
+
+
+def _attach_plan_recorder(state: State, to_run: list[str], recorder: Any) -> None:
+    from tox.session import plan  # ruff:ignore[import-outside-top-level]  # avoids an import cycle
+
+    def record(env: str, request: Any, status: Any) -> None:
+        plan.record_execution(
+            env,
+            request.run_id,
+            request.cmd,
+            request.cwd,
+            request.env,
+            status.outcome is not None and status.outcome.start_error is None,
+        )
+
+    for name in to_run:
+        state.envs[name].plan_record(record)
+        for pkg_env in cast("RunToxEnv", state.envs[name]).package_envs:
+            pkg_env.plan_record(record)
+
+
+def _record_plan_variables(state: State, to_run: list[str]) -> None:
+    from tox.session import plan  # ruff:ignore[import-outside-top-level]  # avoids an import cycle
+
+    for name in to_run:
+        env = cast("RunToxEnv", state.envs[name])
+        plan.record_variables(env)
+        for pkg_env in env.package_envs:
+            plan.record_variables(pkg_env)
+
+
+def _plan_check(state: State, to_run: list[str]) -> tuple[Any, Any, list[dict[str, str]]] | int:
+    """Check the run against an approved plan before any environment runs.
+
+    :param state: the state of the run
+    :param to_run: the environments selected to run
+
+    :returns: the record to write, the approved plan and the differences, or the exit code when the check refuses
+
+    """
+    from tox.session import plan  # ruff:ignore[import-outside-top-level]  # avoids an import cycle
+
+    approved_file = getattr(state.conf.options, "plan_check", None)
+    out_file = getattr(state.conf.options, "plan_out", None)
+    if approved_file is None and out_file is None:
+        return cast("Any", None), None, []
+    approved: plan.Plan | None = None
+    if approved_file is not None:
+        try:
+            approved = plan.Plan.load(approved_file)
+        except plan.PlanError as exception:
+            _LOGGER.error("%s", exception)  # ruff:ignore[error-instead-of-exception]  # expected error log
+            return 1
+        changes = plan.compare(approved, plan.record(state, to_run))
+        if changes:
+            print(plan.format_changes(changes))  # ruff:ignore[print]  # terminal output
+            return 1
+    recorder = plan.ExecutionRecord()
+    plan.install(recorder)
+    return recorder, approved, []
+
+
+def _write_plan_record(
+    state: State,
+    recorder: Any,
+    approved: Any,
+    changes: list[dict[str, str]],
+    results: list[ToxEnvRunResult],
+) -> None:
+    from tox.session import plan  # ruff:ignore[import-outside-top-level]  # avoids an import cycle
+
+    plan.uninstall()
+    executed = recorder.matches(approved, changes)
+    preview = plan.record(state)
+    document = dict(preview)
+    document["approved"] = True
+    document["executed"] = executed
+    document["results"] = {i.name: {"success": i.code == Outcome.OK, "skipped": i.skipped} for i in results}
+    if (out := getattr(state.conf.options, "plan_out", None)) is not None:
+        plan.Plan.write(out, document)
 
 
 def _venv_redirect_enabled(state: State, env_dirs: dict[str, Path]) -> bool:
@@ -577,7 +687,9 @@ def _handle_one_run_done(
         if not success or tox_env.conf["parallel_show_output"] or state.conf.options.list_dependencies:
             for pkg_out_err in pkg_out_err_list:
                 # internal access, not reached in tests
-                state._options.log_handler.write_out_err(pkg_out_err)  # pragma: no cover  # ruff:ignore[private-member-access]
+                state._options.log_handler.write_out_err(  # pragma: no cover  # ruff:ignore[private-member-access]
+                    pkg_out_err
+                )
             if out_err is not None:  # pragma: no branch # first show package build
                 state._options.log_handler.write_out_err(  # ruff:ignore[private-member-access]  # internal access
                     out_err
