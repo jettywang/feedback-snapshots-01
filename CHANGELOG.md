@@ -3,6 +3,8 @@
 ## HEAD
 
 ### User-facing changes
+- [FEATURE] add `auditwheel verify` for read-only, byte-level evidence of a finished wheel
+- [FEATURE] bind SBOM components to archive members by path, size, and SHA-256
 - [BUGFIX] avoid duplicating the wheel component in SBOMs ([#750](https://github.com/pypa/auditwheel/issues/750))
 
 ## 6.8.2

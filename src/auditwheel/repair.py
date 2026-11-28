@@ -67,6 +67,10 @@ def repair_wheel(
             f"found {len(dist_info_dirs)}: {dist_info_dirs}"
         )
         sbom_filepaths: list[Path] = []
+        # Map each source library to the member path it was written to.  This
+        # lets the bundled SBOM bind a supplier component to the exact bytes
+        # that end up in the archive instead of relying on a package name.
+        sbom_members: dict[str, str] = {}
         script_shims: dict[Path, Path] = {}  # map needed for strip to get the actual ELF file
 
         # here, fn is a path to an ELF file (lib or executable) in
@@ -97,6 +101,7 @@ def repair_wheel(
                     dest_dir.mkdir()
                 sbom_filepaths.append(src_path)
                 new_soname, new_path = copylib(src_path, dest_dir, patcher)
+                sbom_members[str(src_path)] = new_path.as_posix()
                 soname_map[soname] = (new_soname, new_path)
                 replacements.append((soname, new_soname))
             if replacements:
@@ -146,6 +151,7 @@ def repair_wheel(
         sbom_data = create_sbom_for_wheel(
             wheel_fname=output_wheel.name,
             sbom_filepaths=sbom_filepaths,
+            sbom_members=sbom_members,
         )
         if sbom_data:
             sbom_dir = Path(dist_info_dirs[0], "sboms")

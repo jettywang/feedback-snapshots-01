@@ -3,19 +3,17 @@ from __future__ import annotations
 import hashlib
 import typing
 from importlib import metadata
-from typing import TYPE_CHECKING
+from pathlib import Path
 from urllib.parse import quote
 
 from auditwheel._vendor.whichprovides import whichprovides
 from auditwheel.wheeltools import WHEEL_INFO_RE
 
-if TYPE_CHECKING:
-    from pathlib import Path
-
 
 def create_sbom_for_wheel(
     wheel_fname: str,
     sbom_filepaths: list[Path],
+    sbom_members: dict[str, str] | None = None,
 ) -> dict[str, typing.Any] | None:
     # If there aren't any files then we bail.
     if not sbom_filepaths:
@@ -69,15 +67,31 @@ def create_sbom_for_wheel(
         bom_ref = (
             provided_by.purl + f"#{hashlib.sha256(filepath.encode(errors='ignore')).hexdigest()}"
         )
-        sbom_components.append(
-            {
-                "type": "library",
-                "bom-ref": bom_ref,
-                "name": provided_by.package_name,
-                "version": provided_by.package_version,
-                "purl": provided_by.purl,
-            },
-        )
+        component: dict[str, typing.Any] = {
+            "type": "library",
+            "bom-ref": bom_ref,
+            "name": provided_by.package_name,
+            "version": provided_by.package_version,
+            "purl": provided_by.purl,
+        }
+        if sbom_members is not None:
+            member_path = sbom_members.get(filepath)
+            if member_path is not None:
+                # Bind the supplier identity to the exact member that will be
+                # packed into the wheel.  The verifier uses these bytes, not
+                # the component name, to prove what was shipped.
+                member_data = Path(member_path).read_bytes()
+                component["hashes"] = [
+                    {
+                        "alg": "SHA-256",
+                        "content": hashlib.sha256(member_data).hexdigest(),
+                    },
+                ]
+                component["properties"] = [
+                    {"name": "auditwheel:archive_path", "value": Path(member_path).as_posix()},
+                    {"name": "auditwheel:member_size", "value": str(len(member_data))},
+                ]
+        sbom_components.append(component)
         sbom_dependencies[0]["dependsOn"].append(bom_ref)  # type: ignore[attr-defined]
         sbom_dependencies.append({"ref": bom_ref})
 

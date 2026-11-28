@@ -1,0 +1,460 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "auditwheel verify",
+  "description": "Read-only evidence report for a finished wheel.",
+  "type": "object",
+  "properties": {
+    "format": {
+      "const": "auditwheel-verify"
+    },
+    "version": {
+      "const": 1
+    },
+    "wheel": {
+      "type": "string"
+    },
+    "status": {
+      "enum": [
+        "verified",
+        "incomplete",
+        "failed"
+      ]
+    },
+    "archive": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "sha256": {
+          "type": "string"
+        },
+        "size": {
+          "type": "integer"
+        },
+        "member_count": {
+          "type": "integer"
+        },
+        "duplicate_member_count": {
+          "type": "integer"
+        },
+        "zip_comment": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "sha256",
+        "size",
+        "member_count",
+        "duplicate_member_count"
+      ],
+      "additionalProperties": false
+    },
+    "record": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "sha256": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "size": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "entry_count": {
+          "type": "integer"
+        },
+        "entries": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "path": {
+                "type": "string"
+              },
+              "recorded_hash": {
+                "type": "string"
+              },
+              "recorded_size": {
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "status": {
+                "type": "string"
+              },
+              "member_present": {
+                "type": "boolean"
+              },
+              "member_duplicate": {
+                "type": "boolean"
+              },
+              "actual_sha256": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "actual_size": {
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "bytes_match": {
+                "type": "boolean"
+              },
+              "size_match": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "verified": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "path",
+              "status",
+              "verified"
+            ],
+            "additionalProperties": true
+          }
+        },
+        "unrecorded_members": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "missing_members": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "duplicate_entries": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "parse_error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "entry_count",
+        "entries",
+        "unrecorded_members",
+        "missing_members"
+      ],
+      "additionalProperties": false
+    },
+    "members": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string"
+          },
+          "archive_index": {
+            "type": "integer"
+          },
+          "size": {
+            "type": "integer"
+          },
+          "sha256": {
+            "type": "string"
+          },
+          "crc32": {
+            "type": "string"
+          },
+          "declared_size": {
+            "type": "integer"
+          },
+          "declared_crc32": {
+            "type": "string"
+          },
+          "effective": {
+            "type": "boolean"
+          },
+          "duplicate": {
+            "type": "boolean"
+          },
+          "record_status": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "record_verified": {
+            "type": "boolean"
+          },
+          "sbom_component_refs": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          },
+          "read_error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "path",
+          "archive_index",
+          "size",
+          "sha256",
+          "effective",
+          "duplicate",
+          "record_status",
+          "record_verified"
+        ],
+        "additionalProperties": true
+      }
+    },
+    "sbom_manifests": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string"
+          },
+          "sha256": {
+            "type": "string"
+          },
+          "size": {
+            "type": "integer"
+          },
+          "record_status": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "format": {
+            "type": "string"
+          },
+          "spec_version": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "new_style": {
+            "type": "boolean"
+          },
+          "component_count": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "path",
+          "sha256",
+          "size",
+          "new_style",
+          "component_count"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "components": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    },
+    "local_libraries": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string"
+          },
+          "sha256": {
+            "type": "string"
+          },
+          "size": {
+            "type": "integer"
+          },
+          "soname": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "machine": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "elf_class": {
+            "type": "integer"
+          },
+          "needed": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "record_status": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "record_verified": {
+            "type": "boolean"
+          },
+          "provenance": {
+            "enum": [
+              "verified",
+              "unverified",
+              "missing",
+              "failed"
+            ]
+          },
+          "sbom_components": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          }
+        },
+        "required": [
+          "path",
+          "sha256",
+          "size",
+          "record_verified",
+          "provenance",
+          "sbom_components"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "elf_members": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    },
+    "gaps": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "code": {
+            "type": "string"
+          },
+          "detail": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "code"
+        ],
+        "additionalProperties": true
+      }
+    },
+    "checks": {
+      "type": "object"
+    },
+    "summary": {
+      "type": "object",
+      "properties": {
+        "evidence_coverage": {
+          "enum": [
+            "complete",
+            "partial",
+            "none",
+            "not-applicable"
+          ]
+        },
+        "record_entries_verified": {
+          "type": "integer"
+        },
+        "record_entry_count": {
+          "type": "integer"
+        },
+        "local_library_count": {
+          "type": "integer"
+        },
+        "sbom_manifest_count": {
+          "type": "integer"
+        },
+        "gap_count": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "evidence_coverage",
+        "record_entries_verified",
+        "record_entry_count",
+        "local_library_count",
+        "sbom_manifest_count",
+        "gap_count"
+      ],
+      "additionalProperties": false
+    },
+    "proofs": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "kind": {
+            "enum": [
+              "record-bytes",
+              "member-record-sbom"
+            ]
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "additionalProperties": true
+      }
+    }
+  },
+  "required": [
+    "format",
+    "version",
+    "wheel",
+    "status",
+    "archive",
+    "record",
+    "members",
+    "sbom_manifests",
+    "components",
+    "local_libraries",
+    "elf_members",
+    "gaps",
+    "checks",
+    "summary",
+    "proofs"
+  ],
+  "additionalProperties": false
+}

@@ -64,6 +64,36 @@ Installation
 Examples
 --------
 
+Verifying a finished wheel without touching it: ::
+
+    $ auditwheel verify wheelhouse/numpy-2.0.0-cp312-cp312-manylinux_2_28_x86_64.whl
+
+``auditwheel verify`` reads only the archive bytes. It checks every member
+against ``RECORD``, parses bundled CycloneDX SBOM documents, and reports each
+local shared library's provenance. It never extracts, executes, rewrites, or
+repairs the wheel.
+
+The report has three outcomes:
+
+- ``verified``: every member matches RECORD and every local library is bound
+  to an SBOM component by archive path and SHA-256. No evidence is missing.
+- ``incomplete``: the archive itself is internally consistent, but evidence is
+  absent. Examples are a legacy package-name-only SBOM or a library that no
+  SBOM component maps to. Use ``--fail-on-gaps`` to make this exit non-zero.
+- ``failed``: bytes disagree. Examples are a RECORD hash mismatch, a member
+  written twice with different bytes, or an SBOM digest that does not match the
+  effective member.
+
+Add ``--json`` for the full machine-readable report, including the wheel
+archive digest, per-member digests and archive indexes, RECORD entries, and
+explicit evidence gaps.
+
+SBOMs written by current ``auditwheel repair`` bind each supplier component to
+the exact archive member with ``auditwheel:archive_path`` and
+``auditwheel:member_size`` properties plus a SHA-256 hash. Older wheels may
+contain package-name-only SBOMs; those are reported as evidence gaps, not as
+tampering, and are never rewritten by ``verify``.
+
 Inspecting a wheel: ::
 
     $ auditwheel show cffi-1.5.0-cp35-cp35m-linux_x86_64.whl

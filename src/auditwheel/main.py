@@ -8,7 +8,7 @@ from importlib import metadata
 from pathlib import Path
 
 import auditwheel
-from auditwheel import main_lddtree, main_repair, main_show
+from auditwheel import main_lddtree, main_repair, main_show, main_verify
 
 
 def main() -> int | None:
@@ -35,6 +35,7 @@ def main() -> int | None:
     main_show.configure_parser(sub_parsers)
     main_repair.configure_parser(sub_parsers)
     main_lddtree.configure_subparser(sub_parsers)
+    main_verify.configure_parser(sub_parsers)
 
     args = p.parse_args()
 
