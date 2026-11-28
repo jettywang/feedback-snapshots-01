@@ -40,5 +40,27 @@ task :doc => :yard
 require 'bundler/audit/task'
 Bundler::Audit::Task.new
 
+require 'bundler/audit/release_task'
+
+namespace :bundle do
+  namespace :audit do
+    desc 'Release-pipeline scan with an auditable update, scan and delivery trail'
+    task :release do
+      task = Bundler::Audit::ReleaseTask.new(
+        database:      ENV['BUNDLER_AUDIT_DB'],
+        root:          ENV['BUNDLER_AUDIT_ROOT'] || Dir.pwd,
+        gemfile_lock:  ENV['BUNDLER_AUDIT_GEMFILE_LOCK'] || 'Gemfile.lock',
+        update:        ENV.key?('BUNDLER_AUDIT_UPDATE') ? ENV['BUNDLER_AUDIT_UPDATE'] != 'false' : :auto,
+        ignore:        ENV['BUNDLER_AUDIT_IGNORE'] ? ENV['BUNDLER_AUDIT_IGNORE'].split(',') : [],
+        format:        ENV['BUNDLER_AUDIT_FORMAT'] || 'json',
+        output:        ENV['BUNDLER_AUDIT_OUTPUT'],
+        manifest:      ENV['BUNDLER_AUDIT_MANIFEST']
+      )
+
+      exit(task.execute)
+    end
+  end
+end
+
 require 'rubocop/rake_task'
 RuboCop::RakeTask.new

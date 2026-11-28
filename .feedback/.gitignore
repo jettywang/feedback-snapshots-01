@@ -1,2 +1,8 @@
 /vendor/
 /.bundle/
+
+# Offline demo fixtures are rebuilt by demo/setup_demo.rb. The advisory
+# databases contain .git symlinks into $TMPDIR, so they are never portable.
+/demo/advisory-dbs/
+/demo/locks/
+/demo/out/
