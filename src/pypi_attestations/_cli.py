@@ -5,8 +5,11 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import platform
+import sys
 import typing
 from collections import defaultdict
+from contextlib import contextmanager
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -36,9 +39,18 @@ from pypi_attestations._impl import (
     GooglePublisher,
     Provenance,
 )
+from pypi_attestations._receipt import (
+    ReceiptRecorder,
+    Segment,
+    record_failure,
+    record_gap,
+    record_read,
+    record_success,
+    redact_text,
+)
 
 if typing.TYPE_CHECKING:  # pragma: no cover
-    from collections.abc import Iterable
+    from collections.abc import Iterable, Iterator
     from typing import NoReturn
 
     from rfc3986 import URIReference
@@ -137,6 +149,14 @@ def _parser() -> argparse.ArgumentParser:
     )
 
     verify_attestation_command.add_argument(
+        "--receipt",
+        type=Path,
+        metavar="PATH",
+        help="Write a shareable JSON receipt of the evidence that was read "
+        "to PATH, or to stdout if PATH is '-'",
+    )
+
+    verify_attestation_command.add_argument(
         "files",
         metavar="FILE",
         type=Path,
@@ -200,6 +220,14 @@ def _parser() -> argparse.ArgumentParser:
         help="Provide the provenance file instead of downloading it from PyPI",
     )
 
+    verify_pypi_command.add_argument(
+        "--receipt",
+        type=Path,
+        metavar="PATH",
+        help="Write a shareable JSON receipt of the evidence that was read "
+        "to PATH, or to stdout if PATH is '-'",
+    )
+
     inspect_command = subcommands.add_parser(
         name="inspect",
         help="Inspect one or more inputs",
@@ -245,8 +273,63 @@ def _parser() -> argparse.ArgumentParser:
 
 def _die(message: str) -> NoReturn:
     """Handle errors and terminate the program with an error code."""
+    record_failure(message)
     _logger.error(message)
     raise SystemExit(1)
+
+
+def _command_line() -> str:
+    """Return a shareable representation of the current command line."""
+    return redact_text(" ".join(["pypi-attestations", *sys.argv[1:]]))
+
+
+@contextmanager
+def _receipt_context(args: argparse.Namespace) -> Iterator[ReceiptRecorder | None]:
+    """Open the optional receipt requested by the user, if any."""
+    receipt_path = getattr(args, "receipt", None)
+    if receipt_path is None:
+        yield None
+        return
+
+    recorder = ReceiptRecorder(
+        receipt_path,
+        command=_command_line(),
+        environment={
+            "python": platform.python_version(),
+            "platform": platform.system(),
+            "offline": bool(getattr(args, "offline", False)),
+            "staging": bool(getattr(args, "staging", False)),
+        },
+        tool_version=__version__,
+    )
+    with recorder:
+        yield recorder
+
+
+def _record_local_read(segment: Segment, path: Path, *, sha256: str, size: int) -> None:
+    """Record a file read whose contents were consumed by another reader."""
+    record_read(
+        segment,
+        kind="file",
+        location=str(path),
+        name=path.name,
+        sha256=sha256,
+        size=size,
+    )
+
+
+def _record_download_read(
+    segment: Segment, url: str, name: str, *, sha256: str, size: int
+) -> None:
+    """Record a download by its origin URL rather than its temporary path."""
+    record_read(
+        segment,
+        kind="url",
+        location=url,
+        name=name,
+        sha256=sha256,
+        size=size,
+    )
 
 
 def _validate_files(files: Iterable[Path], should_exist: bool = True) -> None:
@@ -287,13 +370,17 @@ def _download_file(url: str, dest: Path) -> None:
     try:
         with urllib3.request("GET", url, preload_content=False) as response:
             if response.status >= 400:
-                _die(f"Error downloading file: {response.status} {response.reason}")
+                message = f"Error downloading file: {response.status} {response.reason}"
+                record_gap("artifact", "download_failed", message, kind="url", location=url)
+                _die(message)
 
             with open(dest, "wb") as f:
                 for chunk in response.stream(1024):
                     f.write(chunk)
     except urllib3.exceptions.HTTPError as e:
-        _die(f"Error downloading file: {e}")
+        message = f"Error downloading file: {e}"
+        record_gap("artifact", "download_failed", message, kind="url", location=url)
+        _die(message)
 
 
 def _get_distribution_from_arg(arg: str, offline: bool) -> Distribution:
@@ -306,6 +393,11 @@ def _get_distribution_from_arg(arg: str, offline: bool) -> Distribution:
     """
     if arg.startswith("pypi:") or arg.startswith("https://"):
         if offline:
+            record_gap(
+                "artifact",
+                "offline",
+                "The '--offline' option can only be used with local files",
+            )
             _die("The '--offline' option can only be used with local files")
         pypi_url = _get_direct_url_from_arg(arg)
         dist_filename = pypi_url.path.split("/")[-1]
@@ -313,11 +405,28 @@ def _get_distribution_from_arg(arg: str, offline: bool) -> Distribution:
             dist_path = Path(temp_dir) / dist_filename
             _download_file(url=pypi_url.unsplit(), dest=dist_path)
             dist = Distribution.from_file(dist_path)
+            _record_download_read(
+                "artifact",
+                pypi_url.unsplit(),
+                dist_filename,
+                sha256=dist.digest,
+                size=dist_path.stat().st_size,
+            )
     else:
         dist_path = Path(arg)
         if not dist_path.exists():
+            record_gap(
+                "artifact",
+                "missing",
+                f"File does not exist: {dist_path}",
+                kind="file",
+                location=str(dist_path),
+            )
             _die(f"File does not exist: {dist_path}")
         dist = Distribution.from_file(dist_path)
+        _record_local_read(
+            "artifact", dist_path, sha256=dist.digest, size=dist_path.stat().st_size
+        )
 
     return dist
 
@@ -348,7 +457,13 @@ def _get_direct_url_from_arg(arg: str) -> URIReference:
             "GET", provenance_url, headers={"Accept": "application/vnd.pypi.simple.v1+json"}
         )
         if response.status >= 400:
-            _die(f"Error trying to get information for '{pkg_name}' from PyPI: {response.status}")
+            message = (
+                f"Error trying to get information for '{pkg_name}' from PyPI: {response.status}"
+            )
+            record_gap(
+                "artifact", "index_lookup_failed", message, kind="url", location=provenance_url
+            )
+            _die(message)
 
         response_json = response.json()
         for file_json in response_json.get("files", []):
@@ -356,7 +471,9 @@ def _get_direct_url_from_arg(arg: str) -> URIReference:
                 direct_url = file_json.get("url", "")
                 break
         if not direct_url:
-            _die(f"Could not find the artifact '{file_name}' on PyPI")
+            message = f"Could not find the artifact '{file_name}' on PyPI"
+            record_gap("artifact", "not_found", message, kind="url", location=provenance_url)
+            _die(message)
     else:
         direct_url = arg
 
@@ -387,19 +504,38 @@ def _get_provenance_from_pypi(dist: Distribution) -> Provenance:
     provenance_url = f"https://pypi.org/integrity/{name}/{version}/{filename}/provenance"
     response = urllib3.request("GET", provenance_url)
     if response.status == 403:
-        _die("Access to provenance is temporarily disabled by PyPI administrators")
+        message = "Access to provenance is temporarily disabled by PyPI administrators"
+        record_gap(
+            "provenance", "unavailable", message, kind="url", location=provenance_url
+        )
+        _die(message)
     elif response.status == 404:
-        _die(f'Provenance for file "{filename}" was not found')
+        message = f'Provenance for file "{filename}" was not found'
+        record_gap("provenance", "not_found", message, kind="url", location=provenance_url)
+        _die(message)
     elif response.status != 200:
-        _die(
+        message = (
             f"Unexpected error while downloading provenance file from PyPI, Integrity API "
             f"returned status code: {response.status}"
         )
+        record_gap("provenance", "http_error", message, kind="url", location=provenance_url)
+        _die(message)
 
+    record_read(
+        "provenance",
+        kind="url",
+        location=provenance_url,
+        name=f"{filename}.provenance",
+        data=response.data,
+    )
     try:
         return Provenance.model_validate_json(response.data)
     except ValidationError as validation_error:
-        _die(f"Invalid provenance: {validation_error}")
+        message = f"Invalid provenance: {validation_error}"
+        record_gap(
+            "provenance", "invalid", message, kind="url", location=provenance_url
+        )
+        _die(message)
 
 
 def _check_repository_identity(
@@ -535,7 +671,16 @@ def _verify_attestation(args: argparse.Namespace) -> None:
     """Verify the files passed as argument."""
     pol = policy.Identity(identity=args.identity)
 
-    # Validate that the files exist
+    # Record any artifact that is missing before the generic validation exits.
+    for file_path in args.files:
+        if not file_path.is_file():
+            record_gap(
+                "artifact",
+                "missing",
+                f"{file_path} is not a file.",
+                kind="file",
+                location=str(file_path),
+            )
     _validate_files(args.files, should_exist=True)
 
     # artifact -> [attestation1, attestation2, ...]
@@ -545,26 +690,54 @@ def _verify_attestation(args: argparse.Namespace) -> None:
             if attestation_file.exists():
                 files_with_attestations[f].append(attestation_file)
         if not files_with_attestations[f]:
+            record_gap(
+                "attestation",
+                "missing",
+                f"Couldn't find attestations for file {f}",
+                kind="file",
+                location=str(f),
+            )
             _die(f"Couldn't find attestations for file {f}")
 
+    verified_attestations = 0
+    recorded_artifacts: set[Path] = set()
     for file_path, attestations in files_with_attestations.items():
         for attestation_path in attestations:
+            attestation_bytes = attestation_path.read_bytes()
+            record_read(
+                "attestation",
+                kind="file",
+                location=str(attestation_path),
+                name=attestation_path.name,
+                data=attestation_bytes,
+            )
             try:
-                attestation = Attestation.model_validate_json(attestation_path.read_bytes())
+                attestation = Attestation.model_validate_json(attestation_bytes)
             except ValidationError as validation_error:
                 _die(f"Invalid attestation ({attestation_path}): {validation_error}")
 
-            try:
-                dist = Distribution.from_file(file_path)
-            except ValidationError as e:
-                _die(f"Invalid Python package distribution: {e}")
+            if file_path not in recorded_artifacts:
+                try:
+                    dist = Distribution.from_file(file_path)
+                except ValidationError as e:
+                    _die(f"Invalid Python package distribution: {e}")
+                _record_local_read(
+                    "artifact", file_path, sha256=dist.digest, size=file_path.stat().st_size
+                )
+                recorded_artifacts.add(file_path)
 
             try:
                 attestation.verify(pol, dist, staging=args.staging, offline=args.offline)
             except VerificationError as verification_error:
                 _die(f"Verification failed for {file_path}: {verification_error}")
 
+            verified_attestations += 1
             _logger.info(f"OK: {attestation_path}")
+
+    record_success(
+        f"OK: verified {verified_attestations} attestation(s) for "
+        f"{len(files_with_attestations)} artifact(s)"
+    )
 
 
 def _verify_pypi(args: argparse.Namespace) -> None:
@@ -579,13 +752,33 @@ def _verify_pypi(args: argparse.Namespace) -> None:
 
     if args.provenance_file is None:
         if args.offline:
+            record_gap(
+                "provenance",
+                "offline",
+                "The '--offline' option can only be used with local files",
+            )
             _die("The '--offline' option can only be used with local files")
         provenance = _get_provenance_from_pypi(dist)
     else:
         if not args.provenance_file.exists():
+            record_gap(
+                "provenance",
+                "missing",
+                f"Provenance file does not exist: {args.provenance_file}",
+                kind="file",
+                location=str(args.provenance_file),
+            )
             _die(f"Provenance file does not exist: {args.provenance_file}")
+        provenance_bytes = args.provenance_file.read_bytes()
+        record_read(
+            "provenance",
+            kind="file",
+            location=str(args.provenance_file),
+            name=args.provenance_file.name,
+            data=provenance_bytes,
+        )
         try:
-            provenance = Provenance.model_validate_json(args.provenance_file.read_bytes())
+            provenance = Provenance.model_validate_json(provenance_bytes)
         except ValidationError as validation_error:
             _die(f"Invalid provenance: {validation_error}")
 
@@ -641,6 +834,7 @@ def _verify_pypi(args: argparse.Namespace) -> None:
     except VerificationError as verification_error:
         _die(f"Verification failed for {dist.name}: {verification_error}")
 
+    record_success(f"OK: {dist.name}")
     _logger.info(f"OK: {dist.name}")
 
 
@@ -681,10 +875,11 @@ def main() -> None:
     if args.subcommand == "sign":
         _sign(args)
     elif args.subcommand == "verify":
-        if args.verification_type == "attestation":
-            _verify_attestation(args)
-        elif args.verification_type == "pypi":
-            _verify_pypi(args)
+        with _receipt_context(args):
+            if args.verification_type == "attestation":
+                _verify_attestation(args)
+            elif args.verification_type == "pypi":
+                _verify_pypi(args)
     elif args.subcommand == "inspect":
         _inspect(args)
     elif args.subcommand == "convert":

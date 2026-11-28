@@ -168,6 +168,38 @@ This command downloads the artifact, if needed, and its provenance from PyPI. Th
 is then verified against the provenance, while also checking that the provenance's
 signing identity matches the repository specified by the user.
 
+### Recording a verification receipt
+
+Both `verify` subcommands accept an optional `--receipt PATH` flag (use `-` for
+stdout). The receipt is a shareable JSON document that records, for each piece of
+evidence that was actually read, its source, the time it was read and its SHA-256
+digest. When a piece of evidence is missing (for example, a provenance that the
+index has not synced yet), the receipt contains an explicit evidence gap instead of
+silently omitting it.
+
+```bash
+pypi-attestations verify pypi --repository https://github.com/sigstore/sigstore-python \
+  --receipt receipt.json pypi:sigstore-3.6.1-py3-none-any.whl
+```
+
+Receipts never contain index credentials: URL userinfo and query strings are
+stripped before a source is recorded, and any redaction is listed under
+`redactions`. A receipt can be replayed offline against locally kept copies of the
+same bytes:
+
+```python
+from pathlib import Path
+
+from pypi_attestations import Receipt, replay_receipt
+
+receipt = Receipt.model_validate_json(Path("receipt.json").read_text())
+result = replay_receipt(receipt)
+print(result.conclusion.status, result.conclusion.verified)
+```
+
+This makes it possible to reconstruct which artifact and which provenance a past
+verification used, and why it did or did not succeed.
+
 ### Converting a Sigstore bundle into a PEP 740 Attestation
 
 ```bash

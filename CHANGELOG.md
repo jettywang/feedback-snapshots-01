@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `verify` now accepts an optional `--receipt PATH` flag that writes a shareable
+  JSON receipt of the evidence actually read (source, read time and SHA-256
+  digest), including explicit evidence gaps for anything missing. Receipts strip
+  index credentials and can be replayed offline with `replay_receipt`.
+
 ### Changed
 
 - The minimum Python version required is now `3.11`.

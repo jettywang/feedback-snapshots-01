@@ -20,6 +20,16 @@ from ._impl import (
     VerificationError,
     VerificationMaterial,
 )
+from ._receipt import (
+    Conclusion,
+    Digest,
+    EvidenceGap,
+    ReadRecord,
+    Receipt,
+    ReplayResult,
+    Source,
+    replay_receipt,
+)
 
 __all__ = [
     "Attestation",
@@ -27,15 +37,23 @@ __all__ = [
     "AttestationError",
     "AttestationType",
     "CircleCIPublisher",
+    "Conclusion",
     "ConversionError",
+    "Digest",
     "Distribution",
     "Envelope",
+    "EvidenceGap",
     "GitHubPublisher",
     "GitLabPublisher",
     "GooglePublisher",
     "Provenance",
     "Publisher",
+    "ReadRecord",
+    "Receipt",
+    "ReplayResult",
+    "Source",
     "TransparencyLogEntry",
     "VerificationError",
     "VerificationMaterial",
+    "replay_receipt",
 ]

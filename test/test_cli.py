@@ -8,6 +8,7 @@ import sys
 import tempfile
 from contextlib import nullcontext
 from pathlib import Path
+from typing import Any
 
 import pytest
 import sigstore.oidc
@@ -23,6 +24,7 @@ from pypi_attestations._cli import (
     main,
 )
 from pypi_attestations._impl import Attestation, AttestationError, ConversionError, Distribution
+from pypi_attestations._receipt import Receipt, replay_receipt
 
 ONLINE_TESTS = "CI" in os.environ and "TEST_OFFLINE" not in os.environ
 
@@ -1128,3 +1130,213 @@ def test_verify_pypi_command_github_no_repository(caplog: pytest.LogCaptureFixtu
             ]
         )
     assert "Provenance signed by a repository, but no repository URL provided" in caplog.text
+
+
+def _read_receipt(path: Path) -> Receipt:
+    return Receipt.model_validate_json(path.read_text())
+
+
+def test_verify_pypi_receipt_before_and_after_sync(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Replay the evidence recorded for a pre-sync and post-sync verification.
+
+    The index is stubbed as an offline stand-in: the artifact lookup returns a
+    pre-signed URL, and the provenance endpoint returns 404 until `synced` is
+    flipped. Both runs use only local bytes; no real index is contacted.
+    """
+    artifact_url = (
+        f"https://files.pythonhosted.org/packages/c5/4d/{pypi_sdist_filename}"
+        "?token=index-secret&signature=abc123"
+    )
+    provenance_url = (
+        f"https://pypi.org/integrity/pypi-attestations/0.0.19/"
+        f"{pypi_sdist_filename}/provenance"
+    )
+    provenance_bytes = pypi_sdist_provenance_path.read_bytes()
+    state = {"synced": False}
+
+    def fake_request(method: str, url: str, **kwargs: Any) -> Any:
+        if "/simple/" in url:
+            return stub(
+                status=200,
+                data=b"",
+                json=lambda: {
+                    "files": [{"filename": pypi_sdist_filename, "url": artifact_url}]
+                },
+            )
+        if url == provenance_url:
+            if state["synced"]:
+                return stub(status=200, data=provenance_bytes)
+            return stub(status=404, data=b"")
+        raise AssertionError(f"unexpected request to {url}")
+
+    monkeypatch.setattr(urllib3, "request", fake_request)
+    monkeypatch.setattr(
+        pypi_attestations._cli,
+        "_download_file",
+        lambda url, dest: dest.write_bytes(pypi_sdist_path.read_bytes()),
+    )
+
+    # Stub the Sigstore verifier so no TUF refresh or transparency-log lookup
+    # is needed. The DSSE payload is still checked against the artifact name
+    # and digest by `Attestation.verify`.
+    def fake_verifier(offline: bool = False) -> Any:
+        return stub(
+            verify_dsse=lambda bundle, policy: (
+                pypi_attestations._impl.DsseEnvelope._TYPE,
+                bundle._dsse_envelope._inner.payload,
+            )
+        )
+
+    monkeypatch.setattr(
+        pypi_attestations._impl,
+        "Verifier",
+        stub(production=fake_verifier, staging=fake_verifier),
+    )
+
+    def verify(phase: str) -> Path:
+        receipt_path = tmp_path / f"{phase}.json"
+        run_main_with_command(
+            [
+                "verify",
+                "pypi",
+                "--repository",
+                "https://github.com/trailofbits/pypi-attestations",
+                "--receipt",
+                receipt_path.as_posix(),
+                f"pypi:{pypi_sdist_filename}",
+            ]
+        )
+        return receipt_path
+
+    # First pass: the artifact is visible, but its provenance is not synced yet.
+    with pytest.raises(SystemExit):
+        verify("before")
+    assert 'Provenance for file "pypi_attestations-0.0.19.tar.gz" was not found' in caplog.text
+
+    before = _read_receipt(tmp_path / "before.json")
+    assert before.conclusion.status == "incomplete"
+    assert before.conclusion.verified is False
+    assert [read.segment for read in before.reads] == ["artifact"]
+    assert [(gap.segment, gap.reason) for gap in before.evidence_gaps] == [
+        ("provenance", "not_found")
+    ]
+    # No index credentials leak into the shareable receipt.
+    serialized = (tmp_path / "before.json").read_text()
+    assert "index-secret" not in serialized
+    assert "abc123" not in serialized
+    assert "token=" not in serialized
+    assert before.reads[0].source.location == (
+        f"https://files.pythonhosted.org/packages/c5/4d/{pypi_sdist_filename}"
+    )
+    assert "artifact.source:url_query" in before.redactions
+
+    before_replay = replay_receipt(before, reader=lambda source: pypi_sdist_path.read_bytes())
+    assert before_replay.conclusion.status == "incomplete"
+    assert before_replay.conclusion.verified is False
+    assert {gap.segment for gap in before_replay.evidence_gaps} == {"provenance"}
+
+    # Second pass: the provenance has synced; verification now succeeds.
+    state["synced"] = True
+    caplog.clear()
+    after = _read_receipt(verify("after"))
+    assert f"OK: {pypi_sdist_filename}" in caplog.text
+    assert after.conclusion.status == "passed"
+    assert after.conclusion.verified is True
+    assert sorted(read.segment for read in after.reads) == ["artifact", "provenance"]
+    assert after.evidence_gaps == []
+
+    # The two receipts capture the two different reads unambiguously.
+    assert before.reads[0].digest == after.reads[0].digest
+    assert before.evidence_gaps[0].time <= after.reads[1].time
+
+    # Replaying the receipt with the recorded bytes rebuilds the same reads
+    # and conclusion, without contacting the index.
+    artifact_bytes = pypi_sdist_path.read_bytes()
+    replay_bytes = {
+        after.reads[0].source.location: artifact_bytes,
+        after.reads[1].source.location: provenance_bytes,
+    }
+    after_replay = replay_receipt(after, reader=lambda source: replay_bytes.get(source.location))
+    assert [read.segment for read in after_replay.reads] == ["artifact", "provenance"]
+    assert all(read.digest_matches for read in after_replay.reads)
+    assert after_replay.conclusion.status == "passed"
+    assert after_replay.conclusion.verified is True
+
+
+def test_verify_attestation_receipt_records_reads(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    artifact = tmp_path / artifact_path.name
+    shutil.copy(artifact_path, artifact)
+    shutil.copy(publish_attestation_path, Path(f"{artifact}.publish.attestation"))
+
+    receipt_path = tmp_path / "receipt.json"
+    run_main_with_command(
+        [
+            "verify",
+            "attestation",
+            "--offline",
+            "--identity",
+            publish_attestation_identity,
+            "--receipt",
+            receipt_path.as_posix(),
+            artifact.as_posix(),
+        ]
+    )
+
+    receipt = _read_receipt(receipt_path)
+    assert receipt.conclusion.status == "passed"
+    assert {read.segment for read in receipt.reads} == {"artifact", "attestation"}
+    assert receipt.evidence_gaps == []
+    assert all(read.digest.algorithm == "sha256" for read in receipt.reads)
+    assert all(read.time for read in receipt.reads)
+
+
+def test_verify_attestation_receipt_missing_attestation(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    artifact = tmp_path / artifact_path.name
+    shutil.copy(artifact_path, artifact)
+
+    receipt_path = tmp_path / "receipt.json"
+    with pytest.raises(SystemExit):
+        run_main_with_command(
+            [
+                "verify",
+                "attestation",
+                "--offline",
+                "--identity",
+                publish_attestation_identity,
+                "--receipt",
+                receipt_path.as_posix(),
+                artifact.as_posix(),
+            ]
+        )
+
+    receipt = _read_receipt(receipt_path)
+    assert receipt.conclusion.status == "incomplete"
+    assert receipt.conclusion.verified is False
+    assert [(gap.segment, gap.reason) for gap in receipt.evidence_gaps] == [
+        ("attestation", "missing")
+    ]
+
+
+def test_verify_pypi_receipt_stdout(capsys: pytest.CaptureFixture[str]) -> None:
+    run_main_with_command(
+        [
+            "verify",
+            "pypi",
+            "--offline",
+            "--repository",
+            "https://github.com/trailofbits/pypi-attestations",
+            "--provenance-file",
+            pypi_sdist_provenance_path.as_posix(),
+            "--receipt",
+            "-",
+            pypi_sdist_path.as_posix(),
+        ]
+    )
+    receipt = Receipt.model_validate_json(capsys.readouterr().out)
+    assert receipt.conclusion.status == "passed"
