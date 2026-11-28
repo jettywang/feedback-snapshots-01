@@ -9,6 +9,7 @@ from shutil import which
 from subprocess import CalledProcessError, check_call, check_output
 from typing import TYPE_CHECKING
 
+from auditwheel.hashfile import hashfile
 from auditwheel.wheeltools import android_api_level
 
 if TYPE_CHECKING:
@@ -31,6 +32,14 @@ class ElfPatcher:
     def __init__(self, platform: str) -> None:
         self.platform = platform
         self._updates: dict[Path, ElfUpdateInfo] = defaultdict(ElfUpdateInfo)
+        # Identity of the tool that rewrites the ELF files. Cache entries
+        # must not be reused across patchers: the resulting bytes can differ.
+        self._tool_identity: str | None = None
+        self.variant = "abstract"
+
+    @property
+    def tool_identity(self) -> str:
+        return self._tool_identity or self.variant
 
     @staticmethod
     def _needed_overlap(removed: Iterable[str], replaced: Iterable[tuple[str, str]]) -> str | None:
@@ -101,6 +110,11 @@ class ElfPatcher:
 
 
 class _NonePatcher(ElfPatcher):
+    def __init__(self, platform: str = "") -> None:
+        super().__init__(platform)
+        self.variant = "none"
+        self._tool_identity = "none"
+
     def apply_updates(self) -> None:
         elf_files = list(self._updates.keys())
         errors = []
@@ -146,10 +160,41 @@ def _verify_patchelf(variant: PatchElfVariants) -> Path:
     raise ValueError(msg)
 
 
+def _patchelf_identity(executable: str, variant: str) -> str:
+    """Identify the executable that rewrites ELF files.
+
+    A content hash distinguishes two builds that report the same version.
+    The version string is retained for operators, and a failure to probe the
+    tool must not turn an otherwise valid repair into an error.
+    """
+    parts = [variant]
+    path = Path(executable)
+    try:
+        with path.open("rb") as file_handle:
+            parts.append(f"sha256:{hashfile(file_handle)}")
+    except OSError:
+        pass
+    try:
+        version = check_output([executable, "--version"]).decode("utf-8").strip()
+    except (CalledProcessError, OSError):
+        version = ""
+    if version:
+        parts.append(version)
+    return "|".join(parts)
+
+
 class _Patchelf(ElfPatcher):
     def __init__(self, variant: PatchElfVariants, platform: str = "") -> None:
         super().__init__(platform)
         self._patchelf_path = str(_verify_patchelf(variant))
+        self.variant = variant
+
+    @property
+    def tool_identity(self) -> str:
+        # Computed lazily so normal repairs do not pay for an extra probe.
+        if self._tool_identity is None:
+            self._tool_identity = _patchelf_identity(self._patchelf_path, self.variant)
+        return self._tool_identity
 
     def get_rpath_direct(self, file_name: Path) -> str:
         output = check_output([self._patchelf_path, "--print-rpath", file_name])

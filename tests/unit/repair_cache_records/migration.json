@@ -1,0 +1,10 @@
+{
+  "canonical_key": "f959f08358f7b643974f5be35482dbe6fb150f7169fae456e2d27c315bf3e1a9",
+  "evidence": "sbom_absent; byte-identical-output",
+  "record_key": "ad6bd5a54645d83b2504520ae51e947adabf2477c5ee6f52226ba352a4595e7c",
+  "source_paths": [
+    "/srv/mirror/libfoo.so.1"
+  ],
+  "verified_at": "2026-11-01T00:00:00+00:00",
+  "verified_output_sha256": "0a328befe64f806a34770a512ec67875609c07a9295607737bc0a29970ba0240"
+}

@@ -1,0 +1,115 @@
+{
+  "approvals": [],
+  "artifact_path": null,
+  "cache_key": "f959f08358f7b643974f5be35482dbe6fb150f7169fae456e2d27c315bf3e1a9",
+  "created_at": "2026-11-01T00:00:00+00:00",
+  "inputs": {
+    "cache_key": "f959f08358f7b643974f5be35482dbe6fb150f7169fae456e2d27c315bf3e1a9",
+    "externals": [
+      {
+        "libraries": [
+          {
+            "content_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "soname": "libfoo.so.1",
+            "source_name": "libfoo.so.1",
+            "source_path": null
+          }
+        ],
+        "wheel_path": "demo/_demo.so"
+      }
+    ],
+    "implementation": "auditwheel-stand-in",
+    "lib_sdir": ".libs",
+    "patcher": {
+      "platform": "manylinux_2_28_x86_64",
+      "tool": "stand-in-v1",
+      "variant": "stand-in"
+    },
+    "policy": {
+      "architecture": "x86_64",
+      "fingerprint": "policy-fingerprint-stand-in",
+      "libc": "glibc",
+      "policies": [
+        "linux_x86_64",
+        "manylinux_2_28_x86_64"
+      ]
+    },
+    "provenance_key": "9878e06469b2c7774c6aff8165a4f98696d24c9b7a45820db07920566cb115c8",
+    "sbom_environment": "stand-in-packages",
+    "schema": 1,
+    "source_date_epoch": "1700000000",
+    "strip": false,
+    "strip_tool": {
+      "tool": "unused"
+    },
+    "target_abis": [
+      "manylinux_2_28_x86_64",
+      "manylinux2014_x86_64"
+    ],
+    "update_tags": true,
+    "wheel_filename": "demo-1.0-cp312-cp312-linux_x86_64.whl",
+    "wheel_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "zip_compression_level": 6,
+    "zlib_version": "stand-in-zlib"
+  },
+  "notes": null,
+  "output": {
+    "filename": "demo-1.0-cp312-cp312-linux_x86_64.whl",
+    "sbom_emitted": false,
+    "sha256": "0a328befe64f806a34770a512ec67875609c07a9295607737bc0a29970ba0240",
+    "size": 730
+  },
+  "proof": {
+    "externals": [
+      {
+        "libraries": [
+          {
+            "content_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "soname": "libfoo.so.1",
+            "source_name": "libfoo.so.1"
+          }
+        ],
+        "wheel_path": "demo/_demo.so"
+      }
+    ],
+    "implementation": "auditwheel-stand-in",
+    "lib_sdir": ".libs",
+    "patcher": {
+      "platform": "manylinux_2_28_x86_64",
+      "tool": "stand-in-v1",
+      "variant": "stand-in"
+    },
+    "policy": {
+      "architecture": "x86_64",
+      "fingerprint": "policy-fingerprint-stand-in",
+      "libc": "glibc",
+      "policies": [
+        "linux_x86_64",
+        "manylinux_2_28_x86_64"
+      ]
+    },
+    "sbom_environment": "stand-in-packages",
+    "schema": 1,
+    "source_date_epoch": "1700000000",
+    "strip": false,
+    "strip_tool": {
+      "tool": "unused"
+    },
+    "target_abis": [
+      "manylinux_2_28_x86_64",
+      "manylinux2014_x86_64"
+    ],
+    "update_tags": true,
+    "wheel_filename": "demo-1.0-cp312-cp312-linux_x86_64.whl",
+    "wheel_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "zip_compression_level": 6,
+    "zlib_version": "stand-in-zlib"
+  },
+  "record_key": "9878e06469b2c7774c6aff8165a4f98696d24c9b7a45820db07920566cb115c8",
+  "review_after": "2027-01-30T00:00:00+00:00",
+  "revision": 1,
+  "schema": 1,
+  "status": "verified",
+  "superseded_by": null,
+  "supersedes": null
+}
