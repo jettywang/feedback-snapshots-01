@@ -16,8 +16,10 @@
 #
 
 require 'bundler'
+require 'bundler/audit/approval'
 require 'bundler/audit/configuration'
 require 'bundler/audit/database'
+require 'bundler/audit/decision'
 require 'bundler/audit/report'
 require 'bundler/audit/results/insecure_source'
 require 'bundler/audit/results/unpatched_gem'
@@ -54,6 +56,11 @@ module Bundler
       #
       # @return [Hash]
       attr_reader :config
+
+      # The exemption decisions recorded during the last scan.
+      #
+      # @return [Array<Decision>]
+      attr_reader :decisions
 
       #
       # Initializes a scanner.
@@ -93,6 +100,8 @@ module Bundler
                   else
                     Configuration.new
                   end
+
+        @decisions = []
       end
 
       #
@@ -122,6 +131,8 @@ module Bundler
           yield result if block_given?
         end
 
+        report.decisions.concat(@decisions)
+
         return report
       end
 
@@ -145,6 +156,8 @@ module Bundler
       #
       def scan(options={},&block)
         return enum_for(__method__,options) unless block
+
+        @decisions = []
 
         scan_sources(options,&block)
         scan_specs(options,&block)
@@ -218,23 +231,133 @@ module Bundler
       def scan_specs(options={})
         return enum_for(__method__,options) unless block_given?
 
-        ignore = if options[:ignore]
-                   Set.new(options[:ignore])
-                 else
-                   config.ignore
-                 end
+        approvals = approvals_for(options)
+
+        review_approvals(approvals)
 
         @lockfile.specs.each do |gem|
           @database.check_gem(gem) do |advisory|
-            is_ignored = ignore.intersect?(advisory.identifiers.to_set)
-            next if is_ignored
-
-            yield Results::UnpatchedGem.new(gem,advisory)
+            if (decision = approve(gem,advisory,approvals))
+              @decisions << decision
+            else
+              yield Results::UnpatchedGem.new(gem,advisory)
+            end
           end
         end
       end
 
       private
+
+      #
+      # Builds the list of approvals to check advisories against. Both the
+      # exemptions passed to the command and the exemptions from the project
+      # configuration are checked against the same advisory identity.
+      #
+      # @param [Hash] options
+      #   Additional options.
+      #
+      # @option options [Array<String, Hash>] :ignore
+      #   The advisories to ignore.
+      #
+      # @return [Array<Approval>]
+      #
+      def approvals_for(options)
+        if options[:ignore]
+          Array(options[:ignore]).map { |entry| Approval.load(entry) }
+        else
+          config.approvals
+        end
+      end
+
+      #
+      # Records decisions for approvals that cannot be applied as-is:
+      # approvals referencing an identifier shared by multiple advisories
+      # without binding the gem and the advisory, and expired approvals.
+      #
+      # @param [Array<Approval>] approvals
+      #   The approvals to review.
+      #
+      def review_approvals(approvals)
+        approvals.each do |approval|
+          matched = @database.lookup(approval.advisory)
+
+          if matched.length > 1 && !approval.bound?
+            @decisions << Decision.new(
+              approval: approval,
+              status:   :review,
+              reason:   "identifier '#{approval.advisory}' is shared by " \
+                        "advisories #{matched.map(&:id).join(', ')}; " \
+                        "not applied, re-approve with an explicit gem and advisory binding"
+            )
+          elsif approval.expired?
+            @decisions << Decision.new(
+              approval: approval,
+              status:   :expired,
+              reason:   "approval expired on #{approval.expires}; not applied"
+            )
+          end
+        end
+      end
+
+      #
+      # Checks whether the gem and advisory pair is covered by an approval.
+      #
+      # @param [Gem::Specification] gem
+      #   The vulnerable gem.
+      #
+      # @param [Advisory] advisory
+      #   The advisory affecting the gem.
+      #
+      # @param [Array<Approval>] approvals
+      #   The approvals to check against.
+      #
+      # @return [Decision, nil]
+      #   The applied decision, or `nil` when no approval applies.
+      #
+      def approve(gem,advisory,approvals)
+        approvals.each do |approval|
+          next if approval.expired?
+          next if approval.bound? && approval.gem != gem.name
+
+          matched = @database.lookup(approval.advisory)
+          next unless matched.include?(advisory)
+
+          if matched.length > 1
+            # the identifier is shared by multiple advisories, so only an
+            # approval explicitly binding the gem and the advisory may pass
+            next unless approval.bound?
+
+            return Decision.new(
+              approval: approval,
+              gem:      gem,
+              advisory: advisory,
+              status:   :applied,
+              reason:   "identifier '#{approval.advisory}' is shared by " \
+                        "advisories #{matched.map(&:id).join(', ')}; " \
+                        "approval explicitly binds gem '#{approval.gem}' and advisory '#{approval.advisory}'"
+            )
+          end
+
+          aliases = advisory.all_identifiers - [advisory.id]
+
+          reason = if aliases.empty?
+                     "approval '#{approval.advisory}' matches advisory #{advisory.id}"
+                   else
+                     "approval '#{approval.advisory}' matches advisory #{advisory.id}, " \
+                     "also known as #{aliases.join(', ')}"
+                   end
+
+          return Decision.new(
+            approval: approval,
+            gem:      gem,
+            advisory: advisory,
+            status:   :applied,
+            reason:   reason
+          )
+        end
+
+        return nil
+      end
 
       #
       # Determines whether a source is internal.

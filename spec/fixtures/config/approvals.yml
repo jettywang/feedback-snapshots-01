@@ -1,0 +1,6 @@
+---
+ignore:
+  - INTERNAL-2026-0001
+  - advisory: GHSA-aaaa-bbbb-cccc
+    gem: beta
+    expires: 2027-01-01

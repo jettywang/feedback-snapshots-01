@@ -132,6 +132,18 @@ module Bundler
       end
 
       #
+      # Returns the canonical id plus all alias identifiers of the advisory.
+      # The canonical id stays stable when the advisory database supplements
+      # a record with additional aliases (ex: a CVE or GHSA id), so it can be
+      # used to prove that an approval and an advisory are the same record.
+      #
+      # @return [Array<String>]
+      #
+      def all_identifiers
+        ([id] + identifiers).compact.uniq
+      end
+
+      #
       # Determines how critical the vulnerability is.
       #
       # @return [:none, :low, :medium, :high, :critical, nil]

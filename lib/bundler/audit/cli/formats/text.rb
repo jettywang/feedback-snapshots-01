@@ -47,6 +47,20 @@ module Bundler
               end
             end
 
+            unless report.decisions.empty? || options.quiet?
+              say "Exemption decisions:", :yellow
+
+              report.decisions.each do |decision|
+                case decision.status
+                when :applied then say "  #{decision}"
+                when :expired then say "  #{decision}", :yellow
+                when :review  then say "  #{decision}", [:yellow, :bold]
+                end
+              end
+
+              say
+            end
+
             if report.vulnerable?
               say "Vulnerabilities found!", :red
             else

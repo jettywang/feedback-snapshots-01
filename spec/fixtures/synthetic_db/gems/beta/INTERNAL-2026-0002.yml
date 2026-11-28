@@ -1,0 +1,10 @@
+---
+cve: 2026-2222
+ghsa: aaaa-bbbb-cccc
+url: https://example.com/advisories/INTERNAL-2026-0002
+title: Beta leaks credentials in logs
+date: 2026-01-12
+description: Synthetic advisory. Shares the GHSA-aaaa-bbbb-cccc alias with INTERNAL-2026-0001.
+cvss_v3: 7.5
+patched_versions:
+  - ">= 2.0.1"

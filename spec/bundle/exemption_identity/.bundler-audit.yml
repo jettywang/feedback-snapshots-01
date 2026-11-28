@@ -1,0 +1,14 @@
+---
+ignore:
+  # Legacy exemption: the advisory database later supplemented this internal
+  # record with CVE and GHSA aliases; identity resolution proves it is the
+  # same record, so the approval is carried over.
+  - INTERNAL-2026-0001
+  # Expired approval: no longer applies.
+  - advisory: CVE-2026-1111
+    gem: alpha
+    expires: 2020-06-01
+  # Shared alias: GHSA-aaaa-bbbb-cccc names two records in the database, but
+  # this approval explicitly binds the gem and the advisory, so it passes.
+  - advisory: GHSA-aaaa-bbbb-cccc
+    gem: beta

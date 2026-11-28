@@ -15,6 +15,8 @@
 # along with bundler-audit.  If not, see <https://www.gnu.org/licenses/>.
 #
 
+require 'bundler/audit/approval'
+
 require 'yaml'
 require 'set'
 
@@ -72,11 +74,30 @@ module Bundler
               raise(InvalidConfigurationError,"'ignore' key found in config file, but is not an Array")
             end
 
-            unless value.children.all? { |node| node.is_a?(YAML::Nodes::Scalar) }
-              raise(InvalidConfigurationError,"'ignore' array in config file contains a non-String")
-            end
+            config[:ignore] = value.children.map do |node|
+              case node
+              when YAML::Nodes::Scalar
+                node.value
+              when YAML::Nodes::Mapping
+                entry = {}
 
-            config[:ignore] = value.children.map(&:value)
+                node.children.each_slice(2) do |entry_key,entry_value|
+                  unless entry_value.is_a?(YAML::Nodes::Scalar)
+                    raise(InvalidConfigurationError,"'ignore' entry in config file contains a non-String value")
+                  end
+
+                  entry[entry_key.value] = entry_value.value
+                end
+
+                unless entry['advisory']
+                  raise(InvalidConfigurationError,"'ignore' entry in config file is missing the 'advisory' key")
+                end
+
+                entry
+              else
+                raise(InvalidConfigurationError,"'ignore' array in config file contains a non-String")
+              end
+            end
           end
         end
 
@@ -88,7 +109,16 @@ module Bundler
       #
       # @return [Set<String>]
       #
-      attr_reader :ignore
+      def ignore
+        Set.new(@approvals.map(&:advisory))
+      end
+
+      #
+      # The list of approvals to check advisories against.
+      #
+      # @return [Array<Approval>]
+      #
+      attr_reader :approvals
 
       #
       # Initializes the configuration.
@@ -96,11 +126,13 @@ module Bundler
       # @param [Hash] config
       #   The configuration hash.
       #
-      # @option config [Array<String>] :ignore
-      #   The list of advisory IDs to ignore.
+      # @option config [Array<String, Hash>] :ignore
+      #   The list of advisory IDs or approval Hashes to ignore.
       #
       def initialize(config={})
-        @ignore = Set.new(config[:ignore])
+        @approvals = Array(config[:ignore]).map do |entry|
+          Approval.load(entry)
+        end
       end
 
     end

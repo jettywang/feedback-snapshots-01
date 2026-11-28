@@ -178,10 +178,29 @@ bundler-audit also supports a per-project configuration file:
 ---
 ignore:
   - CVE-YYYY-XXXX
+  - advisory: INTERNAL-YYYY-NNNN
+    gem: some_gem
+    expires: 2027-01-01
   - ...
 ```
 
-* `ignore:` \[Array\<String\>\] - A list of advisory IDs to ignore.
+* `ignore:` \[Array\<String | Hash\>\] - A list of advisory exemptions. Each
+  entry is either an advisory ID or an approval Hash with the keys:
+  * `advisory:` \[String\] (required) - An advisory ID or alias (CVE, GHSA,
+    OSVDB) of the advisory to ignore.
+  * `gem:` \[String\] (optional) - The gem the approval was granted for. Bound
+    approvals only apply to that gem.
+  * `expires:` \[String\] (optional) - The date (`YYYY-MM-DD`) the approval
+    expires on. Expired approvals no longer apply.
+
+Exemptions are resolved against the advisory database by identity: an
+exemption that names a record by any of its IDs still applies after the
+database supplements that record with new CVE/GHSA aliases. If an ID is
+shared by multiple advisories in the database, only approvals that explicitly
+bind both the `gem` and the `advisory` are applied; all other exemptions are
+listed in the report's "Exemption decisions" section for review, along with
+the basis for each decision. Exemptions passed via `--ignore` go through the
+same identity check.
 
 You can provide a path to a config file using the `--config` flag:
 

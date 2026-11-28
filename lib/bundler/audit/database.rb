@@ -320,6 +320,22 @@ module Bundler
       end
 
       #
+      # Looks up every advisory in the database that claims the given
+      # identifier, either as its canonical id or as one of its aliases
+      # (ex: CVE, GHSA or OSVDB ids).
+      #
+      # @param [String] identifier
+      #   The advisory identifier to resolve.
+      #
+      # @return [Array<Advisory>]
+      #   The matching advisories. More than one advisory means the
+      #   identifier is shared by multiple records in the database.
+      #
+      def lookup(identifier)
+        identifier_index[identifier] || []
+      end
+
+      #
       # The number of advisories within the database.
       #
       # @return [Integer]
@@ -350,6 +366,19 @@ module Bundler
       end
 
       protected
+
+      #
+      # Builds an index of every identifier to the advisories claiming it.
+      #
+      # @return [Hash{String => Array<Advisory>}]
+      #
+      def identifier_index
+        @identifier_index ||= advisories.each_with_object({}) do |advisory,index|
+          advisory.all_identifiers.each do |identifier|
+            (index[identifier] ||= []) << advisory
+          end
+        end
+      end
 
       #
       # Enumerates over every advisory path in the database.

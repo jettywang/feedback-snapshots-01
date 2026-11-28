@@ -37,6 +37,11 @@ module Bundler
       # @return [Array<Results::UnpatchedGems>]
       attr_reader :unpatched_gems
 
+      # The exemption decisions recorded during the scan.
+      #
+      # @return [Array<Decision>]
+      attr_reader :decisions
+
       #
       # Initializes the report.
       #
@@ -49,6 +54,7 @@ module Bundler
         @results = []
         @insecure_sources = []
         @unpatched_gems = []
+        @decisions = []
 
         results.each { |result| self << result }
       end
@@ -140,7 +146,8 @@ module Bundler
         {
           version:    @version,
           created_at: @created_at,
-          results:    @results.map(&:to_h)
+          results:    @results.map(&:to_h),
+          decisions:  @decisions.map(&:to_h)
         }
       end
 

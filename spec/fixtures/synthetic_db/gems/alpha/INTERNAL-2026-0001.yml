@@ -1,0 +1,10 @@
+---
+cve: 2026-1111
+ghsa: aaaa-bbbb-cccc
+url: https://example.com/advisories/INTERNAL-2026-0001
+title: Alpha deserializes untrusted data
+date: 2026-01-10
+description: Synthetic advisory. Filed as an internal record, later supplemented with CVE and GHSA aliases.
+cvss_v3: 9.8
+patched_versions:
+  - ">= 1.0.1"

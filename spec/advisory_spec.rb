@@ -214,6 +214,31 @@ describe Bundler::Audit::Advisory do
     end
   end
 
+  describe "#all_identifiers" do
+    it "should include the canonical id along with all aliases" do
+      advisory = described_class.new.tap do |advisory|
+        advisory.id   = 'INTERNAL-2026-0001'
+        advisory.cve  = '2026-1111'
+        advisory.ghsa = 'aaaa-bbbb-cccc'
+      end
+
+      expect(advisory.all_identifiers).to eq([
+        'INTERNAL-2026-0001',
+        'CVE-2026-1111',
+        'GHSA-aaaa-bbbb-cccc'
+      ])
+    end
+
+    it "should not duplicate the id when it equals an alias" do
+      advisory = described_class.new.tap do |advisory|
+        advisory.id  = 'CVE-2018-1234'
+        advisory.cve = '2018-1234'
+      end
+
+      expect(advisory.all_identifiers).to eq(['CVE-2018-1234'])
+    end
+  end
+
   describe "#criticality" do
     context "when cvss_v2 is between 0.0 and 3.9" do
       subject do

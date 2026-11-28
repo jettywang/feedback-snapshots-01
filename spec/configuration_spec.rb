@@ -52,6 +52,33 @@ describe Bundler::Audit::Configuration do
             expect { subject }.to raise_error(described_class::InvalidConfigurationError)
           end
         end
+
+        context 'when ignore contains approval hashes' do
+          let(:path) { File.join(fixtures_dir,'approvals.yml') }
+
+          it "must parse the entries into approvals" do
+            expect(subject.approvals.length).to eq(2)
+
+            expect(subject.approvals[0].advisory).to eq('INTERNAL-2026-0001')
+            expect(subject.approvals[0]).not_to be_bound
+
+            expect(subject.approvals[1].advisory).to eq('GHSA-aaaa-bbbb-cccc')
+            expect(subject.approvals[1].gem).to eq('beta')
+            expect(subject.approvals[1].expires).to eq(Date.new(2027,1,1))
+          end
+
+          it "must still expose the advisory IDs via #ignore" do
+            expect(subject.ignore).to be == Set.new(['INTERNAL-2026-0001','GHSA-aaaa-bbbb-cccc'])
+          end
+        end
+
+        describe "when an ignore entry hash is missing the advisory key" do
+          let(:path) { File.join(fixtures_dir,'bad','ignore_entry_missing_advisory.yml') }
+
+          it "raises a validation error" do
+            expect { subject }.to raise_error(described_class::InvalidConfigurationError)
+          end
+        end
       end
     end
   end
@@ -72,6 +99,25 @@ describe Bundler::Audit::Configuration do
       it "must initialize @ignore to contain :ignore" do
         expect(subject.ignore).to be_kind_of(Set)
         expect(subject.ignore).to be == Set.new(advisory_ids)
+      end
+    end
+
+    context "when given :ignore with approval Hashes" do
+      subject do
+        described_class.new(ignore: [
+          'CVE-123',
+          {'advisory' => 'GHSA-aaaa-bbbb-cccc', 'gem' => 'beta', 'expires' => '2027-01-01'}
+        ])
+      end
+
+      it "must initialize @approvals" do
+        expect(subject.approvals.length).to eq(2)
+        expect(subject.approvals[1].gem).to eq('beta')
+        expect(subject.approvals[1].expires).to eq(Date.new(2027,1,1))
+      end
+
+      it "must include every approval advisory ID in #ignore" do
+        expect(subject.ignore).to be == Set.new(['CVE-123','GHSA-aaaa-bbbb-cccc'])
       end
     end
   end
