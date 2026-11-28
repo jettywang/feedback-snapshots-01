@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import dataclasses
 import functools
+import hashlib
 import itertools
 import logging
 from collections import defaultdict
@@ -23,6 +24,7 @@ from auditwheel.genericpkgctx import InGenericPkgCtx
 from auditwheel.lddtree import DynamicExecutable, DynamicLibrary, ld_paths_from_arg, ldd
 from auditwheel.libc import Libc
 from auditwheel.policy import ExternalReference, Policy, WheelPolicies
+from auditwheel.tools import is_subdir
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -30,6 +32,15 @@ if TYPE_CHECKING:
     from auditwheel.architecture import Architecture
 
 log = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class WheelBundledLibrary:
+    """A shared library that already ships inside the wheel."""
+
+    soname: str
+    member: str
+    sha256: str
 
 
 @dataclass(frozen=True)
@@ -46,6 +57,8 @@ class WheelAbIInfo:
     blacklist_policy: Policy
     machine_policy: Policy
     graft_policy: Policy
+    wheel_path: Path | None = None
+    bundled_libs: dict[str, list[WheelBundledLibrary]] = dataclasses.field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -56,6 +69,7 @@ class WheelElfData:
     versioned_symbols: dict[str, set[str]]
     uses_ucs2_symbols: bool
     uses_pyfpe_jbuf: bool
+    bundled_libs: dict[str, list[WheelBundledLibrary]] = dataclasses.field(default_factory=dict)
 
 
 def _fixup_elf_trees(
@@ -117,6 +131,14 @@ def _fixup_elf_trees(
         nonpy_elftree[elf_path] = dataclasses.replace(elf_executable, libraries=libraries_new)
 
 
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 @functools.lru_cache
 def get_wheel_elfdata(
     libc: Libc | None,
@@ -128,9 +150,11 @@ def get_wheel_elfdata(
     full_elftree: dict[Path, DynamicExecutable] = {}
     nonpy_elftree: dict[Path, DynamicExecutable] = {}
     full_external_refs: dict[Path, dict[str, ExternalReference]] = {}
+    bundled_libs: dict[str, list[WheelBundledLibrary]] = defaultdict(list)
     versioned_symbols: dict[str, set[str]] = defaultdict(set)
     uses_ucs2_symbols = False
     uses_pyfpe_jbuf = False
+    py_extensions: set[Path] = set()
     policies: WheelPolicies | None = None
 
     # Android is cross-compiled, so ldpaths should never be loaded from the build machine.
@@ -190,6 +214,8 @@ def get_wheel_elfdata(
                     versioned_symbols[key].add(value)
 
                 is_py_ext, py_ver = elf_is_python_extension(fn, elf)
+                if is_py_ext:
+                    py_extensions.add(fn)
 
                 # If the ELF is a Python extention, we definitely need to
                 # include its external dependencies.
@@ -213,6 +239,12 @@ def get_wheel_elfdata(
                     # vendored it, so we will check whether we should include
                     # its internal references later.
                     nonpy_elftree[fn] = elftree
+                    # The file itself is a bundled library even if its own
+                    # dependencies cannot be resolved on the build host.
+                    member = fn.as_posix()
+                    entry = WheelBundledLibrary(fn.name, member, _sha256(ctx.path / member))
+                    if entry not in bundled_libs[fn.name]:
+                        bundled_libs[fn.name].append(entry)
 
         # If at least one shared library exists in purelib, raise an error
         if shared_libraries_in_purelib:
@@ -228,6 +260,27 @@ def get_wheel_elfdata(
         if not platform_wheel:
             arch = None if architecture is None else architecture.value
             raise NonPlatformWheelError(arch, shared_libraries_with_invalid_machine)
+
+        # Record shared libraries that already ship inside the wheel before
+        # ``_fixup_elf_trees`` may fill in host-resolved paths for them.
+        for elf_path, elf_tree in itertools.chain(
+            full_elftree.items(), nonpy_elftree.items()
+        ):
+            # Non-Python ELF files that live in the wheel are bundled
+            # dependencies even when their dependencies were not resolved.
+            absolute_elf = elf_path if elf_path.is_absolute() else ctx.path / elf_path
+            if elf_path not in py_extensions and is_subdir(absolute_elf, ctx.path):
+                member = absolute_elf.relative_to(ctx.path).as_posix()
+                entry = WheelBundledLibrary(elf_path.name, member, _sha256(absolute_elf))
+                if entry not in bundled_libs[elf_path.name]:
+                    bundled_libs[elf_path.name].append(entry)
+            for soname, library in elf_tree.libraries.items():
+                if library.realpath is None or not is_subdir(library.realpath, ctx.path):
+                    continue
+                member = library.realpath.relative_to(ctx.path).as_posix()
+                entry = WheelBundledLibrary(soname, member, _sha256(library.realpath))
+                if entry not in bundled_libs[soname]:
+                    bundled_libs[soname].append(entry)
 
         _fixup_elf_trees(full_elftree, nonpy_elftree)
 
@@ -276,6 +329,7 @@ def get_wheel_elfdata(
         versioned_symbols,
         uses_ucs2_symbols,
         uses_pyfpe_jbuf,
+        bundled_libs,
     )
 
 
@@ -551,6 +605,8 @@ def analyze_wheel_abi(
         blacklist_policy,
         machine_policy,
         graft_policy,
+        wheel_fn,
+        dict(data.bundled_libs),
     )
 
 

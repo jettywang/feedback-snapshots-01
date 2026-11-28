@@ -27,6 +27,27 @@ def configure_parser(sub_parsers: Any) -> None:  # noqa: ANN401
         default=False,
         help="Output results in JSON format",
     )
+    p.add_argument(
+        "--patch-attestation",
+        dest="PATCH_ATTESTATION",
+        type=Path,
+        metavar="PATCH_ATTESTATION",
+        help="JSON attestation of reviewed shared-library builds.",
+    )
+    p.add_argument(
+        "--patch-report",
+        dest="PATCH_REPORT",
+        type=Path,
+        metavar="PATCH_REPORT",
+        help="Write a patch coverage report (JSON) for release review.",
+    )
+    p.add_argument(
+        "--require-patch-coverage",
+        dest="REQUIRE_PATCH_COVERAGE",
+        action="store_true",
+        help="Fail unless every grafted library has an attested patch entry.",
+        default=False,
+    )
     options.disable_isa_check(p)
     options.allow_pure_python_wheel(p)
     options.ldpaths(p)
@@ -79,8 +100,20 @@ def _output_json(fn: str, winfo: WheelAbIInfo) -> None:
 def execute(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
     from auditwheel import json
     from auditwheel.error import NonPlatformWheelError, WheelToolsError
+    from auditwheel.patch_audit import (
+        PatchAttestation,
+        PatchAttestationError,
+        evaluate_graft_plan,
+    )
     from auditwheel.wheel_abi import analyze_wheel_abi
     from auditwheel.wheeltools import get_wheel_architecture, get_wheel_libc
+
+    attestation = None
+    if args.PATCH_ATTESTATION is not None:
+        try:
+            attestation = PatchAttestation.load(args.PATCH_ATTESTATION)
+        except PatchAttestationError as e:
+            parser.error(str(e))
 
     wheel_file: Path = args.WHEEL_FILE
     fn = wheel_file.name
@@ -125,9 +158,42 @@ def execute(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
             print(json.dumps({"version": 1, "wheel": fn, "error": e.message}))
         return 1
 
+    coverage = None
+    if (
+        attestation is not None
+        or args.PATCH_REPORT is not None
+        or args.REQUIRE_PATCH_COVERAGE
+    ):
+        policies_for_report = winfo.policies
+        policy_name = (
+            policies_for_report.lowest.name
+            if winfo.overall_policy == policies_for_report.linux
+            else winfo.overall_policy.name
+        )
+        coverage = evaluate_graft_plan(
+            winfo,
+            policy_name,
+            attestation,
+            args.REQUIRE_PATCH_COVERAGE,
+        )
+        if args.PATCH_REPORT is not None:
+            coverage.write(args.PATCH_REPORT.absolute())
+
     if args.JSON:
         _output_json(fn, winfo)
-        return 0
+        return 0 if coverage is None or coverage.passed else 1
+
+    if coverage is not None and not coverage.passed:
+        logger.error("Patch coverage check failed for %s", fn)
+        for verdict in coverage.failed_libraries:
+            logger.error(
+                "%s [%s]: %s (%s)",
+                verdict.soname,
+                verdict.scope,
+                verdict.status,
+                verdict.reason,
+            )
+        return 1
 
     policies = winfo.policies
 

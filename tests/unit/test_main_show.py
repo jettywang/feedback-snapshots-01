@@ -141,6 +141,9 @@ def _make_args(
         LDPATHS=None,
         JSON=use_json,
         verbose=0,
+        PATCH_ATTESTATION=None,
+        PATCH_REPORT=None,
+        REQUIRE_PATCH_COVERAGE=False,
     )
 
 

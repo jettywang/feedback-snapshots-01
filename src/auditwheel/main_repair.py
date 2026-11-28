@@ -134,13 +134,48 @@ wheel will abort processing of subsequent wheels.
         default="patchelf",
         choices=["patchelf", "lief-patchelf", "none"],
     )
+    parser.add_argument(
+        "--patch-attestation",
+        dest="PATCH_ATTESTATION",
+        type=Path,
+        metavar="PATCH_ATTESTATION",
+        help="JSON attestation of reviewed shared-library builds. "
+        "Libraries about to be grafted are checked against it before copying.",
+    )
+    parser.add_argument(
+        "--patch-report",
+        dest="PATCH_REPORT",
+        type=Path,
+        metavar="PATCH_REPORT",
+        help="Write a patch coverage report (JSON) for release review.",
+    )
+    parser.add_argument(
+        "--require-patch-coverage",
+        dest="REQUIRE_PATCH_COVERAGE",
+        action="store_true",
+        help="Fail unless every grafted library has an attested patch entry.",
+        default=False,
+    )
 
     parser.set_defaults(func=execute)
 
 
 def execute(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
+    from auditwheel.patch_audit import (
+        PatchAttestation,
+        PatchAttestationError,
+        PatchCoverageError,
+        evaluate_graft_plan,
+    )
     from auditwheel.repair import repair_wheel
     from auditwheel.wheel_abi import analyze_wheel_abi
+
+    attestation = None
+    if args.PATCH_ATTESTATION is not None:
+        try:
+            attestation = PatchAttestation.load(args.PATCH_ATTESTATION)
+        except PatchAttestationError as e:
+            parser.error(str(e))
 
     exclude: frozenset[str] = frozenset(args.EXCLUDE)
     wheel_dir: Path = args.WHEEL_DIR.absolute()
@@ -280,18 +315,46 @@ def execute(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
                 *abis,
             ]
 
-        patcher = ElfPatcher.get_patcher(args.PATCHER, requested_policy.name)
-        out_wheel = repair_wheel(
-            wheel_abi,
-            wheel_file,
-            abis=abis,
-            lib_sdir=args.LIB_SDIR,
-            out_dir=wheel_dir,
-            update_tags=args.UPDATE_TAGS,
-            patcher=patcher,
-            strip=args.STRIP,
-            zip_compression_level=args.ZIP_COMPRESSION_LEVEL,
-        )
+        try:
+            # Validate the selection before creating a patcher or copying files.
+            preflight = evaluate_graft_plan(
+                wheel_abi,
+                abis[0],
+                attestation,
+                args.REQUIRE_PATCH_COVERAGE,
+            )
+            if (
+                attestation is not None
+                or args.PATCH_REPORT is not None
+                or args.REQUIRE_PATCH_COVERAGE
+            ) and not preflight.passed:
+                if args.PATCH_REPORT is not None:
+                    preflight.write(args.PATCH_REPORT.absolute())
+                raise PatchCoverageError(
+                    f"patch coverage check failed for {wheel_file.name} ({abis[0]}):\n"
+                    f"{preflight.failure_message()}"
+                )
+
+            patcher = ElfPatcher.get_patcher(args.PATCHER, requested_policy.name)
+            out_wheel = repair_wheel(
+                wheel_abi,
+                wheel_file,
+                abis=abis,
+                lib_sdir=args.LIB_SDIR,
+                out_dir=wheel_dir,
+                update_tags=args.UPDATE_TAGS,
+                patcher=patcher,
+                strip=args.STRIP,
+                zip_compression_level=args.ZIP_COMPRESSION_LEVEL,
+                patch_attestation=attestation,
+                patch_report_path=(
+                    None if args.PATCH_REPORT is None else args.PATCH_REPORT.absolute()
+                ),
+                require_patch_coverage=args.REQUIRE_PATCH_COVERAGE,
+            )
+        except PatchCoverageError as e:
+            logger.error("%s", e)
+            return 1
 
         if out_wheel is not None:
             logger.info("\nFixed-up wheel written to %s", out_wheel)

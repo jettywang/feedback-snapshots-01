@@ -100,6 +100,25 @@ Repairing a wheel. ::
     Fixed-up wheel written to /wheelhouse/cffi-1.5.2-cp35-cp35m-manylinux1_x86_64.whl
 
 
+Patch coverage review
+---------------------
+
+If a wheel is repaired from a build host where more than one distribution
+provides the same shared library, ``auditwheel`` can check the library it
+actually selected against an offline attestation of reviewed builds before
+copying anything into the wheel:
+
+.. code-block:: bash
+
+   auditwheel repair --patch-attestation attestation.json \
+       --patch-report coverage.json --require-patch-coverage wheel.whl
+
+The report distinguishes external dependencies from libraries already bundled
+in the wheel, detects content changes and distinguishes backports that keep the
+upstream version. After the wheel is written, the packed files are re-checked
+against the approved selection. See ``docs/patch-coverage.rst`` for the
+attestation format and verdicts.
+
 Limitations
 -----------
 

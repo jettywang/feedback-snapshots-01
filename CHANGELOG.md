@@ -3,6 +3,7 @@
 ## HEAD
 
 ### User-facing changes
+- [FEATURE] add `--patch-attestation` / `--patch-report` / `--require-patch-coverage` to `show` and `repair`: verify the selected shared libraries against reviewed builds before grafting, and confirm the packed files afterwards
 - [BUGFIX] avoid duplicating the wheel component in SBOMs ([#750](https://github.com/pypa/auditwheel/issues/750))
 
 ## 6.8.2

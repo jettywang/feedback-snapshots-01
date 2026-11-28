@@ -14,6 +14,14 @@ from typing import TYPE_CHECKING
 from auditwheel.elfutils import elf_read_dt_needed
 from auditwheel.hashfile import hashfile
 from auditwheel.lddtree import LIBPYTHON_RE
+from auditwheel.patch_audit import (
+    DeliveredLibrary,
+    PatchAttestation,
+    PatchCoverageError,
+    evaluate_graft_plan,
+    sha256_file,
+    verify_delivered_libraries,
+)
 from auditwheel.policy import get_replace_platforms
 from auditwheel.sboms import create_sbom_for_wheel
 from auditwheel.tools import is_subdir, unique_by_index
@@ -39,13 +47,41 @@ def repair_wheel(
     patcher: ElfPatcher,
     strip: bool,
     zip_compression_level: int,
+    patch_attestation: PatchAttestation | None = None,
+    patch_report_path: Path | None = None,
+    require_patch_coverage: bool = False,
 ) -> Path | None:
     external_refs_by_fn = wheel_abi.full_external_refs
+
+    check_patch_coverage = (
+        patch_attestation is not None or patch_report_path is not None or require_patch_coverage
+    )
+
+    # Check the exact library selection repair_wheel is about to graft *before*
+    # copying anything, so a disallowed distribution cannot slip into the wheel.
+    coverage = evaluate_graft_plan(
+        wheel_abi,
+        abis[0],
+        patch_attestation,
+        require_patch_coverage,
+    )
+    if check_patch_coverage and not coverage.passed:
+        if patch_report_path is not None:
+            coverage.write(patch_report_path)
+        msg = (
+            f"patch coverage check failed for {wheel_path.name} ({abis[0]}):\n"
+            f"{coverage.failure_message()}"
+        )
+        raise PatchCoverageError(msg)
+
     # Do not repair a pure wheel, i.e. has no external refs
     if not external_refs_by_fn:
+        if patch_report_path is not None:
+            coverage.write(patch_report_path)
         return None
 
     soname_map: dict[str, tuple[str, Path]] = {}
+    delivered: list[DeliveredLibrary] = []
 
     out_dir = out_dir.resolve(strict=True)
     wheel_fname = wheel_path.name
@@ -96,9 +132,21 @@ def repair_wheel(
                 if not dest_dir.exists():
                     dest_dir.mkdir()
                 sbom_filepaths.append(src_path)
+                selected_sha256 = sha256_file(src_path)
                 new_soname, new_path = copylib(src_path, dest_dir, patcher)
                 soname_map[soname] = (new_soname, new_path)
                 replacements.append((soname, new_soname))
+                delivered.append(
+                    DeliveredLibrary(
+                        soname=soname,
+                        scope="external",
+                        member=new_path.relative_to(ctx.path).as_posix(),
+                        selected_sha256=selected_sha256,
+                        final_sha256="",
+                        modified=False,
+                        copied_sha256=sha256_file(new_path),
+                    )
+                )
             if replacements:
                 patcher.replace_needed(fn, *replacements)
 
@@ -151,6 +199,24 @@ def repair_wheel(
             sbom_dir = Path(dist_info_dirs[0], "sboms")
             sbom_dir.mkdir(exist_ok=True)
             (sbom_dir / "auditwheel.cdx.json").write_text(json.dumps(sbom_data))
+
+        for entry in delivered:
+            final_path = ctx.path / entry.member
+            entry.final_sha256 = sha256_file(final_path)
+            entry.modified = entry.final_sha256 != entry.selected_sha256
+
+    if check_patch_coverage:
+        delivered_ok = verify_delivered_libraries(coverage, output_wheel, delivered)
+        if patch_report_path is not None:
+            coverage.write(patch_report_path)
+        if not delivered_ok:
+            # Do not leave a wheel behind that failed the release gate.
+            output_wheel.unlink(missing_ok=True)
+            msg = (
+                f"repaired wheel {output_wheel.name} does not contain the approved "
+                "libraries; see the patch coverage report"
+            )
+            raise PatchCoverageError(msg)
 
     return output_wheel
 

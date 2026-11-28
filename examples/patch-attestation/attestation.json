@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "patches": [
+    {
+      "soname": "libffi.so.5",
+      "candidates": [
+        {
+          "id": "distro-a-patched",
+          "path": "distro-a/libffi.so.5",
+          "sha256": "f334a6957c2fcd97f527a72737d50f3c82a1ef51c1712eac5c6959be9c45c36c",
+          "ext_version": "3.4.2",
+          "upstream_version": "3.4.2"
+        },
+        {
+          "id": "distro-b-unpatched",
+          "path": "distro-b/libffi.so.5",
+          "sha256": "6242b1c3d116736bde1d8e9e1c15fb10af1f14ca0134161d82aa7d38300dd1a3",
+          "reviewed": false,
+          "ext_version": "3.4.2",
+          "upstream_version": "3.4.2"
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,44 @@
+{
+  "attestation": "examples/patch-attestation/attestation.json",
+  "coverage_complete": true,
+  "libraries": [
+    {
+      "accepted": true,
+      "attested": true,
+      "candidate": {
+        "backport": false,
+        "ext_version": "3.4.2",
+        "id": "distro-a-patched",
+        "patch": null,
+        "path": "distro-a/libffi.so.5",
+        "upstream_version": "3.4.2"
+      },
+      "functions": [
+        "_cffi_backend.so"
+      ],
+      "reason": "reviewed library content matches",
+      "scope": "external",
+      "selected_path": "examples/patch-attestation/distro-a/libffi.so.5",
+      "selected_sha256": "f334a6957c2fcd97f527a72737d50f3c82a1ef51c1712eac5c6959be9c45c36c",
+      "soname": "libffi.so.5",
+      "status": "approved"
+    }
+  ],
+  "passed": true,
+  "policy": "manylinux_2_42_x86_64",
+  "repaired": null,
+  "require_patch_coverage": false,
+  "summary": {
+    "approved": 1,
+    "approved_backport": 0,
+    "conflict": 0,
+    "rejected": 0,
+    "selected": 1,
+    "stale": 0,
+    "unapproved": 0,
+    "uncovered": 0,
+    "unresolved": 0
+  },
+  "version": 1,
+  "wheel": "cffi-1.5.0-cp27-none-linux_x86_64.whl"
+}
