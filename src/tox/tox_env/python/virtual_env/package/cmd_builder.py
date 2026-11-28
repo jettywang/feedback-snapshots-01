@@ -107,13 +107,22 @@ class VenvCmdBuilder(PythonPackageToxEnv, ABC):
     def perform_packaging(self, for_env: EnvConfigSet) -> list[Package]:
         if (path := self._built_package_path) is None:
             path = self._build_package()
+            self.register_artifact(path)
             self._built_package_path = path
         return self.extract_install_info(for_env, path)
+
+    @override
+    def _invalidate_generation(self, generation: int) -> None:
+        # a cancelled command build must rebuild from scratch instead of reusing a half-written result
+        self._built_package_path = None
 
     def _build_package(self) -> Path:
         self.setup()
         if (path := getattr(self.options, "install_pkg", None)) is not None:
             return Path(path)
+        if self._execution_cancelled():
+            msg = "build cancelled"
+            raise SystemExit(-2)
         chdir = self.conf.get("change_dir", Path)
         chdir.mkdir(exist_ok=True, parents=True)
         if run_command_set(self, "commands", chdir, self.conf.get("ignore_errors", bool), []) != Outcome.OK:
@@ -164,9 +173,10 @@ class VenvCmdBuilder(PythonPackageToxEnv, ABC):
             except StopIteration as exc:
                 empty_archive_error: Final[str] = f"no files inside {path}"
                 raise Fail(empty_archive_error) from exc
-            deps = self._sdist_meta_tox_env.get_package_dependencies(for_env)
-            name = self._sdist_meta_tox_env.get_package_name(for_env)
-            available = self._sdist_meta_tox_env.get_package_extras(for_env)
+            with self._sdist_meta_tox_env.track_build(for_env.name):
+                deps = self._sdist_meta_tox_env.get_package_dependencies(for_env)
+                name = self._sdist_meta_tox_env.get_package_name(for_env)
+                available = self._sdist_meta_tox_env.get_package_extras(for_env)
         return [SdistPackage(path, dependencies_with_extras(deps, extras, name, available_extras=available))]
 
     @staticmethod

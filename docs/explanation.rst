@@ -574,6 +574,35 @@ conflicting with packaging settings.
 To configure a specific packaging environment, use the standard environment syntax (e.g. ``[testenv:.pkg]`` in INI or
 ``env.".pkg"`` in TOML).
 
+.. _shared-package-environments:
+
+Shared packaging environments
+=============================
+
+Several run environments can use one packaging environment, for example the default ``.pkg`` for every environment that
+builds a wheel. tox treats that environment as shared and its lifecycle as a lease:
+
+- **Leases.** Every run environment that will use a packaging environment takes a lease before it runs and releases it
+  when it tears down. The shared environment is torn down only when the last lease is released. An environment that
+  finishes early never removes artifacts another environment still needs.
+- **Generations.** Each build runs in its own generation. The artifacts of a generation are registered when they are
+  produced, so the environment can discard exactly one cancelled build without touching an artifact that already
+  entered an install.
+- **Cancellation.** Cancelling a run environment stops the build that environment started. The shared environment then
+  issues a receipt with the run environment name, the shared environment name, the build generation, whether a build was
+  interrupted, whether its artifacts were invalidated and the run environments it stays available for. The receipt is
+  written to the run environment's journal under ``cancellation``. Other run environments keep their leases and either
+  continue with a completed artifact or build a fresh one.
+- **Invalidation.** An invalidated generation never enters an install: its artifacts are deleted, the packaging
+  metadata cached from that build is dropped and the next build starts a fresh build backend. A build that failed for
+  another reason behaves the same way, and the next run retries from a clean slate.
+- **Validity.** Before installing, tox checks that every artifact exists and is not an empty file. A missing or empty
+  artifact fails the run environment instead of being installed.
+
+Grabbing :kbd:`Ctrl-C` during a run still stops the whole run and propagates the interrupt to the package environments,
+as before. A cancellation issued for a single run environment (for example by the parallel scheduler for a future that
+was cancelled) only stops that environment's build.
+
 .. _auto-provisioning:
 
 *******************

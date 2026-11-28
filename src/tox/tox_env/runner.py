@@ -27,7 +27,7 @@ from tox.util.typing_compat import override
 
 from .api import ToxEnv, ToxEnvCreateArgs
 from .errors import Fail
-from .package import Package, PackageToxEnv, PathPackage
+from .package import CancellationReceipt, Package, PackageToxEnv, PathPackage, packages_valid
 from .util import add_change_dir_conf, add_commands_conf, add_ignore_errors_conf
 
 if TYPE_CHECKING:
@@ -141,8 +141,10 @@ class RunToxEnv(ToxEnv, ABC):
 
     @override
     def _teardown(self) -> None:
-        super()._teardown()
-        self._call_pkg_envs("teardown_env", self.conf)
+        try:
+            super()._teardown()
+        finally:
+            self._call_pkg_envs("teardown_env", self.conf)
 
     def _call_pkg_envs(self, method_name: str, *args: object, suspend: bool | None = None) -> None:
         if suspend is None:
@@ -162,8 +164,25 @@ class RunToxEnv(ToxEnv, ABC):
     def interrupt(self) -> None:
         super().interrupt()
         # the interrupt arrives on the main thread while the run thread may be collecting and closing the captured
-        # output, so log on the live streams rather than into a buffer that is about to disappear
+        # output, so log on the live streams rather than into a buffer that is about to disappear; a user interrupt
+        # still stops the package backend, exactly as before
         self._call_pkg_envs("interrupt", suspend=False)
+
+    def cancel_package_envs(self) -> tuple[CancellationReceipt, ...]:
+        """Cancel only this run environment's package work, leaving the shared environments usable for the others.
+
+        :returns: the receipts of the shared package environments that were using this run environment's build
+
+        """
+        receipts = []
+        for package_env in self.package_envs:
+            try:
+                receipts.append(package_env.interrupt_for(self.conf.name))
+            except (Fail, OSError):  # one package env failing must not leak the others' resources
+                logging.warning("failed to cancel package environment %s", package_env.name, exc_info=True)
+        if receipts and self.journal:
+            self.journal["cancellation"] = [receipt.as_dict() for receipt in receipts]
+        return tuple(receipts)
 
     def get_package_env_types(self) -> tuple[str, str] | None:
         """Get the packaging environment types the run environment uses.
@@ -270,6 +289,9 @@ class RunToxEnv(ToxEnv, ABC):
 
     def _setup_pkg(self) -> None:
         self._packages = self._build_packages()
+        if not packages_valid(self._packages):
+            msg = "the package build did not produce a usable artifact"
+            raise Fail(msg)
         if not self.options.package_only:
             self._install(self._packages, RunToxEnv.__name__, "package")
         self._handle_journal_package(self.journal, self._packages)

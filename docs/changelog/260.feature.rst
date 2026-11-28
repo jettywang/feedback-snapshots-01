@@ -1,0 +1,5 @@
+Run environments that share a packaging environment now use a lease: the shared environment lives until the last lease
+is released, and cancelling one run environment discards only that environment's build generation, leaving completed
+artifacts available for the others. Each cancellation leaves a receipt in the run environment's journal, invalidated
+artifacts never enter a later install, and a missing or empty artifact fails the environment instead of being
+installed - by :user:`jettywang`.

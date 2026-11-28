@@ -258,7 +258,7 @@ class PythonRun(Python, RunToxEnv, ABC):
         assert package_env is not None  # ruff:ignore[assert]  # invariant, narrows type
         with package_env.display_context(self._has_display_suspended):
             try:
-                packages = package_env.perform_packaging(self.conf)
+                packages = package_env.build_packages(self.conf)
             except Skip as exception:
                 msg = f"{exception.args[0]} for package environment {package_env.conf['env_name']}"
                 raise Skip(msg) from exception

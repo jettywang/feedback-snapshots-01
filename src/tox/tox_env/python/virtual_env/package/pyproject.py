@@ -24,7 +24,7 @@ import sys
 import tarfile
 from abc import ABC
 from collections import defaultdict
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from itertools import chain
 from pathlib import Path
 from threading import RLock
@@ -156,6 +156,7 @@ class Pep517VenvPackager(PythonPackageToxEnv, ABC):
         self._pkg_lock = RLock()  # can build only one package at a time
         self._package_paths: set[Path] = set()
         self._root: Path | None = None
+        self._backend_stale = False
 
     @contextmanager
     def root_at(self, value: Path) -> Generator[None, None, None]:
@@ -284,14 +285,16 @@ class Pep517VenvPackager(PythonPackageToxEnv, ABC):
 
     @override
     def _teardown(self) -> None:
-        executor = self._frontend.backend_executor
-        try:
-            if executor.is_alive:
-                self._frontend._send("_exit")  # try first on amicable shutdown  # ruff:ignore[private-member-access]
-        except (SystemExit, BrokenPipeError, Fail):  # pragma: no cover  # if interrupted or backend dead, ignore
-            pass
-        finally:
-            executor.close()
+        frontend = self._frontend_
+        if frontend is not None:  # a cancelled last generation may have left no backend to close
+            executor = frontend._backend_executor_  # ruff:ignore[private-member-access]  # internal state
+            try:
+                if executor is not None and executor.is_alive:
+                    frontend._send("_exit")  # amicable shutdown  # ruff:ignore[private-member-access]  # internal
+            except (SystemExit, BrokenPipeError, Fail):  # pragma: no cover  # if interrupted or backend dead, ignore
+                pass
+            finally:
+                frontend.close_backend()
         for path in self._package_paths:
             if path.exists():
                 logging.debug("delete package %s", path)
@@ -300,6 +303,30 @@ class Pep517VenvPackager(PythonPackageToxEnv, ABC):
                 except OSError as exception:  # e.g. still open on Windows; cleanup must reach the wheel build envs
                     logging.warning("failed to delete package %s: %s", path, exception)
         super()._teardown()
+
+    @override
+    def _invalidate_generation(self, generation: int) -> None:
+        # A build cancelled for one run environment must not leak into the next user of the shared environment: the
+        # backend process that ran it may already be gone, and the metadata it produced describes the discarded build.
+        # Drop both, so the next build starts a fresh backend and re-reads metadata.
+        self._distribution_meta = None
+        self._package_dependencies = None
+        self._package_name = None
+        with self._pkg_lock:
+            self._package_paths = {path for path in self._package_paths if path.exists()}
+        # the backend process that ran the discarded build was killed with it; the next build must start a fresh one
+        # instead of writing a request into a closed pipe
+        self._backend_stale = True
+
+    @override
+    def build_packages(self, for_env: EnvConfigSet) -> list[Package]:
+        if self._backend_stale:  # a previous generation was cancelled; its backend and cached answers are gone
+            self._backend_stale = False
+            frontend, self._frontend_ = self._frontend_, None
+            if frontend is not None:
+                with suppress(Exception):  # the backend was killed with its build; only its pipes remain to close
+                    frontend.close_backend()
+        return super().build_packages(for_env)
 
     @override
     def perform_packaging(self, for_env: EnvConfigSet) -> list[Package]:
@@ -320,19 +347,18 @@ class Pep517VenvPackager(PythonPackageToxEnv, ABC):
             with self._pkg_lock:
                 config_settings = self.conf["config_settings_build_sdist"]
                 sdist = self._frontend.build_sdist(sdist_directory=self.pkg_dir, config_settings=config_settings).sdist
-                sdist = create_session_view(sdist, self._package_temp_path, self.core["tox_root"])
+                sdist = self._stage_artifact(sdist)
                 self._package_paths.add(sdist)
                 package = SdistPackage(sdist, deps, config_settings=self.conf["config_settings_build_wheel"])
         elif of_type == "sdist-wheel":
-            wheel = create_session_view(
-                self._build_wheel_via_sdist(for_env), self._package_temp_path, self.core["tox_root"]
-            )
+            wheel = self._stage_artifact(self._build_wheel_via_sdist(for_env))
             self._package_paths.add(wheel)
             package = WheelPackage(wheel, deps)
         elif of_type in {"wheel", "editable"}:
             if (w_env := self._wheel_build_envs.get(for_env["wheel_build_env"])) is not None and w_env is not self:
                 with w_env.display_context(self._has_display_suspended):
-                    return w_env.perform_packaging(for_env)
+                    # the child is a shared environment too: run the build under its lease/generation tracking
+                    return w_env.build_packages(for_env)
             else:
                 try:
                     self.setup()
@@ -349,13 +375,20 @@ class Pep517VenvPackager(PythonPackageToxEnv, ABC):
                         metadata_directory=self.meta_folder_if_populated,
                         config_settings=config_settings,
                     ).wheel
-                    wheel = create_session_view(wheel, self._package_temp_path, self.core["tox_root"])
+                    wheel = self._stage_artifact(wheel)
                     self._package_paths.add(wheel)
                 package = (EditablePackage if of_type == "editable" else WheelPackage)(wheel, deps)
         else:  # pragma: no cover # for when we introduce new packaging types and don't implement
             msg = f"cannot handle package type {of_type}"
             raise TypeError(msg)  # pragma: no cover  # untested error path
         return [package]
+
+    def _stage_artifact(self, artifact: Path) -> Path:
+        # keep the artifact this build produced, so a cancellation can discard exactly this generation
+        self.register_artifact(artifact)
+        view = create_session_view(artifact, self._package_temp_path, self.core["tox_root"])
+        self.register_artifact(view)
+        return view
 
     def _load_deps(self, for_env: EnvConfigSet) -> list[Requirement]:
         # first check if this is statically available via PEP-621
@@ -527,7 +560,7 @@ class Pep517VenvPackager(PythonPackageToxEnv, ABC):
 
             # Step 3: Get wheel_build_env child and point it at extracted sdist
             child_env = cast("Pep517VenvPackager", self._wheel_build_envs[for_env["wheel_build_env"]])
-            with child_env.root_at(sdist_source_root):
+            with child_env.track_build(for_env.name), child_env.root_at(sdist_source_root):
                 child_env.call_require_hooks.add("wheel")
                 if child_env is self:
                     self._setup_build_requires("wheel")
@@ -600,6 +633,10 @@ class Pep517VirtualEnvFrontend(Frontend):
     ) -> tuple[
         Any, str, str  # simplint: ignore[imprecise-annotation]  # the backend error compares values of any type
     ]:
+        if self._tox_env._execution_cancelled():  # ruff:ignore[private-member-access]  # internal guard
+            # the cancelled build must not issue another request; its thread is unwinding and the artifact is discarded
+            msg = "build cancelled"
+            raise SystemExit(-2)
         try:
             if self._can_skip_prepare(cmd):
                 # will need to build wheel either way, avoid prepare
@@ -642,6 +679,12 @@ class Pep517VirtualEnvFrontend(Frontend):
         finally:
             if self._tox_env.conf["fresh_subprocess"]:
                 self.backend_executor.close()
+
+    def close_backend(self) -> None:
+        """Close the backend executor after a cancelled build, so the next build starts a fresh backend."""
+        executor = self._backend_executor_
+        if executor is not None:
+            executor.close()
 
     @property
     def backend_cmd(self) -> Sequence[str]:

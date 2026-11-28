@@ -526,6 +526,11 @@ def _collect_completed(
     try:
         return completed_future.result()
     except CancelledError:
+        # this run environment is cancelled before it built anything; leave the shared package environments and their
+        # completed artifacts for the environments that are still running
+        cancel_package_envs = getattr(tox_env_done, "cancel_package_envs", None)
+        if cancel_package_envs is not None:
+            cancel_package_envs()
         tox_env_done.teardown()
         was_interrupted = interrupt.is_set()
         return ToxEnvRunResult(
