@@ -36,6 +36,12 @@ from pypi_attestations._impl import (
     GooglePublisher,
     Provenance,
 )
+from pypi_attestations._migration import (
+    Decision,
+    MigrationError,
+    assess_release_line,
+    load_approvals,
+)
 
 if typing.TYPE_CHECKING:  # pragma: no cover
     from collections.abc import Iterable
@@ -239,6 +245,66 @@ def _parser() -> argparse.ArgumentParser:
         required=True,
         type=Path,
         help="The output file to write the attestation to",
+    )
+
+    check_release_command = subcommands.add_parser(
+        name="check-release",
+        help="Assess a patch against its release line and migration approvals",
+        parents=[parent_parser],
+    )
+
+    check_release_command.add_argument(
+        "distribution_file",
+        metavar="DISTRIBUTION_FILE",
+        type=Path,
+        help="The candidate patch distribution file to assess",
+    )
+
+    check_release_command.add_argument(
+        "--candidate-attestation",
+        required=True,
+        type=Path,
+        help="The PEP 740 attestation for the candidate patch",
+    )
+
+    check_release_command.add_argument(
+        "--current-attestation",
+        required=True,
+        type=Path,
+        help="The attestation for the current/historical release on record",
+    )
+
+    check_release_command.add_argument(
+        "--current-provenance",
+        type=Path,
+        help="Optional provenance file naming the current release's trusted publisher",
+    )
+
+    check_release_command.add_argument(
+        "--approvals",
+        type=Path,
+        help="JSON file of registered migration approvals; "
+        "if omitted, no migration is pre-authorized",
+    )
+
+    check_release_command.add_argument(
+        "--staging",
+        action="store_true",
+        default=False,
+        help="Use the staging Sigstore environment",
+    )
+
+    check_release_command.add_argument(
+        "--offline",
+        action="store_true",
+        default=False,
+        help="Disable TUF refresh and rely on local trust material only",
+    )
+
+    check_release_command.add_argument(
+        "--output-file",
+        type=Path,
+        help="Write the full ledger-ready JSON assessment to this file",
     )
     return parser
 
@@ -644,6 +710,83 @@ def _verify_pypi(args: argparse.Namespace) -> None:
     _logger.info(f"OK: {dist.name}")
 
 
+def _check_release(args: argparse.Namespace) -> None:
+    """Assess a candidate patch against its release line and migration ledger.
+
+    Both the current (historical) and the candidate attestations are read from
+    local files, so the check can run offline. A change of signing channel or
+    subject is only accepted when a registered migration approval covers it.
+    """
+    required_files = [
+        args.distribution_file,
+        args.candidate_attestation,
+        args.current_attestation,
+    ]
+    _validate_files(required_files, should_exist=True)
+    if args.current_provenance is not None:
+        _validate_files([args.current_provenance], should_exist=True)
+    if args.approvals is not None:
+        _validate_files([args.approvals], should_exist=True)
+    if args.output_file is not None:
+        _validate_files([args.output_file], should_exist=False)
+
+    try:
+        dist = Distribution.from_file(args.distribution_file)
+        current_attestation = Attestation.model_validate_json(args.current_attestation.read_bytes())
+        candidate_attestation = Attestation.model_validate_json(
+            args.candidate_attestation.read_bytes()
+        )
+        current_provenance = (
+            Provenance.model_validate_json(args.current_provenance.read_bytes())
+            if args.current_provenance is not None
+            else None
+        )
+        approvals = load_approvals(args.approvals) if args.approvals is not None else []
+    except (ValidationError, OSError, MigrationError) as err:
+        _die(f"Failed to load release-line inputs: {err}")
+
+    try:
+        assessment = assess_release_line(
+            dist=dist,
+            current_attestation=current_attestation,
+            candidate_attestation=candidate_attestation,
+            approvals=approvals,
+            current_provenance=current_provenance,
+            staging=args.staging,
+            offline=args.offline,
+        )
+    except MigrationError as err:
+        _die(f"Release-line assessment failed: {err}")
+
+    assessment.sources = {
+        "distribution": str(args.distribution_file),
+        "current_attestation": str(args.current_attestation),
+        "candidate_attestation": str(args.candidate_attestation),
+    }
+    if args.current_provenance is not None:
+        assessment.sources["current_provenance"] = str(args.current_provenance)
+    if args.approvals is not None:
+        assessment.sources["migration_approvals"] = str(args.approvals)
+
+    if args.output_file is not None:
+        args.output_file.write_text(assessment.model_dump_json(indent=2))
+
+    _logger.info(f"Decision: {assessment.decision.value}")
+    _logger.info(f"Distribution: {assessment.distribution}")
+    _logger.info(f"Current release line: {assessment.current_line}")
+    _logger.info(f"Candidate release line: {assessment.candidate_line}")
+    _logger.info(f"Signature valid: {assessment.signature_valid}")
+    _logger.info(f"Line changed: {assessment.line_changed}")
+    _logger.info(f"Migration approved: {assessment.migration_approved}")
+    if assessment.approval_id is not None:
+        _logger.info(f"Approval used: {assessment.approval_id}")
+    for reason in assessment.reasons:
+        _logger.info(f"- {reason}")
+
+    if assessment.decision != Decision.ACCEPTED:
+        raise SystemExit(1)
+
+
 def _convert(args: argparse.Namespace) -> None:
     """Convert a Sigstore bundle into a PEP 740 attestation."""
     if not args.bundle_file.exists():
@@ -689,3 +832,5 @@ def main() -> None:
         _inspect(args)
     elif args.subcommand == "convert":
         _convert(args)
+    elif args.subcommand == "check-release":
+        _check_release(args)

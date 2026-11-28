@@ -168,6 +168,38 @@ This command downloads the artifact, if needed, and its provenance from PyPI. Th
 is then verified against the provenance, while also checking that the provenance's
 signing identity matches the repository specified by the user.
 
+### Checking a patch against its release line
+
+A valid signature only proves that some recognized publisher signed a distribution.
+When a security patch is delivered through a different release line, distribution
+channel, or signing subject than the release already on record, accepting it additionally
+requires an explicit, registered migration approval. The `check-release` command reads
+both the current (historical) and the candidate attestations, verifies the candidate's
+signature, and reports a ledger-ready decision:
+
+- `accepted`: the candidate is signed by the recorded release line, or by a line covered
+  by a registered migration approval.
+- `migration_required`: the signature is valid but the release line changed and no
+  registered approval authorizes the transition.
+- `rejected`: the attestation does not cryptographically verify for the distribution.
+
+```bash
+# Approvals are a JSON file containing a list (or an {"approvals": [...]} object) of
+# migration records, each naming the source and target release lines.
+pypi-attestations check-release --offline \
+  --current-attestation old-1.0.0.tar.gz.publish.attestation \
+  --current-provenance old-1.0.0.tar.gz.provenance \
+  --candidate-attestation new-1.0.1.tar.gz.publish.attestation \
+  --approvals migration-approvals.json \
+  --output-file assessment.json \
+  new-1.0.1.tar.gz
+```
+
+The command exits non-zero unless the decision is `accepted`, and `--output-file` writes
+the full assessment (including the source files backing every claim) as JSON for a
+compliance ledger. The same logic is available as a library via `assess_release_line`,
+`line_from_attestation`, `line_from_publisher` and `load_approvals`.
+
 ### Converting a Sigstore bundle into a PEP 740 Attestation
 
 ```bash

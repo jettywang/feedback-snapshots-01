@@ -20,6 +20,17 @@ from ._impl import (
     VerificationError,
     VerificationMaterial,
 )
+from ._migration import (
+    Decision,
+    LineAssessment,
+    MigrationApproval,
+    MigrationError,
+    ReleaseLine,
+    assess_release_line,
+    line_from_attestation,
+    line_from_publisher,
+    load_approvals,
+)
 
 __all__ = [
     "Attestation",
@@ -28,14 +39,23 @@ __all__ = [
     "AttestationType",
     "CircleCIPublisher",
     "ConversionError",
+    "Decision",
     "Distribution",
     "Envelope",
     "GitHubPublisher",
     "GitLabPublisher",
     "GooglePublisher",
+    "LineAssessment",
+    "MigrationApproval",
+    "MigrationError",
     "Provenance",
     "Publisher",
+    "ReleaseLine",
     "TransparencyLogEntry",
     "VerificationError",
     "VerificationMaterial",
+    "assess_release_line",
+    "line_from_attestation",
+    "line_from_publisher",
+    "load_approvals",
 ]

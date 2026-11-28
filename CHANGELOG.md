@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Release-line continuity and publisher migration governance: the new
+  `check-release` CLI command and the `assess_release_line`,
+  `line_from_attestation`, `line_from_publisher` and `load_approvals` APIs
+  read both the current and historical attestations for a pair of PyPI
+  distributions, verify the candidate's signature, and only accept a change of
+  distribution channel or signing subject when an explicit, registered
+  `MigrationApproval` covers that exact transition. The result is emitted as a
+  ledger-ready `LineAssessment`.
+
 ### Changed
 
 - The minimum Python version required is now `3.11`.
