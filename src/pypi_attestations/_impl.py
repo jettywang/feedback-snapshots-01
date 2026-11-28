@@ -235,6 +235,7 @@ class Attestation(BaseModel):
         *,
         staging: bool = False,
         offline: bool = False,
+        verifier: Verifier | None = None,
     ) -> tuple[str, dict[str, Any] | None]:
         """Verify against an existing Python distribution.
 
@@ -249,6 +250,10 @@ class Attestation(BaseModel):
         If `offline` is `True`, the verifier will not attempt to refresh the
         TUF repository.
 
+        `verifier` overrides the Sigstore verifier, which is useful for
+        pinning a local trust root. When provided, `staging` and `offline`
+        are ignored.
+
         On failure, raises an appropriate subclass of `AttestationError`.
         """
         # NOTE: Can't do `isinstance` with `Publisher` since it's
@@ -259,10 +264,11 @@ class Attestation(BaseModel):
         else:
             policy = identity
 
-        if staging:
-            verifier = Verifier.staging(offline=offline)
-        else:
-            verifier = Verifier.production(offline=offline)
+        if verifier is None:
+            if staging:
+                verifier = Verifier.staging(offline=offline)
+            else:
+                verifier = Verifier.production(offline=offline)
 
         bundle = self.to_bundle()
         try:

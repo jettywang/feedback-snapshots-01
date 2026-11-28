@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "name": "demo-project",
+  "release": "1.2.3",
+  "targets": [
+    {
+      "platform": "any"
+    },
+    {
+      "platform": "manylinux_2_17_x86_64"
+    },
+    {
+      "platform": "win_amd64",
+      "reason": "Windows wheel is not produced for this demo release"
+    },
+    {
+      "platform": null
+    }
+  ]
+}

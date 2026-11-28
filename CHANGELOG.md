@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `verify matrix` checks a release ledger against actual build artifacts. Each
+  target is a version/platform slot resolved from real filenames, and each
+  artifact must carry its own complete attestations. Approved omissions retain
+  their reason and are reported as uncovered targets. Single-artifact
+  verification is unchanged.
+
 ### Changed
 
 - The minimum Python version required is now `3.11`.

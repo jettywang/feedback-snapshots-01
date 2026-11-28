@@ -36,6 +36,7 @@ from pypi_attestations._impl import (
     GooglePublisher,
     Provenance,
 )
+from pypi_attestations._matrix import ReleaseMatrixVerifier, ReleaseTarget
 
 if typing.TYPE_CHECKING:  # pragma: no cover
     from collections.abc import Iterable
@@ -142,6 +143,69 @@ def _parser() -> argparse.ArgumentParser:
         type=Path,
         nargs="+",
         help="The file to sign",
+    )
+
+    verify_matrix_command = verify_subcommands.add_parser(
+        name="matrix", help="Verify every artifact in a release matrix"
+    )
+
+    verify_matrix_command.add_argument(
+        "--identity",
+        type=str,
+        required=True,
+        help="Signer identity",
+    )
+
+    verify_matrix_command.add_argument(
+        "--matrix-file",
+        type=Path,
+        required=True,
+        help="Release matrix JSON file listing the expected artifacts",
+    )
+
+    verify_matrix_command.add_argument(
+        "--artifact-dir",
+        type=Path,
+        default=Path("dist"),
+        help="Directory containing the artifacts and their attestations",
+    )
+
+    verify_matrix_command.add_argument(
+        "--approved-platform",
+        action="append",
+        default=[],
+        metavar="PLATFORM=REASON",
+        help=(
+            "Declare an approved wheel platform (or 'sdist') that may be absent; "
+            "supply multiple times. The reason is preserved in the report."
+        ),
+    )
+
+    verify_matrix_command.add_argument(
+        "--staging",
+        action="store_true",
+        default=False,
+        help="Use the staging environment",
+    )
+
+    verify_matrix_command.add_argument(
+        "--offline",
+        action="store_true",
+        default=False,
+        help="Disable TUF refresh",
+    )
+
+    verify_matrix_command.add_argument(
+        "--trusted-root",
+        type=Path,
+        help="Verify against a local Sigstore trusted-root JSON file instead of TUF",
+    )
+
+    verify_matrix_command.add_argument(
+        "--json",
+        action="store_true",
+        default=False,
+        help="Emit the matrix report as JSON",
     )
 
     verify_pypi_command = verify_subcommands.add_parser(name="pypi", help="Verify a PyPI release")
@@ -567,6 +631,74 @@ def _verify_attestation(args: argparse.Namespace) -> None:
             _logger.info(f"OK: {attestation_path}")
 
 
+def _verify_matrix(args: argparse.Namespace) -> None:
+    """Verify every artifact in a release matrix.
+
+    This is intentionally separate from single-artifact verification: each
+    matrix target must be backed by its own artifact and its own evidence.
+    """
+    if not args.matrix_file.is_file():
+        _die(f"Matrix file does not exist: {args.matrix_file}")
+
+    if not args.artifact_dir.is_dir():
+        _die(f"Artifact directory does not exist: {args.artifact_dir}")
+
+    try:
+        verifier = ReleaseMatrixVerifier.from_file(args.matrix_file)
+    except AttestationError as e:
+        _die(str(e))
+
+    matrix = verifier.matrix
+    pol = policy.Identity(identity=args.identity)
+
+    approved: list[ReleaseTarget] = []
+    for raw in args.approved_platform:
+        platform, sep, reason = raw.partition("=")
+        if not sep or not platform or not reason:
+            _die(
+                f"Invalid --approved-platform value {raw!r}; "
+                "expected PLATFORM=REASON (use 'sdist' for the source distribution)"
+            )
+        approved.append(
+            ReleaseTarget(platform=None if platform == "sdist" else platform, reason=reason)
+        )
+
+    # Approved targets that duplicate a declared target would silently hide
+    # it; reject them instead.
+    declared = {target.platform for target in matrix.targets}
+    for target in approved:
+        if target.platform in declared:
+            _die(f"Platform {target.platform!r} is already declared in the matrix")
+
+    if approved:
+        # Fold approved extras into a copy of the matrix so the verifier sees
+        # a single, consistent target list.
+        matrix = matrix.model_copy(update={"targets": [*matrix.targets, *approved]})
+        verifier = ReleaseMatrixVerifier(matrix)
+
+    if args.trusted_root is not None and not args.trusted_root.is_file():
+        _die(f"Trusted root file does not exist: {args.trusted_root}")
+
+    try:
+        result = verifier.verify(
+            args.artifact_dir,
+            pol,
+            staging=args.staging,
+            offline=args.offline,
+            trusted_root=args.trusted_root,
+        )
+    except (AttestationError, OSError) as e:
+        _die(f"Matrix verification failed: {e}")
+
+    if args.json:
+        print(result.model_dump_json(indent=2))
+    else:
+        print(result.format_report())
+
+    if result.failed:
+        raise SystemExit(1)
+
+
 def _verify_pypi(args: argparse.Namespace) -> None:
     """Verify a distribution hosted on PyPI.
 
@@ -683,6 +815,8 @@ def main() -> None:
     elif args.subcommand == "verify":
         if args.verification_type == "attestation":
             _verify_attestation(args)
+        elif args.verification_type == "matrix":
+            _verify_matrix(args)
         elif args.verification_type == "pypi":
             _verify_pypi(args)
     elif args.subcommand == "inspect":

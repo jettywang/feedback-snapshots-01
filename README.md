@@ -142,6 +142,72 @@ pypi-attestations verify attestation  \
   test/assets/pypi_attestations-0.0.19.tar.gz
 ```
 
+### Verifying a release matrix
+
+Single-artifact verification answers "is this artifact backed by this
+attestation?". A release ledger answers a different question: "does this
+release contain exactly the version/platform combinations we expect, each
+with its own evidence?". Use `verify matrix` for the latter so one signed
+attestation cannot be mistaken for approval of the whole release.
+
+```json
+{
+  "version": 1,
+  "name": "demo-project",
+  "release": "1.2.3",
+  "targets": [
+    { "platform": "any" },
+    { "platform": "manylinux_2_17_x86_64" },
+    { "platform": "win_amd64", "reason": "Windows wheel is not produced for this release" },
+    { "platform": null }
+  ]
+}
+```
+
+- Each target is a `(version, platform)` slot; `null` is the sdist.
+- The verifier parses actual filenames to fill each slot, so it checks the
+  version and platform recorded in the build itself.
+- Every filled slot must have its own `*.publish.attestation` and/or
+  `*.slsa.attestation`, and each attestation must name that exact artifact.
+- A target with a `reason` may be absent; it is still listed as an uncovered,
+  approved omission so the reason is preserved.
+
+```bash
+pypi-attestations verify matrix \
+  --identity https://example.com/demo/.github/workflows/release.yml@refs/tags/v1.2.3 \
+  --matrix-file test/assets/release-matrix-demo/matrix.json \
+  --artifact-dir test/assets/release-matrix-demo \
+  --trusted-root test/assets/release-matrix-demo/trusted_root.json
+```
+
+The checked-in demo is self-contained and cryptographically real: the
+fixtures are signed by a local Sigstore test root, so the command verifies
+fully offline. It reports:
+
+```
+Release matrix: demo-project 1.2.3
+Admitted targets:
+  OK   manylinux_2_17_x86_64: demo_project-1.2.3-...manylinux2014_x86_64.whl
+  OK   sdist: demo_project-1.2.3.tar.gz
+Uncovered targets:
+  MISS any: incomplete evidence: ...attestation subject is '...linux...', expected '...py3-none-any.whl'
+  MISS win_amd64 (approved omission): Windows wheel is not produced for this demo release
+Artifacts without complete evidence:
+  - demo_project-1.2.3-py3-none-any.whl
+```
+
+The universal wheel deliberately reuses the Linux wheel's attestation, so it
+is reported as uncovered rather than admitted. Regenerate the fixtures with
+`python tools/gen_release_matrix_demo.py`.
+
+The command prints admitted targets, uncovered targets (with reasons), and
+artifacts whose evidence is missing or incomplete. It exits non-zero while
+any required target is uncovered. Use `--json` for machine-readable output,
+and `--approved-platform PLATFORM=REASON` to exclude an additional target at
+invocation time. Omit `--trusted-root` to verify against Sigstore's normal
+TUF-backed production/staging root. The existing `verify attestation` command
+remains the single-artifact investigation path.
+
 ### Verifying a PyPI package
 
 > [!NOTE]
