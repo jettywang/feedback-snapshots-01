@@ -114,6 +114,17 @@ module Bundler
       end
 
       #
+      # The correlation IDs of all findings.
+      #
+      # @return [Array<String>]
+      #
+      # @see Results::Result#correlation_id
+      #
+      def correlation_ids
+        @results.map(&:correlation_id)
+      end
+
+      #
       # @yield [gem]
       #
       # @yieldparam [Gem::Specification]

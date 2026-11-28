@@ -1,0 +1,15 @@
+gem: widget
+url: https://example.com/advisories/WIDGET-2026-0004
+title: Widget 2.0.0 signature verification bypass
+date: 2026-02-20
+
+description: |
+  Widget 2.0.0 does not verify signed package metadata.
+
+cvss_v3: 8.0
+
+unaffected_versions:
+  - "< 2.0.0"
+
+patched_versions:
+  - ">= 2.0.1"

@@ -55,7 +55,7 @@ module Bundler
             say_xml(
               %{<?xml version="1.0" encoding="UTF-8" ?>},
               %{<testsuites id="#{Time.now.to_i}" name="Bundle Audit">},
-              %{  <testsuite id="Gemfile" name="Ruby Gemfile" failures="#{report.count}">}
+              %{  <testsuite id="Gemfile" name="Ruby Gemfile" failures="#{report.count}" tests="#{report.count}">}
             )
 
             yield
@@ -74,16 +74,21 @@ module Bundler
             case result
             when Results::InsecureSource
               say_xml(
-                %{    <testcase id="#{xml(result.source)}" name="Insecure Source URI found: #{xml(result.source)}">},
-                %{      <failure message="Insecure Source URI found: #{xml(result.source)}" type="Unknown"></failure>},
+                %{    <testcase id="#{xml(result.correlation_id)}" name="Insecure Source URI found: #{xml(result.source)}">},
+                %{      <failure message="Insecure Source URI found: #{xml(result.source)}" type="Unknown">},
+                %{        Correlation ID: #{xml(result.correlation_id)}},
+                %{        Source: #{xml(result.source)}},
+                %{      </failure>},
                 %{    </testcase>}
               )
             when Results::UnpatchedGem
               say_xml(
-                %{    <testcase id="#{xml(result.gem.name)}" name="#{xml(bundle_title(result))}">},
+                %{    <testcase id="#{xml(result.correlation_id)}" name="#{xml(bundle_title(result))}">},
                 %{      <failure message="#{xml(result.advisory.title)}" type="#{xml(result.advisory.criticality)}">},
+                %{        Correlation ID: #{xml(result.correlation_id)}},
                 %{        Name: #{xml(result.gem.name)}},
                 %{        Version: #{xml(result.gem.version)}},
+                %{        Platform: #{xml(result.gem.platform)}},
                 %{        Advisory: #{xml(advisory_ref(result.advisory))}},
                 %{        Criticality: #{xml(advisory_criticality(result.advisory))}},
                 %{        URL: #{xml(result.advisory.url)}},

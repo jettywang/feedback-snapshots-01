@@ -16,6 +16,7 @@
 #
 
 require 'bundler/audit/results/result'
+require 'bundler/audit/correlation'
 
 require 'uri'
 
@@ -77,16 +78,31 @@ module Bundler
         end
 
         #
+        # The stable correlation ID for this finding.
+        #
+        # Derived from the advisory and the locked gem instance (name,
+        # version, platform and source), so reordering equivalent lockfile
+        # entries does not change it.
+        #
+        # @return [String]
+        #
+        def correlation_id
+          Correlation.dependency(@advisory.id,@gem)
+        end
+
+        #
         # Converts the unpatched gem to a Hash.
         #
         # @return [Hash{Symbol => Object}]
         #
         def to_h
           {
-            type: :unpatched_gem,
+            type:           :unpatched_gem,
+            correlation_id: correlation_id,
             gem:  {
-              name: @gem.name,
-              version: @gem.version
+              name:     @gem.name,
+              version:  @gem.version,
+              platform: Correlation.platform_of(@gem)
             },
             advisory: @advisory.to_h
           }

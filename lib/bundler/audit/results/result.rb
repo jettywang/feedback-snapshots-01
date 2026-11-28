@@ -7,6 +7,17 @@ module Bundler
       class Result
 
         #
+        # The stable correlation ID for this finding.
+        #
+        # @return [String]
+        #
+        # @abstract
+        #
+        def correlation_id
+          raise(NotImplementedError,"#{self.class}#correlation_id not implemented!")
+        end
+
+        #
         # @return [Hash{Symbol => Object}]
         #
         # @abstract

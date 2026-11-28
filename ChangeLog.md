@@ -1,3 +1,23 @@
+### Unreleased
+
+* Added stable correlation IDs to every finding.
+  * `Results::Result#correlation_id` returns a value of the form
+    `BA-DEP-…` (for unpatched gems) or `BA-SRC-…` (for insecure sources),
+    derived from the advisory and locked gem instance or canonical URI.
+  * Reordering equivalent lockfile entries keeps IDs stable; changing the
+    advisory, locked version, platform, source or locked git revision
+    produces a new ID.
+  * `Report#correlation_ids` exposes the IDs of all findings.
+
+#### CLI
+
+* The `text`, `json` and `junit` formats now emit correlation IDs, so the
+  same finding can be matched across the three artifacts.
+  * `json` gains a `correlation_id` key on each result, and each gem also
+    reports its `platform`.
+  * `junit` uses the correlation ID as the `<testcase>` `id`.
+  * `text` prints a `Correlation ID: …` line for each finding.
+
 ### 0.9.3 / 2025-11-28
 
 * Officially support Ruby 3.4, 3.5, and 4.0.

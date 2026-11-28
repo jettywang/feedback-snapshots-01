@@ -16,6 +16,7 @@
 #
 
 require 'bundler/audit/results/result'
+require 'bundler/audit/correlation'
 
 module Bundler
   module Audit
@@ -61,14 +62,26 @@ module Bundler
         end
 
         #
+        # The stable correlation ID for this finding.
+        #
+        # Derived from the canonical form of the insecure source URI.
+        #
+        # @return [String]
+        #
+        def correlation_id
+          Correlation.source(@source)
+        end
+
+        #
         # Converts the insecure source into a Hash.
         #
         # @return [Hash{Symbol => Object}]
         #
         def to_h
           {
-            type: :insecure_source,
-            source: @source
+            type:           :insecure_source,
+            correlation_id: correlation_id,
+            source:         @source
           }
         end
 

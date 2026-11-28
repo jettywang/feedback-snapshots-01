@@ -1,0 +1,6 @@
+source 'https://rubygems.org'
+
+gem 'widget', '>= 1.0'
+gem 'gadget'
+gem 'local-tool', path: 'vendor/widgets'
+gem 'widget', '2.0.0', git: 'https://github.com/acme/widget.git'

@@ -148,6 +148,40 @@ Output the audit's results in JSON, to a file:
 $ bundle-audit check --format json --output bundle-audit.json
 ```
 
+### Correlating findings across formats
+
+Every finding (an unpatched gem or an insecure source) carries a stable
+`correlation_id` whose value is identical in the `text`, `json` and `junit`
+outputs. Downstream systems can use it as the key for a ticket or a CI alert
+without matching on prose.
+
+* Dependency findings use the `BA-DEP-…` prefix and are derived from the
+  advisory ID plus the locked gem instance (name, version, platform and
+  source, including the git revision for git sources).
+* Source findings use the `BA-SRC-…` prefix and are derived from the
+  canonical insecure URI.
+
+The ID only reflects evidence, not lockfile ordering: reordering equivalent
+entries (or the order of `remote:` lines in a `GEM` section) keeps IDs stable,
+while changing an advisory, a locked version, a platform, a source or a
+locked git revision produces a new ID.
+
+Highlighting the ID in the JSON output:
+
+```json
+{
+  "type": "unpatched_gem",
+  "correlation_id": "BA-DEP-7799434c22365098",
+  "gem": { "name": "gadget", "version": "0.9.0", "platform": "ruby" },
+  "advisory": { "id": "GADGET-2026-0002", ... }
+}
+```
+
+In the `junit` output the correlation ID is the `id` attribute of the
+`<testcase>` element, so each finding is a uniquely identified test case.
+In the `text` output it is printed as a `Correlation ID: …` line after the
+finding's name/version (or source URI).
+
 ## Rake Tasks
 
 Bundler-audit provides `rake` tasks for checking the code and for updating

@@ -1,0 +1,18 @@
+gem: widget
+cve: 2026-0001
+ghsa: aaaa-bbbb-cccc
+url: https://example.com/advisories/WIDGET-2026-0001
+title: Widget 1.x deserialization flaw
+date: 2026-01-12
+
+description: |
+  A crafted payload can deserialize arbitrary objects in widget 1.x.
+
+cvss_v3: 7.5
+
+unaffected_versions:
+  - "< 1.0.0"
+
+patched_versions:
+  - "~> 1.5.2"
+  - ">= 2.0.0"

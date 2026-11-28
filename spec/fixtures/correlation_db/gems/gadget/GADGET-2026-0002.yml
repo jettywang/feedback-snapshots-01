@@ -1,0 +1,15 @@
+gem: gadget
+url: https://example.com/advisories/GADGET-2026-0002
+title: Gadget command injection
+date: 2026-02-03
+
+description: |
+  Shell metacharacters in gadget's CLI wrapper allow command injection.
+
+cvss_v4: 9.1
+
+unaffected_versions:
+  - "< 0.5.0"
+
+patched_versions:
+  - ">= 0.9.1"

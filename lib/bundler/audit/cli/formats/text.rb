@@ -41,9 +41,9 @@ module Bundler
             report.each do |result|
               case result
               when Results::InsecureSource
-                print_warning "Insecure Source URI found: #{result.source}"
+                print_warning "Insecure Source URI found: #{result.source}", result
               when Results::UnpatchedGem
-                print_advisory result.gem, result.advisory
+                print_advisory result.gem, result.advisory, result
               end
             end
 
@@ -58,16 +58,22 @@ module Bundler
 
           private
 
-          def print_warning(message)
+          def print_warning(message,result)
             say message, :yellow
+            print_correlation(result)
           end
 
-          def print_advisory(gem, advisory)
+          def print_advisory(gem,advisory,result)
             say "Name: ", :red
             say gem.name
 
             say "Version: ", :red
             say gem.version
+
+            say "Platform: ", :red
+            say gem.platform
+
+            print_correlation(result)
 
             if advisory.cve
               say "CVE: ", :red
@@ -112,6 +118,11 @@ module Bundler
             end
 
             say
+          end
+
+          def print_correlation(result)
+            say "Correlation ID: ", :red
+            say result.correlation_id
           end
         end
 
