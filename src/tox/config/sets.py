@@ -364,6 +364,8 @@ class CoreConfigSet(ConfigSet):
         super().__init__(conf, section=section, env_name=None)
         desc = "define environments to automatically run"
         self.add_config(keys=["env_list", "envlist"], of_type=EnvList, default=EnvList([]), desc=desc)
+        desc = "environments approved for release runs, matched by exact name after factor expansion"
+        self.add_config(keys=["approved_env_list"], of_type=EnvList, default=EnvList([]), desc=desc)
 
     @override
     def register_config(self) -> None:

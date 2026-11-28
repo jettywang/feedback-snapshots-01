@@ -52,6 +52,13 @@
       "description": "Deprecated: use 'env_list' instead",
       "deprecated": true
     },
+    "approved_env_list": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/env_list_item"
+      },
+      "description": "environments approved for release runs, matched by exact name after factor expansion"
+    },
     "base": {
       "type": "array",
       "items": {

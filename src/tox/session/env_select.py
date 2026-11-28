@@ -107,6 +107,8 @@ def register_env_select_flags(
         )
     help_msg = "exclude all environments selected that match this regular expression"
     option_group.add_argument("--skip-env", dest="skip_env", metavar="re", help=help_msg, default="", type=str)
+    help_msg = "select only environments approved for release (see approved_env_list), report the unapproved ones"
+    option_group.add_argument("--release", dest="release", help=help_msg, default=False, action="store_true")
     return add_to
 
 
@@ -287,6 +289,7 @@ class EnvSelector:
         self._state.conf.core.add_config("labels", dict[str, EnvList], {}, "core labels")
         tox_env_filter_regex = getattr(state.conf.options, "skip_env", "").strip()
         self._filter_re = self._compile_filter(tox_env_filter_regex) if tox_env_filter_regex else None
+        self._release = bool(getattr(state.conf.options, "release", False))
 
     @staticmethod
     def _compile_filter(pattern: str) -> re.Pattern[str]:
@@ -663,6 +666,18 @@ class EnvSelector:
                 tox_env.env.conf.mark_finalized()
         self._state.conf.core.mark_finalized()
 
+    @property
+    def approved_envs(self) -> set[str]:
+        """Environment names approved for release runs.
+
+        Approval is granted to the exact names of the expanded environments (and the packaging environments they
+        need); a name is never inherited from another entry sharing a prefix.
+
+        :returns: the approved environment names from ``approved_env_list``
+
+        """
+        return set(self._state.conf.core.get("approved_env_list", EnvList))
+
     def _mark_active(self) -> None:
         labels = set(getattr(self._state.conf.options, "labels", []))
         factors = self._parse_factors()
@@ -676,6 +691,29 @@ class EnvSelector:
                 _activate_by_labels(self._defined_envs_, labels, self._state.conf.core["labels"])
             if factors:  # if matches mark it active
                 _activate_by_factors(self._defined_envs_, factors)
+        if self._release:
+            self._apply_release_filter()
+
+    def _apply_release_filter(self) -> None:
+        # release runs only get approved environments; newly added targets are reported and left out, while staying
+        # available for personal development runs (no --release flag)
+        assert self._defined_envs_ is not None  # ruff:ignore[assert]  # invariant, narrows type
+        approved = self.approved_envs
+        for name, env_info in self._defined_envs_.items():
+            if not env_info.is_active or not isinstance(env_info.env, RunToxEnv):
+                continue
+            if name not in approved:
+                env_info.is_active = False
+                _LOGGER.warning("release: skip %s, not approved via approved_env_list", name)
+                continue
+            unapproved_pkg = [pkg.name for pkg in env_info.env.package_envs if pkg.name not in approved]
+            if unapproved_pkg:
+                env_info.is_active = False
+                _LOGGER.warning(
+                    "release: skip %s, package environment(s) not approved via approved_env_list: %s",
+                    name,
+                    ", ".join(unapproved_pkg),
+                )
 
     def _parse_factors(self) -> tuple[set[str], ...]:
         # factors is a list of lists, from the combination of nargs="+" and action="append"

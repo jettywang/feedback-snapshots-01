@@ -76,6 +76,7 @@ def test_verbose_no_test(mocker: MockerFixture) -> None:
         factors=[],
         labels=[],
         skip_env="",
+        release=False,
         list_dependencies=is_ci(),
         remainder=[],
     )
@@ -147,6 +148,7 @@ def test_env_var_exhaustive_parallel_values(
         labels=[],
         exit_and_dump_after=0,
         skip_env="",
+        release=False,
         list_dependencies=is_ci(),
         remainder=[],
     )

@@ -568,6 +568,20 @@ the top level of ``tox.toml``. Placing these options in an environment section (
        that start with the key ``py27``). Skipped environments will be logged at level two verbosity level.
 
 .. conf::
+    :keys: approved_env_list
+    :default: <empty list>
+    :version_added: 4.68.0
+
+    A list of environments approved for release runs. When tox is invoked with the ``--release`` flag, only these
+    environments are selected to run; any other selected target is reported and skipped, staying available for
+    personal development runs (invocations without ``--release``). Approval applies to the exact names of the
+    expanded environments (factor and matrix expansion in :ref:`env_list` keeps working as usual, but each resulting
+    environment needs its own entry here) and to the packaging environments they require - approving an environment
+    does not extend to another environment merely sharing a name prefix. When an approved environment's packaging
+    environment is missing from this list, the environment is reported and skipped too. ``tox list`` marks each
+    environment with its approval status once this list is set.
+
+.. conf::
     :keys: skip_missing_interpreters
     :default: False
     :version_added: 1.7.2

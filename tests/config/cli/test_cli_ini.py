@@ -63,6 +63,7 @@ def default_options(
         "labels": [],
         "exit_and_dump_after": 0,
         "skip_env": "",
+        "release": False,
         "list_dependencies": is_ci(),
         "remainder": [],
     }
@@ -281,6 +282,7 @@ def test_ini_exhaustive_parallel_values(
         labels=[],
         exit_and_dump_after=0,
         skip_env="",
+        release=False,
         list_dependencies=is_ci(),
         remainder=[],
     )

@@ -47,6 +47,7 @@ def list_env(state: State) -> int:
 
     active = dict.fromkeys(state.envs.iter())
     inactive = {} if active_only else {env: None for env in state.envs.iter(only_active=False) if env not in active}
+    approved = state.envs.approved_envs
 
     if not has_group_select and not option.list_no_description and active:
         print("default environments:")  # ruff:ignore[print]  # terminal output
@@ -58,6 +59,8 @@ def list_env(state: State) -> int:
             if not text.strip():
                 text = "[no description]"
             text = text.replace("\n", " ")
+            if approved:
+                text += " [approved]" if name in approved else " [unapproved]"
             msg = f"{env.ljust(max_length)} -> {text}".strip()
         else:
             msg = env
