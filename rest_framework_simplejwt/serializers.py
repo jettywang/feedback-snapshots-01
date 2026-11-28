@@ -1,4 +1,4 @@
-from typing import Any, Optional, TypeVar
+from typing import Any, TypeVar
 
 from django.conf import settings
 from django.contrib.auth import _clean_credentials, authenticate, get_user_model
@@ -270,3 +270,105 @@ def default_on_login_success(user: AuthUser, request: Request | None) -> None:
 
 def default_on_login_failed(credentials: dict, request: Request | None) -> None:
     pass
+
+
+class ApprovalObtainSerializer(serializers.Serializer):
+    """
+    Turns an authenticated step-up confirmation into a temporary approval.
+
+    The step-up itself is the business's responsibility; this serializer only
+    mints the approval once the caller has established that the extra
+    confirmation happened.  It never accepts a refresh/access token as proof.
+    """
+
+    operation = serializers.CharField()
+    amount = serializers.DecimalField(max_digits=20, decimal_places=4)
+
+    def validate(self, attrs: dict[str, Any]) -> dict[str, Any]:
+        from .approvals import issue_approval
+
+        request = self.context.get("request")
+        user = getattr(request, "user", None)
+        if user is None or not user.is_authenticated:
+            raise AuthenticationFailed(
+                _("Authentication is required to obtain an approval"),
+                "authentication_required",
+            )
+
+        approval = issue_approval(user, attrs["operation"], attrs["amount"])
+        return approval.as_dict()
+
+
+class ApprovalWithdrawSerializer(serializers.Serializer):
+    approval = serializers.CharField()
+
+    def validate(self, attrs: dict[str, Any]) -> dict[str, Any]:
+        from .approvals import ApprovalConflict, withdraw_approval
+
+        try:
+            approval = withdraw_approval(attrs["approval"])
+        except ApprovalConflict as e:
+            raise ValidationError(
+                {"approval": [_("Approval was already consumed")], "code": ["conflict"]}
+            ) from e
+        return approval.as_dict()
+
+
+class ApprovalCommitSerializer(serializers.Serializer):
+    """
+    Consumes an approval for the exact operation/amount it was issued for.
+
+    The ``result`` field is the business's own commit hook: it runs only for
+    the single winning executor.  Authentication of this request is not
+    treated as proof that the payment happened; ``settled`` reflects whether a
+    result was actually recorded.
+    """
+
+    approval = serializers.CharField()
+    operation = serializers.CharField()
+    amount = serializers.DecimalField(max_digits=20, decimal_places=4)
+
+    def get_operation_runner(self) -> Any:
+        """
+        Returns the business hook to run for the winning executor.
+
+        Subclasses (or the view that supplies ``context['operation_runner']``)
+        override this with the real payment/finance action.  There is no
+        default, because a library must never guess how to move money.
+        """
+        runner = self.context.get("operation_runner")
+        if runner is None:
+            raise ValidationError(
+                {"detail": [_("No approval operation runner is configured")]}
+            )
+        return runner
+
+    def validate(self, attrs: dict[str, Any]) -> dict[str, Any]:
+        from .approvals import (
+            ApprovalConflict,
+            ApprovalIncomplete,
+            ApprovalUnavailable,
+            ApprovalUsageMismatch,
+            commit_approval,
+        )
+
+        runner = self.get_operation_runner()
+
+        try:
+            approval = commit_approval(
+                attrs["approval"],
+                operation=attrs["operation"],
+                amount=attrs["amount"],
+                operation_runner=lambda grant: runner(grant),
+            )
+        except ApprovalUsageMismatch as e:
+            raise ValidationError(
+                {"detail": [str(e)], "code": ["usage_mismatch"]}
+            ) from e
+        except ApprovalIncomplete as e:
+            raise ValidationError({"detail": [str(e)], "code": ["incomplete"]}) from e
+        except ApprovalConflict as e:
+            raise ValidationError({"detail": [str(e)], "code": ["conflict"]}) from e
+        except ApprovalUnavailable as e:
+            raise ValidationError({"detail": [str(e)], "code": ["unavailable"]}) from e
+        return approval.as_commit_dict(executed=approval.executed)

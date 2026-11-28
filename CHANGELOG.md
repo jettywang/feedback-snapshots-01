@@ -1,5 +1,8 @@
 ## [Unreleased]
 
+### Added
+- Temporary, withdrawable business approvals (`rest_framework_simplejwt.approvals`). An approval is a short-lived, signed grant bound to one operation identifier and amount. It can be withdrawn until committed, and `commit_approval` uses a single conditional claim so only one of several executors runs the business action. Refreshing ordinary access tokens neither mints nor extends an approval, and `inspect_approval`/`record_approval_result` let callers reconcile an already-finished operation without paying again. Requires the `token_blacklist` app (migration `0014_approvalgrant`).
+
 ### Changed
 - **BREAKING:** In `serializers.py`, when a user linked to a token is missing or deleted, the code now raises `AuthenticationFailed("no_active_account")` instead of allowing `DoesNotExist` to propagate.
   - Response changed from **404 Not Found** → **401 Unauthorized**.

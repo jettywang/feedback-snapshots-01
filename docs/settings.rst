@@ -57,6 +57,12 @@ Some of Simple JWT's behavior can be customized through settings variables in
       "CHECK_REVOKE_TOKEN": False,
       "REVOKE_TOKEN_CLAIM": "hash_password",
       "CHECK_USER_IS_ACTIVE": True,
+
+      "APPROVAL_TOKEN_CLASS": "rest_framework_simplejwt.tokens.ApprovalToken",
+      "APPROVAL_TOKEN_LIFETIME": timedelta(minutes=2),
+      "APPROVAL_OPERATION_CLAIM": "operation",
+      "APPROVAL_AMOUNT_CLAIM": "amount",
+      "APPROVAL_OPERATION_RUNNER": None,
   }
 
 Above, the default values for these settings are shown.
@@ -362,3 +368,39 @@ For use with sliding tokens feature.
 
 A dot path to the serializer class used by ``TokenRefreshSlidingView``.
 For use with sliding tokens feature.
+
+
+``APPROVAL_TOKEN_CLASS``
+------------------------
+
+A dot path to the token class used for temporary business approvals.  Defaults
+to ``rest_framework_simplejwt.tokens.ApprovalToken``.  Requires the
+``rest_framework_simplejwt.token_blacklist`` app to be installed.
+
+``APPROVAL_TOKEN_LIFETIME``
+---------------------------
+
+A ``datetime.timedelta`` specifying how long a freshly issued approval remains
+usable.  Keep this short: an approval is meant to cover one in-flight business
+operation, not a session.  Refreshing an access token never extends it.
+Requires the ``token_blacklist`` app.
+
+``APPROVAL_OPERATION_CLAIM``
+----------------------------
+
+The claim name that binds an approval to one business operation identifier.
+Defaults to ``"operation"``.
+
+``APPROVAL_AMOUNT_CLAIM``
+-------------------------
+
+The claim name that binds an approval to the amount it authorizes.  Defaults
+to ``"amount"``.
+
+``APPROVAL_OPERATION_RUNNER``
+-----------------------------
+
+A callable ``runner(approval) -> str`` invoked by ``ApprovalCommitView`` for the
+single executor that wins the approval's claim.  It should perform the real
+business action and return a result string.  Leave it as ``None`` and override
+``ApprovalCommitView.run_operation`` instead if you prefer a subclass.

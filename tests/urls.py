@@ -17,5 +17,10 @@ urlpatterns = [
     ),
     re_path(r"^token/verify/$", jwt_views.token_verify, name="token_verify"),
     re_path(r"^token/blacklist/$", jwt_views.token_blacklist, name="token_blacklist"),
+    re_path(r"^approval/obtain/$", jwt_views.approval_obtain, name="approval_obtain"),
+    re_path(
+        r"^approval/withdraw/$", jwt_views.approval_withdraw, name="approval_withdraw"
+    ),
+    re_path(r"^approval/commit/$", jwt_views.approval_commit, name="approval_commit"),
     re_path(r"^test-view/$", views.test_view, name="test_view"),
 ]

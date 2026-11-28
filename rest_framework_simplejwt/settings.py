@@ -52,6 +52,11 @@ DEFAULTS = {
     "CHECK_REVOKE_TOKEN": False,
     "REVOKE_TOKEN_CLAIM": "hash_password",
     "CHECK_USER_IS_ACTIVE": True,
+    "APPROVAL_TOKEN_CLASS": "rest_framework_simplejwt.tokens.ApprovalToken",
+    "APPROVAL_TOKEN_LIFETIME": timedelta(minutes=2),
+    "APPROVAL_OPERATION_CLAIM": "operation",
+    "APPROVAL_AMOUNT_CLAIM": "amount",
+    "APPROVAL_OPERATION_RUNNER": None,
 }
 
 IMPORT_STRINGS = (
@@ -61,6 +66,8 @@ IMPORT_STRINGS = (
     "USER_AUTHENTICATION_RULE",
     "ON_LOGIN_SUCCESS",
     "ON_LOGIN_FAILED",
+    "APPROVAL_TOKEN_CLASS",
+    "APPROVAL_OPERATION_RUNNER",
 )
 
 REMOVED_SETTINGS = (

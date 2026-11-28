@@ -424,3 +424,41 @@ class UntypedToken(Token):
         properties which do not relate to the token's intended use.
         """
         pass
+
+
+class ApprovalToken(Token):
+    """
+    A signed, short-lived approval for exactly one business operation.
+
+    An ``ApprovalToken`` is deliberately not an access token: it carries the
+    operation and amount it authorizes and is only meaningful when checked
+    against the matching :class:`~rest_framework_simplejwt.token_blacklist.models.ApprovalGrant`
+    record by the ``rest_framework_simplejwt.approvals`` helpers.  Ordinary
+    token refresh neither creates nor extends one.
+    """
+
+    token_type = "approval"
+    lifetime = api_settings.APPROVAL_TOKEN_LIFETIME
+
+    operation_claim = api_settings.APPROVAL_OPERATION_CLAIM
+    amount_claim = api_settings.APPROVAL_AMOUNT_CLAIM
+
+    @classmethod
+    def for_approval(
+        cls, user: AuthUser, operation: str, amount: Any
+    ) -> "ApprovalToken":
+        token = cls()
+        token[api_settings.USER_ID_CLAIM] = str(
+            getattr(user, api_settings.USER_ID_FIELD)
+        )
+        token[cls.operation_claim] = str(operation)
+        token[cls.amount_claim] = str(amount)
+        return token
+
+    @property
+    def operation(self) -> Any:
+        return self.payload.get(self.operation_claim)
+
+    @property
+    def amount(self) -> Any:
+        return self.payload.get(self.amount_claim)
