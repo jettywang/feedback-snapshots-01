@@ -1776,6 +1776,72 @@ installation entirely.
     # Skip everything: deps + package
     tox run -e 3.13 --skip-env-install
 
+.. _patch-check:
+
+**************************************************
+ Check dependency fixes across every install stage
+**************************************************
+
+A patch review that reads one manifest misses the stages that install the same dependency elsewhere. tox resolves
+dependencies in three stages: the bootstrap (provisioning) environment that hosts tox and its plugins, the package build
+environment that runs the build backend, and the target environment that installs the project dependencies. The
+``patch-check`` command compares the fixes a release requires against what each stage actually selects, without an index
+or a package install:
+
+.. code-block:: bash
+
+    tox patch-check -e py
+
+Declare the fixes under ``[patch-check]``. A fix binds every stage by default; ``stages`` narrows it to one or more of
+``bootstrap``, ``package_build`` and ``target``. ``source`` requires a particular install source, so a fixed version
+from an unexpected place still fails. A stage the project does not have installs nothing, so a fix bound only to it
+never blocks the release:
+
+.. code-block:: toml
+
+    [patch-check]
+    fixes = [
+      { id = "CVE-2099-0001", dependency = "urllib3", version = ">=2.2.2" },
+      { id = "CVE-2099-0002", dependency = "setuptools", version = ">=70", stages = ["package_build"] },
+    ]
+
+An approved legacy project may keep a version the fix would otherwise reject until it can upgrade. Scope the
+exception to the dependent stage or to one project, and record why it was approved in ``reason``:
+
+.. code-block:: toml
+
+    [patch-check]
+    approvals = [
+      { dependency = "virtualenv", version = "<21", stages = ["bootstrap"], project = "legacy-app" },
+    ]
+
+The command reads the version and source of each stage from the configured ``patch-check.resolutions``, an existing
+``pylock.toml``, or the distribution already installed in the stage. A stage that installs the dependency without
+revealing its version is reported as ``unresolved`` rather than treated as patched. The ledger groups the still-unfixed
+fixes by stage, so a run names whether the bootstrap, the package build or the target environment still needs the fix.
+Write the ledger to a file or into the run journal:
+
+.. code-block:: bash
+
+    # the same ledger on its own, as JSON
+    tox patch-check -e py -o patch-ledger.json
+
+    # record the ledger next to the environment result in the tox journal
+    tox patch-check -e py --result-json result.json
+
+The exit code is ``1`` when any bound stage still carries an unfixed fix. A stage that does not install the dependency
+(for example a project with no package build) never blocks the release.
+
+A caller can supply the evidence directly with ``patch-check.resolutions``, which is also how tests use a fake resolver
+to swap the versions of two stages and prove that the same dependency name from two stages is not one installation:
+
+.. code-block:: toml
+
+    [patch-check]
+    resolutions = [
+      { stage = "target", dependency = "urllib3", version = "2.2.2", source = "pypi" },
+    ]
+
 .. _run-interactive-programs:
 
 **************************

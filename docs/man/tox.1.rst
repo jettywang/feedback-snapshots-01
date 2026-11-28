@@ -14,8 +14,8 @@
 SYNOPSIS
 ========
 
-**tox** [*options*] [**run** | **run-parallel** | **depends** | **man** | **list** | **devenv** | **schema** |
-**config** | **quickstart** | **exec** | **legacy**] [*command-options*]
+**tox** [*options*] [**run** | **run-parallel** | **depends** | **patch-check** | **man** | **list** | **devenv** |
+**schema** | **config** | **quickstart** | **exec** | **legacy**] [*command-options*]
 
 DESCRIPTION
 ===========
@@ -37,6 +37,9 @@ COMMANDS
 
 **depends** (*or* **de**)
     visualize tox environment dependencies
+
+**patch-check** (*or* **pc**)
+    check approved dependency fixes against the bootstrap, package build and target install stages
 
 **man**
     Set up tox man page for current shell

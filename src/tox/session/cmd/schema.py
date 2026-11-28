@@ -366,6 +366,10 @@ def _process_type(of_type: typing.Any) -> dict[str, typing.Any]:  # ruff:ignore[
             }
         msg = f"Unknown list type: {of_type}"
         raise ValueError(msg)
+    if of_type is object:
+        return {"type": "object"}
+    if of_type is dict:
+        return {"type": "object"}
     if of_type is tox.config.set_env.SetEnv:
         return {
             "type": "object",

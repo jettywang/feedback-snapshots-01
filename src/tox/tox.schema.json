@@ -79,6 +79,15 @@
       },
       "description": "Dependencies the Python environment hosting tox must satisfy, provisioned when missing"
     },
+    "patch-check": {
+      "type": "object",
+      "description": "approved dependency fixes, checked against the bootstrap, package build and target install stages"
+    },
+    "patch_check": {
+      "$ref": "#/properties/patch-check",
+      "description": "Deprecated: use 'patch-check' instead",
+      "deprecated": true
+    },
     "labels": {
       "type": "object",
       "additionalProperties": {
