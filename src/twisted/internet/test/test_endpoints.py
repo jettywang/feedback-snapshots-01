@@ -45,11 +45,12 @@ from twisted.internet.address import (
 from twisted.internet.endpoints import (
     StandardErrorBehavior,
     TCP4ClientEndpoint,
+    TCP4ServerEndpoint,
     TCP6ServerEndpoint,
     _WrapperEndpoint,
     wrapClientTLS,
 )
-from twisted.internet.error import ConnectingCancelledError, ConnectionLost
+from twisted.internet.error import ConnectingCancelledError, ConnectionDone, ConnectionLost
 from twisted.internet.interfaces import (
     IAddress,
     IConsumer,
@@ -118,6 +119,7 @@ try:
         TLS_METHOD,
         Context,
         Context as ContextType,
+        Error as SSLError,
         OP_NO_SSLv3,
         TLSv1_2_METHOD,
     )
@@ -128,6 +130,7 @@ try:
         DiffieHellmanParameters,
         KeyPair,
         PrivateCertificate,
+        VerificationError,
         optionsForClientTLS,
     )
     from twisted.protocols._sni import SNIConnectionCreator
@@ -4980,3 +4983,179 @@ class WrapClientTLSTests(unittest.TestCase):
         replaced = replacingGlobals(endpoints.wrapClientTLS, TLSMemoryBIOFactory=None)
         notImplemented = self.assertRaises(NotImplementedError, replaced, None, None)
         self.assertIn("OpenSSL not available", str(notImplemented))
+
+
+class TLSDisconnectAttributionTests(unittest.SynchronousTestCase):
+    """
+    Offline tests for how a TLS client's disconnect cause crosses the TLS
+    layer, L{wrapClientTLS}, and the application callback.  No sockets are
+    used; TCP is simulated with L{ConnectionCompleter}.
+    """
+
+    def _connect(
+        self,
+        verifyHostname: str = "client-view.example.com",
+        certificateHostname: str = "client-view.example.com",
+        trustServerCA: bool = True,
+    ):
+        trusted, trustedCertificate = _certificatesForEndpointTests(
+            "client-view.example.com"
+        )
+        if certificateHostname == "client-view.example.com":
+            serverCertificate = trustedCertificate
+        else:
+            _unused, serverCertificate = _certificatesForEndpointTests(
+                certificateHostname
+            )
+        if trustServerCA:
+            trust = trusted
+        else:
+            # A CA that did not sign the presented certificate.
+            trust = _certificatesForEndpointTests("untrusted-ca.example.com")[0]
+
+        reactor = MemoryReactorClock()
+
+        @implementer(IHandshakeListener)
+        class HandshakeRecordingProtocol(Protocol):
+            def __init__(self):
+                self.handshakeCompletedCount = 0
+                self.lostReason = None
+                self.lostReasons = []
+
+            def handshakeCompleted(self):
+                self.handshakeCompletedCount += 1
+
+            def connectionLost(self, reason):
+                self.lostReason = reason
+                self.lostReasons.append(reason)
+
+        clientApp = HandshakeRecordingProtocol()
+        serverApp = HandshakeRecordingProtocol()
+        TCP4ServerEndpoint(reactor, 4321).listen(
+            TLSMemoryBIOFactory(
+                CertificateOptions(
+                    privateKey=serverCertificate.privateKey.original,
+                    certificate=serverCertificate.original,
+                ),
+                isClient=False,
+                wrappedFactory=Factory.forProtocol(lambda: serverApp),
+                clock=reactor,
+            )
+        )
+        deferred = wrapClientTLS(
+            optionsForClientTLS(verifyHostname, trustRoot=trust),
+            TCP4ClientEndpoint(reactor, "127.0.0.1", 4321),
+            clock=reactor,
+        ).connect(Factory.forProtocol(lambda: clientApp))
+        completer = ConnectionCompleter(reactor)
+        pump = completer.succeedOnce(greet=False)
+        self.assertIsNot(pump, None)
+        return pump, deferred, clientApp, serverApp
+
+    def test_deferredDoesNotWaitForHandshake(self):
+        """
+        L{wrapClientTLS} fires its connection L{Deferred} as soon as the TCP
+        connection exists.  A later trust failure must therefore be reported
+        through C{connectionLost}, not through that Deferred.
+        """
+        pump, deferred, clientApp, serverApp = self._connect()
+        pump.flush()
+        self.assertTrue(deferred.called)
+        self.assertIs(deferred.result, clientApp)
+        self.assertEqual(clientApp.handshakeCompletedCount, 1)
+        self.assertEqual(clientApp.lostReasons, [])
+
+    def test_hostnameMismatchDeliversVerificationError(self):
+        """
+        A peer-identity failure reaches the application as the
+        L{VerificationError} produced by service_identity, even though the
+        outer TLS wrapper later records L{ConnectionDone}.
+        """
+        pump, deferred, clientApp, serverApp = self._connect(
+            verifyHostname="client-view.example.com",
+            certificateHostname="server-view.example.com",
+        )
+        pump.flush()
+        self.assertEqual(clientApp.handshakeCompletedCount, 0)
+        self.assertEqual(len(clientApp.lostReasons), 1)
+        self.assertTrue(clientApp.lostReason.check(VerificationError))
+
+    def test_untrustedCertificateDeliversOpenSSLError(self):
+        """
+        A chain-of-trust failure reaches the application as the underlying
+        L{SSL.Error}, whose text names C{certificate verify failed}.
+        """
+        pump, deferred, clientApp, serverApp = self._connect(trustServerCA=False)
+        pump.flush()
+        self.assertEqual(len(clientApp.lostReasons), 1)
+        self.assertTrue(clientApp.lostReason.check(SSLError))
+        self.assertIn("certificate verify failed", str(clientApp.lostReason.value))
+
+    def test_peerAndLocalCleanCloseAreIndistinguishable(self):
+        """
+        A remote C{close_notify} and a local C{loseConnection} both reach the
+        application as L{ConnectionDone}; only the caller's own record of the
+        earlier call distinguishes them.
+        """
+        pump, deferred, clientApp, serverApp = self._connect()
+        pump.flush()
+        self.assertTrue(deferred.called)
+
+        serverApp.transport.loseConnection()
+        pump.flush()
+        peerReason = clientApp.lostReason
+        peerReason.check(error.ConnectionDone)
+        self.assertEqual(
+            str(peerReason.value), "Connection was closed cleanly: Connection done."
+        )
+
+        pump2, deferred2, clientApp2, serverApp2 = self._connect()
+        pump2.flush()
+        clientApp2.transport.loseConnection()
+        pump2.flush()
+        localReason = clientApp2.lostReason
+        localReason.check(error.ConnectionDone)
+        self.assertEqual(str(localReason.value), str(peerReason.value))
+
+    def test_rawFINBeforeCloseNotifyBecomesConnectionLost(self):
+        """
+        A bare TCP FIN (no TLS C{close_notify}) is turned into
+        L{ConnectionLost} by the TLS layer, not left as L{ConnectionDone}.
+        """
+        pump, deferred, clientApp, serverApp = self._connect()
+        pump.flush()
+        # A bare FIN arrives as ConnectionDone at the TCP transport, without a
+        # TLS close_notify.  Drive it through the same report path the reactor
+        # uses for a lost connection.
+        pump.clientIO.disconnectReason = error.ConnectionDone("raw FIN")
+        pump.clientIO.disconnecting = True
+        pump.flush()
+        self.assertTrue(clientApp.lostReason.check(ConnectionLost))
+        self.assertFalse(clientApp.lostReason.check(error.ConnectionDone))
+
+    def test_cancelBeforeConnectRaisesConnectingCancelledError(self):
+        """
+        Cancelling the endpoint Deferred before TCP connects fails it with
+        L{ConnectingCancelledError}; no application protocol exists yet.
+        """
+        reactor = MemoryReactorClock()
+        deferred = TCP4ClientEndpoint(reactor, "127.0.0.1", 4321).connect(
+            Factory.forProtocol(lambda: Protocol())
+        )
+        self.assertNoResult(deferred)
+        deferred.cancel()
+        self.failureResultOf(deferred, ConnectingCancelledError)
+
+    def test_cancelAfterConnectIsNoOp(self):
+        """
+        Once the endpoint Deferred has fired, C{cancel} cannot express intent:
+        the call is silently ignored and no protocol callback fires.
+        """
+        pump, deferred, clientApp, serverApp = self._connect()
+        pump.flush()
+        self.assertTrue(deferred.called)
+        deferred.cancel()
+        pump.flush()
+        self.assertTrue(deferred.called)
+        self.assertEqual(clientApp.lostReasons, [])
+
