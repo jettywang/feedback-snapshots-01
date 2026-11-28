@@ -1,0 +1,27 @@
+# Deployment review manifest: service name and Twisted endpoint description.
+# Wide wildcard binding (IPv4 all interfaces, port 8080).
+edge          tcp:8080
+# Same wide range reached through two wrapper layers - wrappers must not
+# change the address verdict.
+edge-proxied  haproxy:ssl:8080:privateKey=/etc/ssl/edge.pem:certKey=/etc/ssl/edge.crt
+# Explicit narrow binding on a different service - disjoint from edge.
+loopback-api  tcp:8081:interface=127.0.0.1
+# Narrow binding that collides with another concrete address on the same port.
+loopback-api2 tcp:9000:interface=127.0.0.1
+loopback-api3 tcp:9000:interface=127.0.0.1
+# Different port on the same loopback address - definitely separate.
+metrics-local tcp:9100:interface=127.0.0.1
+# IPv6 wildcard, same port number as the IPv4 edge wildcard - dual-stack
+# ambiguity must stay in the uncertain bucket.
+edge-v6       tcp6:8080
+# Hostname binding: resolution happens at runtime.
+named-svc     tcp:8443:interface=internal.example.com
+# Runtime-only plugin with no static discloser - must remain uncertain.
+probe         runtimeprobe:pool=a
+# Plugin that voluntarily discloses a statically inspectable range; it
+# overlaps the loopback API port 9100.
+metrics       metricsd:9100:interface=127.0.0.1
+# Local socket, separate address family.
+control-sock  unix:/var/run/control.sock
+# Deliberately malformed entry to prove errors carry coordinates.
+broken        tcp:not-a-port

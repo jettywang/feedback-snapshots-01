@@ -1,0 +1,5 @@
+[
+  {"service": "edge", "endpoint": "tcp:8080", "line": 2},
+  {"service": "edge-tls", "endpoint": "tls:/etc/sni:8443", "line": 3},
+  {"service": "loop", "endpoint": "tcp:8081:interface=127.0.0.1", "line": 4}
+]
