@@ -121,6 +121,29 @@ wheel will abort processing of subsequent wheels.
         help="Do not check for higher policy compatibility",
         default=False,
     )
+    parser.add_argument(
+        "--verify-dep-arch",
+        action=EnvironmentDefault,
+        metavar="MODE",
+        env="AUDITWHEEL_VERIFY_DEP_ARCH",
+        dest="VERIFY_DEP_ARCH",
+        help="Before grafting, verify that every candidate dependency's ELF "
+        "architecture matches the target architecture. Useful when repairing "
+        "wheels for a different architecture than the host's. "
+        '(default: "off")',
+        choices=["strict", "off"],
+        default="off",
+    )
+    parser.add_argument(
+        "--allow-arch-alias",
+        dest="ALLOW_ARCH_ALIAS",
+        metavar="ELF_ARCH:TARGET_ARCH",
+        help="Explicitly approve a compatible architecture alias pair for the "
+        "dependency architecture check, e.g. --allow-arch-alias "
+        "x86_64_v2:x86_64 (can be specified multiple times)",
+        action="append",
+        default=[],
+    )
     options.disable_isa_check(parser)
     options.allow_pure_python_wheel(parser)
     options.ldpaths(parser)
@@ -147,6 +170,19 @@ def execute(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
     wheel_files: list[Path] = args.WHEEL_FILE
 
     requested_architecture: Architecture | None = None
+
+    allowed_arch_aliases: set[tuple[Architecture, Architecture]] = set()
+    for alias in args.ALLOW_ARCH_ALIAS:
+        try:
+            elf_name, target_name = alias.split(":", 1)
+            allowed_arch_aliases.add((Architecture(elf_name), Architecture(target_name)))
+        except ValueError:
+            msg = (
+                f"invalid architecture alias {alias!r}, expected "
+                "ELF_ARCH:TARGET_ARCH with architectures from "
+                f"{[a.value for a in Architecture]}"
+            )
+            parser.error(msg)
 
     plat_base: str = args.PLAT
     for a in Architecture:
@@ -291,6 +327,10 @@ def execute(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
             patcher=patcher,
             strip=args.STRIP,
             zip_compression_level=args.ZIP_COMPRESSION_LEVEL,
+            verify_dep_arch=args.VERIFY_DEP_ARCH == "strict",
+            target_arch=requested_architecture or policies.architecture,
+            wheel_tag_arch=arch,
+            allowed_arch_aliases=frozenset(allowed_arch_aliases),
         )
 
         if out_wheel is not None:

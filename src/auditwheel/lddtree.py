@@ -167,6 +167,16 @@ def _get_platform(elf: ELFFile) -> Platform:
     )
 
 
+def get_elf_platform(path: Path) -> Platform:
+    """Read the :class:`Platform` of the ELF file at ``path``.
+
+    This only reads the ELF header (and, on x86-64, the GNU property
+    notes); it does not resolve any dependency.
+    """
+    with open(path, "rb") as f:
+        return _get_platform(ELFFile(f))
+
+
 def normpath(path: str) -> str:
     """Normalize a path
 

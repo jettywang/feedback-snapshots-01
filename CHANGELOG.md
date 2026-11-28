@@ -3,6 +3,7 @@
 ## HEAD
 
 ### User-facing changes
+- [FEATURE] add `--verify-dep-arch` option to `auditwheel repair` to check that grafted dependencies match the target architecture before any file is moved, with `--allow-arch-alias` to explicitly approve compatible aliases
 - [BUGFIX] avoid duplicating the wheel component in SBOMs ([#750](https://github.com/pypa/auditwheel/issues/750))
 
 ## 6.8.2

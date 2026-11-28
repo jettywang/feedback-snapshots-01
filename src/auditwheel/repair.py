@@ -11,6 +11,10 @@ from pathlib import Path
 from subprocess import check_call
 from typing import TYPE_CHECKING
 
+from auditwheel.archcheck import (
+    check_dependency_architectures,
+    enforce_dependency_architectures,
+)
 from auditwheel.elfutils import elf_read_dt_needed
 from auditwheel.hashfile import hashfile
 from auditwheel.lddtree import LIBPYTHON_RE
@@ -22,6 +26,7 @@ from auditwheel.wheeltools import WHEEL_INFO_RE, InWheelCtx, add_platforms
 if TYPE_CHECKING:
     from collections.abc import Iterable
 
+    from auditwheel.architecture import Architecture
     from auditwheel.patcher import ElfPatcher
     from auditwheel.wheel_abi import WheelAbIInfo
 
@@ -39,11 +44,31 @@ def repair_wheel(
     patcher: ElfPatcher,
     strip: bool,
     zip_compression_level: int,
+    verify_dep_arch: bool = False,
+    target_arch: Architecture | None = None,
+    wheel_tag_arch: Architecture | None = None,
+    allowed_arch_aliases: frozenset[tuple[Architecture, Architecture]] = frozenset(),
 ) -> Path | None:
     external_refs_by_fn = wheel_abi.full_external_refs
     # Do not repair a pure wheel, i.e. has no external refs
     if not external_refs_by_fn:
         return None
+
+    # Pre-repair admission check: verify that every candidate dependency
+    # matches the target architecture *before* any source file is moved
+    # into the wheel.
+    if verify_dep_arch:
+        if target_arch is None:
+            msg = "cannot verify dependency architectures without a target architecture"
+            raise ValueError(msg)
+        records = check_dependency_architectures(
+            external_refs_by_fn,
+            abis[0],
+            wheel_tag_arch=wheel_tag_arch,
+            target_arch=target_arch,
+            allowed_aliases=allowed_arch_aliases,
+        )
+        enforce_dependency_architectures(records)
 
     soname_map: dict[str, tuple[str, Path]] = {}
 
