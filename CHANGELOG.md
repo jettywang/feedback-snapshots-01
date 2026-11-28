@@ -3,6 +3,7 @@
 ## HEAD
 
 ### User-facing changes
+- [FEATURE] add `auditwheel compare` to check offline replacement-library candidates against the wheel's real symbol requirements and report which publication tags can be kept
 - [BUGFIX] avoid duplicating the wheel component in SBOMs ([#750](https://github.com/pypa/auditwheel/issues/750))
 
 ## 6.8.2

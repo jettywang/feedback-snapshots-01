@@ -7,13 +7,18 @@ import pytest
 from elftools.common.exceptions import ELFError
 
 from auditwheel.elfutils import (
+    elf_exported_symbols,
     elf_file_filter,
-    elf_find_ucs2_symbols,
+    elf_find_imported_symbols,
     elf_find_versioned_symbols,
+    elf_find_ucs2_symbols,
     elf_read_dt_needed,
     elf_references_pyfpe_jbuf,
+    elf_symbol_versions,
     get_undefined_symbols,
 )
+
+from .candidate_fixtures import Needs, Provides, build_export_elf, build_import_elf
 
 
 class MockSymbol(dict[str, Any]):
@@ -242,3 +247,85 @@ class TestGetUndefinedSymbols:
         # THEN
         result = get_undefined_symbols(fake)
         assert result == set()
+
+
+class TestElfImportedSymbols:
+    def test_find_real_symbol_names_and_versions(self, tmp_path):
+        path = tmp_path / "import.so"
+        path.write_bytes(
+            build_import_elf(
+                [
+                    Needs("libm.so.6", "GLIBC_2.29", ["pow"]),
+                    Needs("libc.so.6", "GLIBC_2.17", ["memcpy", "socket"]),
+                ]
+            )
+        )
+
+        versioned, names = elf_symbol_versions(path)
+
+        assert versioned == {
+            "libm.so.6": {"GLIBC_2.29"},
+            "libc.so.6": {"GLIBC_2.17"},
+        }
+        assert names == {
+            "libm.so.6": {"pow"},
+            "libc.so.6": {"memcpy", "socket"},
+        }
+
+    def test_versioned_symbols_do_not_include_symbol_names(self, tmp_path):
+        path = tmp_path / "import.so"
+        path.write_bytes(build_import_elf([Needs("libm.so.6", "GLIBC_2.29", ["pow"])]))
+
+        with path.open("rb") as f:
+            assert list(elf_find_versioned_symbols(_open_elf(f))) == [
+                ("libm.so.6", "GLIBC_2.29")
+            ]
+            f.seek(0)
+            imported = elf_find_imported_symbols(_open_elf(f))
+
+        assert imported == {"libm.so.6": {"pow": {"GLIBC_2.29"}}}
+
+    def test_non_elf_returns_empty(self, tmp_path):
+        path = tmp_path / "plain.txt"
+        path.write_text("not an elf")
+        assert elf_symbol_versions(path) == ({}, {})
+        assert elf_exported_symbols(path) == {}
+
+
+class TestElfExportedSymbols:
+    def test_group_by_version(self, tmp_path):
+        path = tmp_path / "export.so"
+        path.write_bytes(
+            build_export_elf(
+                [
+                    Provides("GLIBC_2.29", ["pow"]),
+                    Provides("GLIBC_2.17", ["memcpy"]),
+                ]
+            )
+        )
+
+        assert elf_exported_symbols(path) == {
+            "GLIBC_2.29": {"pow"},
+            "GLIBC_2.17": {"memcpy"},
+        }
+
+    def test_candidate_runtime_requirements_are_separate(self, tmp_path):
+        path = tmp_path / "export.so"
+        path.write_bytes(
+            build_export_elf(
+                [Provides("GLIBC_2.29", ["pow"])],
+                needs=[Needs("libc.so.6", "GLIBC_2.17", ["memcpy"])],
+            )
+        )
+
+        assert elf_exported_symbols(path) == {"GLIBC_2.29": {"pow"}}
+        assert elf_symbol_versions(path) == (
+            {"libc.so.6": {"GLIBC_2.17"}},
+            {"libc.so.6": {"memcpy"}},
+        )
+
+
+def _open_elf(handle):
+    from elftools.elf.elffile import ELFFile
+
+    return ELFFile(handle)

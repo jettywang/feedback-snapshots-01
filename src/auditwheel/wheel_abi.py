@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, TypeVar
 from auditwheel import json
 from auditwheel.elfutils import (
     elf_file_filter,
+    elf_find_imported_symbols,
     elf_find_ucs2_symbols,
     elf_find_versioned_symbols,
     elf_is_python_extension,
@@ -40,6 +41,7 @@ class WheelAbIInfo:
     external_refs: dict[str, ExternalReference]
     ref_policy: Policy
     versioned_symbols: dict[str, set[str]]
+    imported_symbols: dict[str, dict[str, dict[str, set[str]]]]
     sym_policy: Policy
     ucs_policy: Policy
     pyfpe_policy: Policy
@@ -54,6 +56,7 @@ class WheelElfData:
     full_elftree: dict[Path, DynamicExecutable]
     full_external_refs: dict[Path, dict[str, ExternalReference]]
     versioned_symbols: dict[str, set[str]]
+    imported_symbols: dict[str, dict[str, dict[str, set[str]]]]
     uses_ucs2_symbols: bool
     uses_pyfpe_jbuf: bool
 
@@ -129,6 +132,7 @@ def get_wheel_elfdata(
     nonpy_elftree: dict[Path, DynamicExecutable] = {}
     full_external_refs: dict[Path, dict[str, ExternalReference]] = {}
     versioned_symbols: dict[str, set[str]] = defaultdict(set)
+    imported_symbols: dict[str, dict[str, dict[str, set[str]]]] = {}
     uses_ucs2_symbols = False
     uses_pyfpe_jbuf = False
     policies: WheelPolicies | None = None
@@ -188,6 +192,7 @@ def get_wheel_elfdata(
                 for key, value in elf_find_versioned_symbols(elf):
                     log.debug("key %s, value %s", key, value)
                     versioned_symbols[key].add(value)
+                imported_symbols[fn.name] = elf_find_imported_symbols(elf)
 
                 is_py_ext, py_ver = elf_is_python_extension(fn, elf)
 
@@ -274,6 +279,7 @@ def get_wheel_elfdata(
         full_elftree,
         full_external_refs,
         versioned_symbols,
+        imported_symbols,
         uses_ucs2_symbols,
         uses_pyfpe_jbuf,
     )
@@ -545,6 +551,7 @@ def analyze_wheel_abi(
         external_refs,
         ref_policy,
         versioned_symbols,
+        data.imported_symbols,
         symbol_policy,
         ucs_policy,
         pyfpe_policy,

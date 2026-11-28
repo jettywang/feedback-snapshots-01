@@ -1,0 +1,265 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "auditwheel compare",
+  "description": "Output schema for `auditwheel compare --json`.",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/result"
+    },
+    {
+      "$ref": "#/$defs/error"
+    }
+  ],
+  "$defs": {
+    "symbol_requirement": {
+      "type": "object",
+      "properties": {
+        "soname": {
+          "type": "string"
+        },
+        "symbol": {
+          "type": "string"
+        },
+        "version": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "soname",
+        "symbol",
+        "version"
+      ],
+      "additionalProperties": false
+    },
+    "policy_verdict": {
+      "type": "object",
+      "properties": {
+        "policy": {
+          "type": "string"
+        },
+        "priority": {
+          "type": "integer"
+        },
+        "retained": {
+          "type": "boolean"
+        },
+        "within_baseline": {
+          "type": "boolean"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "candidates": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "blocked_by": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "missing_symbols": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/symbol_requirement"
+          }
+        }
+      },
+      "required": [
+        "policy",
+        "priority",
+        "retained",
+        "within_baseline",
+        "reason",
+        "candidates",
+        "blocked_by",
+        "missing_symbols"
+      ],
+      "additionalProperties": false
+    },
+    "library_comparison": {
+      "type": "object",
+      "properties": {
+        "soname": {
+          "type": "string"
+        },
+        "required_symbols": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/symbol_requirement"
+          }
+        },
+        "candidates": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "path": {
+                "type": "string"
+              },
+              "variant": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "satisfies_symbols": {
+                "type": "boolean"
+              },
+              "missing_symbols": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/symbol_requirement"
+                }
+              },
+              "version_conflicts": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "soname": {
+                      "type": "string"
+                    },
+                    "symbol": {
+                      "type": "string"
+                    },
+                    "required_version": {
+                      "type": "string"
+                    },
+                    "provided_versions": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    }
+                  },
+                  "required": [
+                    "soname",
+                    "symbol",
+                    "required_version",
+                    "provided_versions"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "digest_verified": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "path",
+              "variant",
+              "digest_verified",
+              "satisfies_symbols",
+              "missing_symbols",
+              "version_conflicts"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": [
+        "soname",
+        "required_symbols",
+        "candidates"
+      ],
+      "additionalProperties": false
+    },
+    "result": {
+      "type": "object",
+      "properties": {
+        "version": {
+          "const": 1
+        },
+        "wheel": {
+          "type": "string"
+        },
+        "baseline_tag": {
+          "type": "string"
+        },
+        "baseline_covered": {
+          "type": "boolean"
+        },
+        "best_retained_tag": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "retained_tags": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "reclaimed_tags": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "dropped_tags": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "unreachable_tags": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "policies": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/policy_verdict"
+          }
+        },
+        "libraries": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/library_comparison"
+          }
+        }
+      },
+      "required": [
+        "version",
+        "wheel",
+        "baseline_tag",
+        "baseline_covered",
+        "best_retained_tag",
+        "retained_tags",
+        "reclaimed_tags",
+        "dropped_tags",
+        "unreachable_tags",
+        "policies",
+        "libraries"
+      ],
+      "additionalProperties": false
+    },
+    "error": {
+      "type": "object",
+      "properties": {
+        "version": {
+          "const": 1
+        },
+        "wheel": {
+          "type": "string"
+        },
+        "error": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "version",
+        "wheel",
+        "error"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

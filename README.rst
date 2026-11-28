@@ -99,10 +99,59 @@ Repairing a wheel. ::
 
     Fixed-up wheel written to /wheelhouse/cffi-1.5.2-cp35-cp35m-manylinux1_x86_64.whl
 
+Comparing offline patch candidates
+----------------------------------
+
+When a vulnerable external library has to be replaced, security teams often
+provide more than one patched build; some of them only run on a newer platform.
+``auditwheel compare`` inspects those candidates offline and reports which
+publication tags can still be kept::
+
+    $ auditwheel compare cffi-1.5.0-cp35-cp35m-linux_x86_64.whl \
+        --candidates candidates.json
+
+A tag is kept only when a candidate:
+
+* has patch evidence naming that policy (or a more compatible one),
+* exports every symbol the wheel really imports from the library, with the
+  exact symbol version the wheel requires, and
+* can itself run on that policy.
+
+The report names the real symbol (for example ``pow@GLIBC_2.29``) and the
+policy a dropped tag was blocked by, so a candidate whose evidence exists but
+whose symbol boundary is still too new is not mistaken for a valid replacement.
+Candidates may cover different tags: an older platform can be left to a
+candidate with independent evidence instead of being sacrificed because
+another candidate only supports a newer platform.  Tags below what the wheel's
+remaining (non-replaced) requirements allow are reported separately and are not
+mistaken for a regression.
+
+The manifest is a small JSON document. Paths are resolved relative to the
+manifest::
+
+    {
+      "version": 1,
+      "kind": "auditwheel-candidate-manifest",
+      "candidates": [
+        {
+          "soname": "libm.so.6",
+          "path": "libm-patched.so",
+          "variant": "older-platform",
+          "patch_evidence": [
+            {
+              "policy": "manylinux_2_17_x86_64",
+              "reference": "SEC-1234/evidence.json",
+              "checksum": "sha256:..."
+            }
+          ]
+        }
+      ]
+    }
+
+Pass ``--json`` for machine-readable output (see ``compare-schema.json``).
 
 Limitations
 -----------
-
 1. ``auditwheel`` uses the `DT_NEEDED <https://en.wikipedia.org/wiki/Direct_binding>`_
    information (like ``ldd``) from the Python extension modules to determine
    which system libraries they depend on. Code that dynamically
