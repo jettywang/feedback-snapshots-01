@@ -1,0 +1,66 @@
+{
+  "format": "archive-recovery/v1",
+  "note": "Migration assigned each blob a guessed/normalized filename. The assigned name is NOT authoritative; the signed subject is. Verify with the blob's own sha256 against the signed subject name.",
+  "blobs": [
+    {
+      "blob": "blob-001.bin",
+      "assigned_name": "pypi_attestations-0.0.19.tar.gz",
+      "staging": false,
+      "evidence": [
+        "evidence/pypi_attestations-0.0.19.tar.gz.publish.attestation",
+        "evidence/pypi_attestations-0.0.19.tar.gz.provenance"
+      ]
+    },
+    {
+      "blob": "blob-002.bin",
+      "assigned_name": "pypi_attestation_models-0.0.4a2.tar.gz",
+      "staging": false,
+      "evidence": [
+        "evidence/pypi_attestation_models-0.0.4a2.tar.gz.attestation",
+        "evidence/pypi_attestation_models-0.0.4a2.tar.gz.sigstore"
+      ]
+    },
+    {
+      "blob": "blob-003.bin",
+      "assigned_name": "circleci_sign_publish_example-0.0.1.dev137-py3-none-any.whl",
+      "staging": false,
+      "evidence": [
+        "evidence/circleci_sign_publish_example-0.0.1.dev137-py3-none-any.whl.publish.attestation",
+        "evidence/circleci_sign_publish_example-0.0.1.dev137-py3-none-any.whl.provenance"
+      ]
+    },
+    {
+      "blob": "blob-004.bin",
+      "assigned_name": "rfc8785-0.1.2-py3-none-any.whl",
+      "staging": true,
+      "evidence": [
+        "evidence/rfc8785-0.1.2-py3-none-any.whl.publish.attestation"
+      ]
+    },
+    {
+      "blob": "blob-005.bin",
+      "assigned_name": "pypi-attestation-models-0.0.4a2.tar.gz",
+      "staging": false,
+      "evidence": [
+        "evidence/pypi_attestation_models-0.0.4a2.tar.gz.attestation"
+      ]
+    },
+    {
+      "blob": "blob-006.bin",
+      "assigned_name": "rfc8785-0.1.2-py3-none-macosx_11_0_arm64.whl",
+      "staging": true,
+      "evidence": [
+        "evidence/rfc8785-0.1.2-py3-none-any.whl.publish.attestation"
+      ]
+    },
+    {
+      "blob": "blob-007.bin",
+      "assigned_name": "gcb_attestation_test-0.0.0.tar.gz",
+      "staging": false,
+      "evidence": []
+    }
+  ],
+  "orphan_evidence": [
+    "evidence/spt3g-1.0-cp310-cp310-manylinux_2_17_x86_64.manylinux2014_x86_64.whl.publish.attestation"
+  ]
+}
