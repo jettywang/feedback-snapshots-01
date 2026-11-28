@@ -4,6 +4,11 @@
 
 ### New features and changes
 
+* add a scoped exception-governance layer beside SPDX validation (`spdx.governance`):
+  approvals are bound to a policy version, a document namespace/edge and document/evidence
+  digests, so an approval cannot leak to another manifest and expires when content is replaced
+* carry the provenance of still-valid approvals into SPDX-3 transcription and expose the
+  release gate through the `pyspdxexceptions` CLI
 * clean up `pyproject.toml` and `MANIFEST.in`, remove `appveyor.yml`
 * make code conformant with PEP 484
 

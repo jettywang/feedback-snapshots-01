@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: 2023 spdx contributors
 #
 # SPDX-License-Identifier: Apache-2.0
+from beartype.typing import List
+
 from spdx_tools.spdx3.bump_from_spdx2.annotation import bump_annotation
 from spdx_tools.spdx3.bump_from_spdx2.creation_info import bump_creation_info
 from spdx_tools.spdx3.bump_from_spdx2.file import bump_file
@@ -9,6 +11,8 @@ from spdx_tools.spdx3.bump_from_spdx2.relationship import bump_relationships
 from spdx_tools.spdx3.bump_from_spdx2.snippet import bump_snippet
 from spdx_tools.spdx3.model import CreationInfo, SpdxDocument
 from spdx_tools.spdx3.payload import Payload
+from spdx_tools.spdx.governance.model import ExceptionApproval, PolicyVersion
+from spdx_tools.spdx.governance.provenance import carry_approvals
 from spdx_tools.spdx.model import RelationshipType
 from spdx_tools.spdx.model.document import Document as Spdx2_Document
 from spdx_tools.spdx.model.relationship_filters import filter_by_type_and_origin
@@ -18,7 +22,17 @@ from spdx_tools.spdx.model.relationship_filters import filter_by_type_and_origin
     the object from src.spdx and add all objects that the input is translated to into the payload."""
 
 
-def bump_spdx_document(document: Spdx2_Document) -> Payload:
+def bump_spdx_document(
+    document: Spdx2_Document,
+    approvals: List[ExceptionApproval] | None = None,
+    policy: PolicyVersion | None = None,
+) -> Payload:
+    """Transcribe an SPDX-2 document into an SPDX-3 payload.
+
+    If ``approvals`` are provided, only those that are still bound to this exact 2.x document
+    revision (and to ``policy``, when given) are attached to the resulting SPDX-3 document as
+    provenance external references. Stale approvals are silently dropped, never upgraded.
+    """
     payload = Payload()
     document_namespace: str = document.creation_info.document_namespace
     spdx_document: SpdxDocument = bump_creation_info(document.creation_info, payload)
@@ -66,5 +80,8 @@ def bump_spdx_document(document: Spdx2_Document) -> Payload:
         bump_annotation(spdx2_annotation, payload, creation_info, document_namespace, counter)
 
     spdx_document.element = [spdx_id for spdx_id in payload.get_full_map() if spdx_id != spdx_document.spdx_id]
+
+    if approvals:
+        carry_approvals(payload, document, approvals, policy)
 
     return payload

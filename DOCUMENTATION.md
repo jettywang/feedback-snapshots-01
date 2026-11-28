@@ -115,6 +115,37 @@ It is left open to the implementer which of this information to use in the follo
 Every validation function returns a list of `ValidationMessage` objects, which are gradually concatenated until the final list is returned.
 That is, if an empty list is returned, the document is valid.
 
+### `governance`
+
+The `governance` package sits *next to* validation and never replaces it. Its purpose is to let an
+organization accept a known, individually approved specification finding for release without
+weakening the underlying SPDX validation for anybody else.
+
+Key properties:
+
+- `validate_full_spdx_document()` and all subvalidators remain untouched, so the complete list of
+  specification findings is always available for internal review.
+- An `ExceptionApproval` is bound to a `PolicyVersion` (`policy_id@version`), a `ReferenceEdge`
+  (document namespace, edge kind and identifier) and two SHA-256 digests: one over the full
+  canonical SPDX-2 document and one over the specific element/relationship that was approved.
+- `evaluate_release(document, approvals, policy)` returns a `ReleaseDecision` that keeps every
+  `ValidationMessage` intact. A finding is only `APPROVED` if namespace, edge, policy version,
+  document digest and evidence digest all match; a mismatching approval is reported as `STALE`,
+  an approval for another manifest is simply not found. Approvals are never matched by warning
+  text, so two suppliers that trigger the same message are not covered by one approval.
+- Replacing the file contents (or any other reviewed content) changes the document digest and
+  turns the approval for that manifest into `STALE` as well.
+- `approvals_to_json()`/`approvals_from_json()` persist approvals as a diff-friendly ledger.
+- `carry_approvals()` (also reached through `bump_spdx_document(..., approvals=..., policy=...)`)
+  attaches the provenance of still-valid approvals to the transcribed SPDX-3 document as an
+  `ExternalReference` of type `OTHER`. Its comment is the deterministic, parseable string
+  `spdx-exception: id=...; policy=...; edge=...; namespace=...; document-sha256=...;
+  evidence-sha256=...`. Stale approvals are dropped instead of being carried.
+
+The `pyspdxexceptions` CLI wraps this: it always prints the full specification findings, writes an
+optional machine-readable status file, and exits non-zero unless every finding is approved under
+the policy version passed with `--policy`.
+
 ## `spdx3`
 
 This package is still a work in progress.
