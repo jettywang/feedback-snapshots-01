@@ -1,0 +1,1 @@
+twisted.protocols.policies now provides HandshakeQuotaFactory, which limits the resources held by connections still waiting in multi-stage handshakes against a shared HandshakeQuota, releasing each connection's exact shares on completion, early disconnect, or stage timeout so established connections keep their capacity.

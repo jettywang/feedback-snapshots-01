@@ -888,6 +888,292 @@ class LimitTotalConnectionsFactoryTests(unittest.TestCase):
         self.assertEqual(0, factory.connectionCount)
 
 
+class StagedHandshakeProtocol(protocol.Protocol):
+    """
+    Application protocol with a two-stage handshake, driven through the
+    L{policies.HandshakeQuotaProtocol} transport wrapper.
+
+    The connection waits in the C{greeting} stage until it receives
+    C{hello}, then in the C{auth} stage until it receives C{secret}, after
+    which the handshake is complete and further data is echoed back.
+    """
+
+    established = False
+    disconnected = False
+
+    def connectionMade(self):
+        self.transport.beginStage("greeting")
+
+    def connectionLost(self, reason):
+        self.disconnected = True
+
+    def dataReceived(self, data):
+        if self.established:
+            self.transport.write(data)
+        elif data == b"hello":
+            self.transport.beginStage("auth")
+        elif data == b"secret":
+            self.transport.completeHandshake()
+            self.established = True
+            self.transport.write(b"established")
+
+
+class TestableHandshakeQuotaFactory(policies.HandshakeQuotaFactory):
+    """
+    L{policies.HandshakeQuotaFactory} using a L{task.Clock} for tests.
+    """
+
+    def __init__(self, clock, *args, **kwargs):
+        """
+        @param clock: object providing a callLater method that can be used
+            for tests.
+        @type clock: C{task.Clock} or alike.
+        """
+        policies.HandshakeQuotaFactory.__init__(self, *args, **kwargs)
+        self.clock = clock
+
+    def callLater(self, period, func):
+        """
+        Forward to the testable clock.
+        """
+        return self.clock.callLater(period, func)
+
+
+class HandshakeQuotaTests(unittest.TestCase):
+    """
+    Tests for L{policies.HandshakeQuota}.
+    """
+
+    def test_acquireUpToLimit(self):
+        """
+        Shares can be acquired up to the limit; an acquisition that would
+        exceed the limit fails and takes nothing.
+        """
+        quota = policies.HandshakeQuota(3)
+        self.assertTrue(quota.acquire(2))
+        self.assertEqual(quota.inUse, 2)
+        self.assertEqual(quota.available, 1)
+        self.assertFalse(quota.acquire(2))
+        self.assertEqual(quota.inUse, 2)
+
+    def test_releaseReturnsShares(self):
+        """
+        Released shares become available again.
+        """
+        quota = policies.HandshakeQuota(3)
+        quota.acquire(3)
+        quota.release(2)
+        self.assertEqual(quota.inUse, 1)
+        self.assertEqual(quota.available, 2)
+
+    def test_releaseTooMuchRaises(self):
+        """
+        Releasing more shares than are held is an error.
+        """
+        quota = policies.HandshakeQuota(3)
+        quota.acquire(1)
+        self.assertRaises(ValueError, quota.release, 2)
+
+
+class HandshakeQuotaFactoryTests(unittest.TestCase):
+    """
+    Tests for L{policies.HandshakeQuotaFactory} and
+    L{policies.HandshakeQuotaProtocol}.
+    """
+
+    def setUp(self):
+        """
+        Create a deterministic clock, a quota of 3 shares, and a factory
+        wrapping L{StagedHandshakeProtocol} where the C{greeting} stage
+        costs 1 share and the C{auth} stage costs 2 shares, with a 10
+        second timeout per waiting stage.
+        """
+        self.clock = task.Clock()
+        self.quota = policies.HandshakeQuota(3)
+        self.factory = self._makeFactory()
+
+    def _makeFactory(self):
+        wrappedFactory = protocol.ServerFactory()
+        wrappedFactory.protocol = StagedHandshakeProtocol
+        return TestableHandshakeQuotaFactory(
+            self.clock,
+            wrappedFactory,
+            self.quota,
+            stageCosts={"greeting": 1, "auth": 2},
+            stageTimeout=10,
+        )
+
+    def connect(self, factory=None):
+        """
+        Build a connection through the quota factory on an in-memory
+        transport.
+
+        @return: A tuple of the L{policies.HandshakeQuotaProtocol} wrapper,
+            its transport and the wrapped application protocol.
+        """
+        if factory is None:
+            factory = self.factory
+        wrapper = factory.buildProtocol(
+            address.IPv4Address("TCP", "127.0.0.1", 12345)
+        )
+        app = wrapper.wrappedProtocol
+        transport = StringTransportWithDisconnection()
+        transport.protocol = wrapper
+        wrapper.makeConnection(transport)
+        return wrapper, transport, app
+
+    def test_interleavedHandshakeOutcomes(self):
+        """
+        Drive three in-memory connections through interleaved handshake
+        completion, early disconnect and stage timeout: each outcome
+        releases exactly the shares the connection held, the established
+        connection keeps sending throughout, and the reclaimed quota
+        admits new connections.
+        """
+        # c1 completes its handshake: greeting (1 share), auth (2 shares),
+        # then established (no shares).
+        c1, c1Transport, c1App = self.connect()
+        self.assertEqual(self.quota.inUse, 1)
+        c1.dataReceived(b"hello")
+        self.assertEqual(self.quota.inUse, 2)
+        c1.dataReceived(b"secret")
+        self.assertEqual(self.quota.inUse, 0)
+        self.assertTrue(c1App.established)
+        self.assertEqual(c1Transport.value(), b"established")
+        c1Transport.clear()
+
+        # c2 advances to the auth stage and holds 2 shares.
+        self.clock.advance(1)
+        c2, c2Transport, c2App = self.connect()
+        c2.dataReceived(b"hello")
+        self.assertEqual(self.quota.inUse, 2)
+
+        # c3 waits in the greeting stage, exactly filling the quota.
+        self.clock.advance(1)
+        c3, c3Transport, c3App = self.connect()
+        self.assertEqual(self.quota.inUse, 3)
+
+        # With the quota exhausted, a new connection is refused at its
+        # first waiting stage and dropped immediately.
+        c4, c4Transport, c4App = self.connect()
+        self.assertFalse(c4Transport.connected)
+        self.assertTrue(c4App.disconnected)
+        self.assertEqual(self.quota.inUse, 3)
+
+        # The established connection holds no shares and keeps sending
+        # while the quota is full.
+        c1.dataReceived(b"app-data")
+        self.assertEqual(c1Transport.value(), b"app-data")
+
+        # c2 disconnects early, releasing exactly its 2 auth shares.
+        c2Transport.loseConnection()
+        self.assertTrue(c2App.disconnected)
+        self.assertEqual(self.quota.inUse, 1)
+
+        # The reclaimed quota admits a new connection again.
+        self.clock.advance(1)
+        c5, c5Transport, c5App = self.connect()
+        self.assertEqual(self.quota.inUse, 2)
+        c5.dataReceived(b"hello")
+        self.assertEqual(self.quota.inUse, 3)
+
+        # c3 never proceeds and is dropped when its stage times out,
+        # releasing its 1 greeting share.
+        self.clock.advance(8)
+        self.assertFalse(c3App.disconnected)
+        self.clock.advance(1)
+        self.assertTrue(c3App.disconnected)
+        self.assertEqual(self.quota.inUse, 2)
+
+        # c5's stage times out one second later, draining the pool.
+        self.assertFalse(c5App.disconnected)
+        self.clock.advance(1)
+        self.assertTrue(c5App.disconnected)
+        self.assertEqual(self.quota.inUse, 0)
+
+        # The established connection is still fully functional.
+        c1.dataReceived(b"still-here")
+        self.assertEqual(c1Transport.value(), b"app-datastill-here")
+
+    def test_earlyDisconnectReleasesExactShares(self):
+        """
+        A connection lost while waiting in a stage releases exactly the
+        shares of that stage.
+        """
+        wrapper, transport, app = self.connect()
+        self.assertEqual(self.quota.inUse, 1)
+        transport.loseConnection()
+        self.assertTrue(app.disconnected)
+        self.assertEqual(self.quota.inUse, 0)
+
+    def test_completeHandshakeIsIdempotent(self):
+        """
+        Completing the handshake twice releases shares only once, and the
+        stage timeout no longer applies to the established connection.
+        """
+        wrapper, transport, app = self.connect()
+        wrapper.completeHandshake()
+        wrapper.completeHandshake()
+        self.assertEqual(self.quota.inUse, 0)
+        self.clock.advance(100)
+        self.assertFalse(app.disconnected)
+
+    def test_connectionLostAfterCompleteHandshakeReleasesNothing(self):
+        """
+        A connection lost after its handshake completed holds no shares,
+        so nothing is returned to the quota.
+        """
+        wrapper, transport, app = self.connect()
+        wrapper.completeHandshake()
+        transport.loseConnection()
+        self.assertEqual(self.quota.inUse, 0)
+
+    def test_costForStageDefaultsToOne(self):
+        """
+        Stages not present in the C{stageCosts} mapping cost one share.
+        """
+        self.assertEqual(self.factory.costForStage("unknown"), 1)
+
+    def test_costForStageCallable(self):
+        """
+        C{stageCosts} may be a callable computing the cost of a stage.
+        """
+        factory = TestableHandshakeQuotaFactory(
+            self.clock,
+            protocol.ServerFactory(),
+            policies.HandshakeQuota(10),
+            stageCosts=lambda stage: len(stage),
+        )
+        self.assertEqual(factory.costForStage("auth"), 4)
+
+    def test_quotaSharedAcrossFactories(self):
+        """
+        A single L{HandshakeQuota} limits the combined handshakes of
+        several factories, so multiple listeners can share one admission
+        limit.
+        """
+        otherFactory = self._makeFactory()
+
+        wrapper, transport, app = self.connect()
+        wrapper.dataReceived(b"hello")
+        self.assertEqual(self.quota.inUse, 2)
+
+        otherWrapper, otherTransport, otherApp = self.connect(otherFactory)
+        self.assertEqual(self.quota.inUse, 3)
+
+        # The shared pool is exhausted: a handshake on either factory is
+        # refused.
+        refused, refusedTransport, refusedApp = self.connect()
+        self.assertTrue(refusedApp.disconnected)
+
+        # A release through one factory frees shares for the other.
+        wrapper.completeHandshake()
+        self.assertEqual(self.quota.inUse, 1)
+        extra, extraTransport, extraApp = self.connect(otherFactory)
+        self.assertFalse(extraApp.disconnected)
+        self.assertEqual(self.quota.inUse, 2)
+
+
 class WriteSequenceEchoProtocol(EchoProtocol):
     def dataReceived(self, bytes):
         if bytes.find(b"vector!") != -1:

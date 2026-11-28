@@ -424,6 +424,206 @@ class LimitTotalConnectionsFactory(ServerFactory):
         self.connectionCount -= 1
 
 
+class HandshakeQuota:
+    """
+    A shared pool of admission shares for connections whose handshakes are
+    still in progress.
+
+    Connections waiting in a handshake stage hold a configurable number of
+    shares from the pool; once the pool is exhausted, further handshakes are
+    refused so that already established connections keep their resources.
+
+    @ivar limit: The maximum number of shares that may be held at once.
+    @type limit: L{int}
+    @ivar inUse: The number of shares currently held by handshaking
+        connections.
+    @type inUse: L{int}
+    """
+
+    def __init__(self, limit: int):
+        self.limit = limit
+        self.inUse = 0
+
+    @property
+    def available(self) -> int:
+        """
+        The number of shares that can still be acquired.
+        """
+        return self.limit - self.inUse
+
+    def acquire(self, shares: int) -> bool:
+        """
+        Try to take C{shares} shares from the pool.
+
+        @return: L{True} if the shares were granted, L{False} if the pool
+            does not have enough shares left (in which case nothing is
+            taken).
+        """
+        if shares > self.available:
+            return False
+        self.inUse += shares
+        return True
+
+    def release(self, shares: int) -> None:
+        """
+        Give C{shares} shares back to the pool.
+        """
+        if shares > self.inUse:
+            raise ValueError(f"cannot release {shares} shares, {self.inUse} in use")
+        self.inUse -= shares
+
+
+class HandshakeQuotaProtocol(ProtocolWrapper):
+    """
+    Protocol wrapper which accounts multi-stage handshakes against a shared
+    L{HandshakeQuota}.
+
+    The wrapped protocol announces each waiting stage of its handshake by
+    calling C{beginStage} on its transport (this wrapper), and announces
+    successful authentication by calling C{completeHandshake}.  Every stage
+    holds a configurable number of quota shares for as long as the
+    connection waits in it; the exact shares held are released when the
+    handshake completes, when the connection is lost early, or when the
+    stage timeout drops the connection.  Once the handshake is complete the
+    connection holds no shares and keeps sending and receiving normally.
+    """
+
+    def __init__(self, factory, wrappedProtocol):
+        ProtocolWrapper.__init__(self, factory, wrappedProtocol)
+        self._heldShares = 0
+        self._stageTimeoutCall = None
+
+    def callLater(self, period, func):
+        """
+        Wrapper around the factory's C{callLater} for test purpose.
+        """
+        return self.factory.callLater(period, func)
+
+    def beginStage(self, stage) -> bool:
+        """
+        Enter a waiting stage of the handshake.
+
+        The shares held for the previous stage, if any, are released and the
+        cost of the new stage (see L{HandshakeQuotaFactory.costForStage}) is
+        acquired from the shared quota.  If the quota is exhausted the
+        connection is dropped.
+
+        @param stage: A hashable identifier for the stage being entered.
+        @return: L{True} if the stage was admitted, L{False} if the quota
+            was exhausted and the connection is being dropped.
+        """
+        cost = self.factory.costForStage(stage)
+        self._releaseShares()
+        if not self.factory.quota.acquire(cost):
+            self.loseConnection()
+            return False
+        self._heldShares = cost
+        self._armStageTimeout()
+        return True
+
+    def completeHandshake(self) -> None:
+        """
+        Declare the handshake finished.
+
+        All remaining shares are released and the stage timeout is
+        cancelled; the connection is now established and no longer limited
+        by the quota.
+        """
+        self._releaseShares()
+        self._cancelStageTimeout()
+
+    def timeoutHandshake(self) -> None:
+        """
+        Called when a handshake stage exceeds its allotted waiting time.
+
+        The default behavior drops the connection, which releases the held
+        shares via L{connectionLost}.
+        """
+        self.loseConnection()
+
+    def connectionLost(self, reason):
+        self._releaseShares()
+        self._cancelStageTimeout()
+        ProtocolWrapper.connectionLost(self, reason)
+
+    def _releaseShares(self) -> None:
+        """
+        Return exactly the shares currently held to the quota.
+        """
+        if self._heldShares:
+            self.factory.quota.release(self._heldShares)
+            self._heldShares = 0
+
+    def _armStageTimeout(self) -> None:
+        self._cancelStageTimeout()
+        timeout = self.factory.stageTimeout
+        if timeout is not None:
+            self._stageTimeoutCall = self.callLater(timeout, self._stageTimedOut)
+
+    def _cancelStageTimeout(self) -> None:
+        if self._stageTimeoutCall is not None:
+            try:
+                self._stageTimeoutCall.cancel()
+            except (error.AlreadyCancelled, error.AlreadyCalled):
+                # Do nothing if the call was already consumed.
+                pass
+            self._stageTimeoutCall = None
+
+    def _stageTimedOut(self) -> None:
+        self._stageTimeoutCall = None
+        self.timeoutHandshake()
+
+
+class HandshakeQuotaFactory(WrappingFactory):
+    """
+    Factory which limits the resources held by handshaking connections
+    against a shared L{HandshakeQuota}.
+
+    Wrap this around the factory of a listening endpoint to refuse new
+    handshakes while too many shares are held by connections still waiting
+    in their handshake stages, protecting connections that have already
+    been established.
+
+    @ivar quota: The shared pool of admission shares.  A single
+        L{HandshakeQuota} instance may be shared by several factories to
+        enforce one limit across multiple listeners.
+    @ivar stageCosts: Mapping of stage identifier to the number of shares a
+        connection holds while waiting in that stage, or a callable
+        computing the cost for a stage.  Stages not present in a mapping
+        cost one share.
+    @ivar stageTimeout: Number of seconds a connection may wait in a single
+        handshake stage before being dropped, or L{None} to never time out.
+    """
+
+    protocol = HandshakeQuotaProtocol
+
+    def __init__(self, wrappedFactory, quota, stageCosts=None, stageTimeout=None):
+        WrappingFactory.__init__(self, wrappedFactory)
+        self.quota = quota
+        self.stageCosts = {} if stageCosts is None else stageCosts
+        self.stageTimeout = stageTimeout
+
+    def costForStage(self, stage) -> int:
+        """
+        Compute the number of quota shares a connection holds while waiting
+        in C{stage}.
+        """
+        costs = self.stageCosts
+        if callable(costs):
+            return costs(stage)
+        return costs.get(stage, 1)
+
+    def callLater(self, period, func):
+        """
+        Wrapper around
+        L{reactor.callLater<twisted.internet.interfaces.IReactorTime.callLater>}
+        for test purpose.
+        """
+        from twisted.internet import reactor
+
+        return reactor.callLater(period, func)
+
+
 class TimeoutProtocol(ProtocolWrapper):
     """
     Protocol that automatically disconnects when the connection is idle.
