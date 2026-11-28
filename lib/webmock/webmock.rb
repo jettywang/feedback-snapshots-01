@@ -60,26 +60,51 @@ module WebMock
     alias :disallow_net_connect! :disable_net_connect!
   end
 
-  def self.net_connect_allowed?(uri = nil)
-    return !!Config.instance.allow_net_connect if uri.nil?
+  # Opens an isolated net-connect permission scope. Rules configured inside the
+  # scope apply only while it is the active scope, leaving the global
+  # configuration and any other open scope untouched. Without a block the scope
+  # is returned and stays open until +#close+ is called; with a block the scope
+  # is active for the block and closed automatically afterwards.
+  #
+  #   WebMock.net_connect_scope(allow: "api.example.com") do |scope|
+  #     Net::HTTP.get(URI("http://api.example.com/health"))
+  #   end
+  def self.net_connect_scope(options = {}, &block)
+    scope = WebMock::NetConnectScope.new(
+      allow_net_connect: options.fetch(:allow_net_connect, false),
+      allow_localhost: options[:allow_localhost],
+      allow: options[:allow],
+      net_http_connect_on_start: options[:net_http_connect_on_start]
+    )
 
-    if uri.is_a?(String)
-      uri = WebMock::Util::URI.normalize_uri(uri)
+    if block
+      scope.activate(&block)
+    else
+      WebMock::NetConnectScopeRegistry.instance.register(scope)
+      scope
     end
+  end
 
-    !!Config.instance.allow_net_connect ||
-    ( Config.instance.allow_localhost && WebMock::Util::URI.is_uri_localhost?(uri) ||
-      Config.instance.allow && net_connect_explicit_allowed?(Config.instance.allow, uri) )
+  # Opens a scope in which real connections are allowed. Accepts the same
+  # options as WebMock.allow_net_connect!, scoped to the block or returned
+  # scope.
+  def self.allow_net_connect_scope(options = {}, &block)
+    net_connect_scope(options.merge(allow_net_connect: true), &block)
+  end
+
+  # Opens a scope in which real connections are denied, with the same
+  # allowlist options as WebMock.disable_net_connect!, scoped to the block or
+  # returned scope.
+  def self.disable_net_connect_scope(options = {}, &block)
+    net_connect_scope(options.merge(allow_net_connect: false), &block)
+  end
+
+  def self.net_connect_allowed?(uri = nil)
+    NetConnectScopeRegistry.instance.net_connect_allowed?(uri)
   end
 
   def self.net_http_connect_on_start?(uri)
-    allowed = Config.instance.net_http_connect_on_start || false
-
-    if [true, false].include?(allowed)
-      allowed
-    else
-      net_connect_explicit_allowed?(allowed, uri)
-    end
+    NetConnectScopeRegistry.instance.net_http_connect_on_start?(uri)
   end
 
   def self.net_connect_explicit_allowed?(allowed, uri=nil)
@@ -149,6 +174,7 @@ module WebMock
   def self.reset!
     WebMock::RequestRegistry.instance.reset!
     WebMock::StubRegistry.instance.reset!
+    WebMock::NetConnectScopeRegistry.instance.reset!
   end
 
   def self.reset_webmock

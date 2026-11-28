@@ -1,5 +1,24 @@
 # Changelog
 
+# Unreleased
+
+* Add isolated net-connect permission scopes
+
+    `WebMock.net_connect_scope`, `WebMock.allow_net_connect_scope` and
+    `WebMock.disable_net_connect_scope` open a scope that keeps its own
+    `allow`, `allow_localhost` and `net_http_connect_on_start` rules. The rules
+    apply only while the scope is active, leaving the global configuration and
+    any other open scope untouched, so tests running concurrently in the same
+    process cannot reset or widen each other's permissions.
+
+    With a block the scope is active for the block and closed automatically;
+    without a block the returned scope stays open until `#close` is called.
+    The active scope is tracked per thread, covering both the pre-request
+    connection (`net_http_connect_on_start`) and the first request
+    (`net_connect_allowed?`) adapter lifecycle points. Existing stub behaviour
+    and the global `allow_net_connect!` / `disable_net_connect!` APIs are
+    unchanged.
+
 # 3.35.0
 
 * Fix `get_file` with Patron 1.1 (#1147)

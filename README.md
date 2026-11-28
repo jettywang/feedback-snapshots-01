@@ -650,6 +650,37 @@ RestClient.get('bbc.com', '/')         # ===> Allowed
 RestClient.get('www.bbc.com', '/')     # ===> Failure
 ```
 
+### Connection permissions can be isolated in a scope
+
+A scope keeps its own net-connect rules, independent of the global
+configuration. Rules changed inside a scope never reset another open scope or
+the global settings, which makes scopes safe for tests running concurrently in
+the same process. The active scope is tracked per thread.
+
+```ruby
+# Block form: the scope is active for the block and closed automatically.
+WebMock.disable_net_connect_scope(allow: 'www.example.org') do
+  RestClient.get('www.example.org', '/') # ===> Allowed
+  RestClient.get('www.denied.com', '/')   # ===> Failure
+end
+
+# Convenience wrappers mirror the global methods.
+WebMock.allow_net_connect_scope(net_http_connect_on_start: true) { }
+
+# Without a block the scope stays open until it is closed explicitly.
+scope = WebMock.disable_net_connect_scope(allow: 'www.example.org')
+scope.activate do
+  RestClient.get('www.example.org', '/') # ===> Allowed
+end
+scope.close
+```
+
+The scope accepts the same options as `disable_net_connect!` /
+`allow_net_connect!`, including `allow`, `allow_localhost` and
+`net_http_connect_on_start`, so it covers both the connection established on
+`Net::HTTP.start` and the first request. When no scope is active, the global
+rules apply unchanged.
+
 ## Connecting on Net::HTTP.start
 
 HTTP protocol has 3 steps: connect, request and response (or 4 with close). Most Ruby HTTP client libraries
