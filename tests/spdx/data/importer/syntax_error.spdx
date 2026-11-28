@@ -1,0 +1,8 @@
+SPDXVersion: SPDX-2.3
+DataLicense: CC0-1.0
+SPDXID: SPDXRef-DOCUMENT
+DocumentName: syntax-error-tagvalue
+DocumentNamespace: https://example.com/ns/syntax-error-tag
+Creator: Tool: tool-internal-host-7.example.net
+Created: 2026-01-01T00:00:00Z
+ThisIsNotAKnownTag: internal-pipeline-node-42

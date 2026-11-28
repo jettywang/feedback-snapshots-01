@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<SpdxDocument spdx:spdxId="SPDXRef-DOCUMENT"
+    xmlns="http://www.spdx.org/rdf/terms#"
+    xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"
+    xmlns:spdx="http://www.spdx.org/rdf/terms#">
+  <spdx:dataLicense rdf:resource="https://spdx.org/licenses/CC0-1.0"/>
+  <spdx:name>syntax-error-xml</spdx:name>
+  <spdx:creationInfo>
+    <spdx:CreationInfo>
+      <spdx:created>2026-01-01T00:00:00Z</spdx:created>
+      <spdx:creator Tool: tool-internal-host-7.example.net
+    </spdx:CreationInfo>
+  </spdx:creationInfo>
+</SpdxDocument>

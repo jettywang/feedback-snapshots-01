@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+### New features and changes
+
+* add the `spdx_tools.spdx.importer` package with a unified `import_file` entry point that classifies failures by
+  processing stage (`parse`, `validation`, `write`) and stable error category (`syntax_error`, `schema_violation`,
+  `validation_error`, `write_error`, `unknown_error`)
+* `ImportResult.external_summary()` exposes only coordinates and categories while `diagnostic_records()` keeps the
+  raw parser notes and their data source for internal diagnostics
+* syntax/validation failures never produce a write output; the existing `parse_file`/`write_file` entry points keep
+  their current exception behavior
+
 ## v0.8.5 (2026-03-13)
 
 ### New features and changes

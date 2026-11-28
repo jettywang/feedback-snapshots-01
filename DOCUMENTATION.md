@@ -115,6 +115,26 @@ It is left open to the implementer which of this information to use in the follo
 Every validation function returns a list of `ValidationMessage` objects, which are gradually concatenated until the final list is returned.
 That is, if an empty list is returned, the document is valid.
 
+### `importer`
+
+The `importer` package offers a service-oriented entry point, `import_file()`, that runs the existing parser, validator and writer behind a single error contract.
+It does not change the legacy entry points: `parse_file()`, `write_file()` and the per-format parsers and writers keep raising their current exceptions.
+
+Each failure is represented by an `ImportErrorRecord` carrying:
+
+- a `ProcessingStage` (`PARSE`, `VALIDATION` or `WRITE`) and a stable, format-independent `ErrorCategory`
+  (`syntax_error`, `schema_violation`, `validation_error`, `write_error`, `unknown_error`)
+- `ErrorCoordinates` pointing at the source document, SPDX id, element type and line number when known
+- the raw note in `diagnostic_message`, which may mention internal host names or paths
+
+The two output channels are deliberately separated so that raw notes never cross the service boundary:
+
+- `ImportResult.external_summary()` is the sanitized response and only contains the source/output coordinates plus the category, stage and coordinates of each error.
+- `ImportResult.diagnostic_records()` keeps the raw notes together with their data source and is intended for internal log pipelines.
+
+A failed parse (or validation) aborts before the write stage, so a syntax error can never produce an output file.
+By default a failed import returns the failed `ImportResult`; passing `raise_on_error=True` raises an `ImportServiceError` that wraps the same result.
+
 ## `spdx3`
 
 This package is still a work in progress.
