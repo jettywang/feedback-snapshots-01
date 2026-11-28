@@ -7,6 +7,7 @@ import json
 import logging
 import typing
 from collections import defaultdict
+from datetime import UTC, datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -26,16 +27,27 @@ from sigstore.oidc import IdentityError, IdentityToken, Issuer
 from sigstore.sign import SigningContext
 from sigstore.verify import policy
 
-from pypi_attestations import Attestation, AttestationError, VerificationError, __version__
+from pypi_attestations import (
+    Attestation,
+    AttestationError,
+    Channel,
+    Distribution,
+    IdentityStatus,
+    RegistryError,
+    ReleaseRegistry,
+    SignatureStatus,
+    VerificationError,
+    __version__,
+)
 from pypi_attestations._impl import (
     CircleCIPublisher,
     ConversionError,
-    Distribution,
     GitHubPublisher,
     GitLabPublisher,
     GooglePublisher,
     Provenance,
 )
+from pypi_attestations._registry import AuditLog, ArchivedProof
 
 if typing.TYPE_CHECKING:  # pragma: no cover
     from collections.abc import Iterable
@@ -240,6 +252,112 @@ def _parser() -> argparse.ArgumentParser:
         type=Path,
         help="The output file to write the attestation to",
     )
+
+    approve_command = subcommands.add_parser(
+        name="approve",
+        help="Evaluate an attestation against a local release identity approval record",
+        parents=[parent_parser],
+    )
+
+    approve_command.add_argument(
+        "--registry",
+        required=True,
+        type=Path,
+        help="Path to the local release identity approval record (JSON)",
+    )
+
+    approve_command.add_argument(
+        "--archive",
+        type=Path,
+        help="Path to the local archive of retained proofs and attestations (JSON)",
+    )
+
+    approve_command.add_argument(
+        "--repository",
+        type=str,
+        help="Repository identifier to evaluate against (default: derived from the certificate)",
+    )
+
+    approve_command.add_argument(
+        "--channel",
+        choices=[channel.value for channel in Channel],
+        default=Channel.RELEASE.value,
+        help="Release channel to evaluate against",
+    )
+
+    approve_command.add_argument(
+        "--at",
+        type=str,
+        help="ISO 8601 time to evaluate the current-release conclusion at (default: now)",
+    )
+
+    approve_command.add_argument(
+        "--require",
+        choices=["any", "current", "historical"],
+        default="any",
+        help="Which conclusion must succeed for the command to exit zero",
+    )
+
+    approve_command.add_argument(
+        "--sigstore",
+        action="store_true",
+        default=False,
+        help="Also verify the full Sigstore trust root (requires the network or a local cache)",
+    )
+
+    approve_command.add_argument(
+        "--staging",
+        action="store_true",
+        default=False,
+        help="Use the staging Sigstore environment",
+    )
+
+    approve_command.add_argument(
+        "--offline",
+        action="store_true",
+        default=False,
+        help="Disable TUF refresh",
+    )
+
+    approve_command.add_argument(
+        "files",
+        metavar="FILE",
+        type=Path,
+        nargs="+",
+        help="The distribution file to check; its sibling .publish.attestation is used",
+    )
+
+    audit_command = subcommands.add_parser(
+        name="audit",
+        help="Query archived proofs retained from earlier releases",
+        parents=[parent_parser],
+    )
+
+    audit_command.add_argument(
+        "--archive",
+        required=True,
+        type=Path,
+        help="Path to the local archive of retained proofs and attestations (JSON)",
+    )
+
+    audit_command.add_argument(
+        "--digest",
+        type=str,
+        help="Only show proofs for a distribution with this SHA-256 digest",
+    )
+
+    audit_command.add_argument(
+        "--artifact",
+        type=str,
+        help="Only show proofs for a distribution with this filename",
+    )
+
+    audit_command.add_argument(
+        "--verify-file",
+        type=Path,
+        help="Re-check an archived proof against this local distribution file",
+    )
+
     return parser
 
 
@@ -664,6 +782,163 @@ def _convert(args: argparse.Namespace) -> None:
     _logger.info(f"Converted Sigstore bundle to attestation: {args.output_file}")
 
 
+def _approve(args: argparse.Namespace) -> None:
+    """Evaluate attestations against a local release identity approval record."""
+    if not args.registry.exists():
+        _die(f"Registry file does not exist: {args.registry}")
+    try:
+        registry = ReleaseRegistry.from_file(args.registry)
+    except RegistryError as e:
+        _die(str(e))
+
+    if args.at is not None:
+        try:
+            at = datetime.fromisoformat(args.at.replace("Z", "+00:00"))
+        except ValueError:
+            _die(f"Invalid --at timestamp: {args.at}")
+        if at.tzinfo is None:
+            at = at.replace(tzinfo=UTC)
+    else:
+        at = None
+
+    archive = AuditLog.from_file(args.archive) if args.archive is not None else None
+
+    _validate_files(args.files, should_exist=True)
+
+    for file_path in args.files:
+        attestation_path = Path(f"{file_path}.publish.attestation")
+        if not attestation_path.is_file():
+            _die(f"Couldn't find attestation for file {file_path}")
+
+        try:
+            attestation = Attestation.model_validate_json(attestation_path.read_bytes())
+        except ValidationError as e:
+            _die(f"Invalid attestation ({attestation_path}): {e}")
+
+        try:
+            dist = Distribution.from_file(file_path)
+        except (OSError, ValidationError) as e:
+            _die(f"Invalid Python package distribution: {e}")
+
+        try:
+            evaluation = registry.evaluate(
+                attestation,
+                dist,
+                repository=args.repository,
+                channel=Channel(args.channel),
+                now=at,
+                local_only=not args.sigstore,
+                staging=args.staging,
+                offline=args.offline,
+            )
+        except RegistryError as e:
+            _die(str(e))
+
+        _logger.info(f"File: {file_path}")
+        _logger.info(
+            f"Signature: {evaluation.signature.value}"
+            + (f" ({evaluation.signature_detail})" if evaluation.signature_detail else "")
+        )
+        _logger.info(
+            f"Sigstore trust: {evaluation.trust.value}"
+            + (f" ({evaluation.trust_detail})" if evaluation.trust_detail else "")
+        )
+        _logger.info(
+            f"Current identity policy: {evaluation.current.status.value}"
+            f" (period {evaluation.current.period or '-'}, "
+            f"basis {evaluation.current.basis.isoformat()})"
+        )
+        _logger.info(
+            f"Historical identity policy: {evaluation.historical.status.value}"
+            f" (period {evaluation.historical.period or '-'}, "
+            f"basis {evaluation.historical.basis.isoformat()})"
+        )
+        for label, conclusion in (
+            ("current", evaluation.current),
+            ("historical", evaluation.historical),
+        ):
+            if conclusion.detail:
+                _logger.info(f"  {label}: {conclusion.detail}")
+
+        if archive is not None:
+            archive.record(evaluation, attestation)
+            archive.to_file(args.archive)
+
+        current_ok = evaluation.current.status is IdentityStatus.CURRENT
+        historical_ok = evaluation.historical.status is IdentityStatus.HISTORICAL
+        if current_ok:
+            _logger.info(f"OK (current): {evaluation.artifact}")
+        if historical_ok:
+            _logger.info(f"OK (historical): {evaluation.artifact}")
+        if evaluation.current.status is IdentityStatus.PENDING:
+            _logger.info(f"PENDING approval: {evaluation.artifact}")
+
+        signed_ok = evaluation.signature is SignatureStatus.PASSED
+        if args.require == "current":
+            success = current_ok
+        elif args.require == "historical":
+            success = historical_ok
+        else:
+            success = current_ok or historical_ok
+        if not (signed_ok and success):
+            _die(
+                f"Not approved for the requested conclusion ({args.require}): "
+                f"signature={evaluation.signature.value}, "
+                f"current={evaluation.current.status.value}, "
+                f"historical={evaluation.historical.status.value}"
+            )
+
+
+def _describe_proof(proof: ArchivedProof) -> list[str]:
+    """Return human-readable lines describing an archived proof."""
+    return [
+        f"Artifact: {proof.artifact}",
+        f"Digest: {proof.digest}",
+        f"Recorded: {proof.recorded_at.isoformat()}",
+        f"Signature: {proof.signature.value}",
+        f"Sigstore trust: {proof.trust.value}",
+        f"Current identity policy: {proof.current.status.value} "
+        f"(period {proof.current.period or '-'}, basis {proof.current.basis.isoformat()})",
+        f"Historical identity policy: {proof.historical.status.value} "
+        f"(period {proof.historical.period or '-'}, "
+        f"basis {proof.historical.basis.isoformat()})",
+    ]
+
+
+def _audit(args: argparse.Namespace) -> None:
+    """Query archived proofs retained from earlier releases."""
+    if not args.archive.exists():
+        _die(f"Archive file does not exist: {args.archive}")
+    try:
+        archive = AuditLog.from_file(args.archive)
+    except RegistryError as e:
+        _die(str(e))
+
+    proofs = archive.find(digest=args.digest, artifact=args.artifact)
+    if not proofs:
+        _die("No archived proofs matched the given query")
+
+    for proof in proofs:
+        for line in _describe_proof(proof):
+            _logger.info(line)
+
+        if args.verify_file is not None:
+            try:
+                dist = Distribution.from_file(args.verify_file)
+            except (OSError, ValidationError) as e:
+                _die(f"Invalid Python package distribution: {e}")
+
+            evaluation = proof.recheck(dist)
+            if evaluation.signature is SignatureStatus.PASSED:
+                _logger.info(f"Archived attestation matches {args.verify_file}: OK")
+            else:
+                _die(
+                    f"Archived attestation does not match {args.verify_file}: "
+                    f"{evaluation.signature_detail}"
+                )
+        _logger.info("")
+
+
 def main() -> None:
     """Dispatch the CLI subcommand."""
     parser = _parser()
@@ -689,3 +964,7 @@ def main() -> None:
         _inspect(args)
     elif args.subcommand == "convert":
         _convert(args)
+    elif args.subcommand == "approve":
+        _approve(args)
+    elif args.subcommand == "audit":
+        _audit(args)

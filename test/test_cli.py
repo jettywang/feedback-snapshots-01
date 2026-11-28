@@ -1128,3 +1128,203 @@ def test_verify_pypi_command_github_no_repository(caplog: pytest.LogCaptureFixtu
             ]
         )
     assert "Provenance signed by a repository, but no repository URL provided" in caplog.text
+
+
+# --- release identity approval records -------------------------------------
+
+_EXAMPLES = _HERE.parent / "examples" / "release-identity"
+_approve_registry = _EXAMPLES / "release-registry.json"
+_approve_current_whl = _EXAMPLES / "widgets-1.0.0-py3-none-any.whl"
+_approve_legacy_whl = _EXAMPLES / "widgets-0.9.0-py3-none-any.whl"
+_approve_archive = _EXAMPLES / "archive.json"
+
+
+def test_approve_current_sample(caplog: pytest.LogCaptureFixture) -> None:
+    run_main_with_command(
+        [
+            "approve",
+            "--registry",
+            _approve_registry.as_posix(),
+            "--at",
+            "2026-11-29T00:00:00Z",
+            "--require",
+            "current",
+            _approve_current_whl.as_posix(),
+        ]
+    )
+    assert "Signature: passed" in caplog.text
+    assert "Current identity policy: current" in caplog.text
+    assert "Historical identity policy: current" in caplog.text
+    assert f"OK (current): {_approve_current_whl.name}" in caplog.text
+
+
+def test_approve_legacy_sample_is_historical(caplog: pytest.LogCaptureFixture) -> None:
+    run_main_with_command(
+        [
+            "approve",
+            "--registry",
+            _approve_registry.as_posix(),
+            "--at",
+            "2026-11-29T00:00:00Z",
+            "--require",
+            "historical",
+            _approve_legacy_whl.as_posix(),
+        ]
+    )
+    assert "Current identity policy: rejected" in caplog.text
+    assert "Historical identity policy: historical" in caplog.text
+    assert f"OK (historical): {_approve_legacy_whl.name}" in caplog.text
+
+
+def test_approve_legacy_sample_rejected_for_current(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    with pytest.raises(SystemExit):
+        run_main_with_command(
+            [
+                "approve",
+                "--registry",
+                _approve_registry.as_posix(),
+                "--at",
+                "2026-11-29T00:00:00Z",
+                "--require",
+                "current",
+                _approve_legacy_whl.as_posix(),
+            ]
+        )
+    assert "Not approved for the requested conclusion (current)" in caplog.text
+
+
+def test_approve_pending(caplog: pytest.LogCaptureFixture) -> None:
+    with pytest.raises(SystemExit):
+        run_main_with_command(
+            [
+                "approve",
+                "--registry",
+                _approve_registry.as_posix(),
+                "--channel",
+                "prerelease",
+                "--at",
+                "2026-11-29T00:00:00Z",
+                _approve_legacy_whl.as_posix(),
+            ]
+        )
+    assert "Current identity policy: pending" in caplog.text
+    assert "PENDING approval" in caplog.text
+    assert "Not approved for the requested conclusion" in caplog.text
+
+
+def test_approve_records_archive(
+    caplog: pytest.LogCaptureFixture, tmp_path: Path
+) -> None:
+    archive_path = tmp_path / "archive.json"
+    run_main_with_command(
+        [
+            "approve",
+            "--registry",
+            _approve_registry.as_posix(),
+            "--archive",
+            archive_path.as_posix(),
+            "--at",
+            "2026-11-29T00:00:00Z",
+            _approve_current_whl.as_posix(),
+        ]
+    )
+    assert archive_path.is_file()
+
+    audit = pypi_attestations.AuditLog.from_file(archive_path)
+    assert len(audit.proofs) == 1
+    assert audit.proofs[0].artifact == _approve_current_whl.name
+
+
+def test_approve_invalid_registry(
+    caplog: pytest.LogCaptureFixture, tmp_path: Path
+) -> None:
+    bad = tmp_path / "registry.json"
+    bad.write_text("{not json")
+    with pytest.raises(SystemExit):
+        run_main_with_command(
+            [
+                "approve",
+                "--registry",
+                bad.as_posix(),
+                _approve_current_whl.as_posix(),
+            ]
+        )
+    assert "invalid release registry" in caplog.text
+
+
+def test_approve_missing_attestation(
+    caplog: pytest.LogCaptureFixture, tmp_path: Path
+) -> None:
+    artifact = tmp_path / _approve_current_whl.name
+    shutil.copy(_approve_current_whl, artifact)
+    with pytest.raises(SystemExit):
+        run_main_with_command(
+            [
+                "approve",
+                "--registry",
+                _approve_registry.as_posix(),
+                artifact.as_posix(),
+            ]
+        )
+    assert "Couldn't find attestation" in caplog.text
+
+
+def test_audit_queries_archive(caplog: pytest.LogCaptureFixture) -> None:
+    run_main_with_command(
+        [
+            "audit",
+            "--archive",
+            _approve_archive.as_posix(),
+            "--artifact",
+            _approve_legacy_whl.name,
+        ]
+    )
+    assert "Historical identity policy: historical" in caplog.text
+
+
+def test_audit_verifies_archived_file(caplog: pytest.LogCaptureFixture) -> None:
+    run_main_with_command(
+        [
+            "audit",
+            "--archive",
+            _approve_archive.as_posix(),
+            "--verify-file",
+            _approve_legacy_whl.as_posix(),
+        ]
+    )
+    assert "Archived attestation matches" in caplog.text
+
+
+def test_audit_verifies_archived_file_mismatch(
+    caplog: pytest.LogCaptureFixture, tmp_path: Path
+) -> None:
+    forged = tmp_path / _approve_legacy_whl.name
+    forged.write_bytes(b"tampered")
+
+    with pytest.raises(SystemExit):
+        run_main_with_command(
+            [
+                "audit",
+                "--archive",
+                _approve_archive.as_posix(),
+                "--verify-file",
+                forged.as_posix(),
+            ]
+        )
+    assert "does not match" in caplog.text
+
+
+def test_audit_no_match(caplog: pytest.LogCaptureFixture) -> None:
+    with pytest.raises(SystemExit):
+        run_main_with_command(
+            [
+                "audit",
+                "--archive",
+                _approve_archive.as_posix(),
+                "--digest",
+                "0" * 64,
+            ]
+        )
+    assert "No archived proofs matched" in caplog.text

@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Local release identity approval records. `ReleaseRegistry` stores one or
+  more non-overlapping periods and release channels per repository, with an
+  `approved` or `pending` status for each signing identity. `evaluate`
+  reports the cryptographic signature result separately from the current
+  and historical identity-policy conclusions, so a retired workflow can
+  still be checked after it is removed from the release pipeline.
+- `AuditLog` retains evaluations and their signed attestations locally as
+  archived proofs, which `ArchivedProof.recheck` can re-validate against an
+  artifact without consulting the live registry.
+- The CLI has new `approve` and `audit` subcommands for the above.
+- `examples/release-identity/` contains two fictional, locally-signed
+  samples showing current, historical, and pending conclusions.
+
 ### Changed
 
 - The minimum Python version required is now `3.11`.

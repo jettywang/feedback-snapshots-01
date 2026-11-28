@@ -1,0 +1,74 @@
+{
+  "version": 1,
+  "proofs": [
+    {
+      "recorded_at": "2026-11-29T09:00:00Z",
+      "artifact": "widgets-0.9.0-py3-none-any.whl",
+      "digest": "e515895b0d07e4157e5bb84f47381113379140f13fab500b81c790846dcedf5f",
+      "attestation_digest": "359984c5a900c8bf44be0e360b56674780467c75ef3e2782323c879142e9eba3",
+      "signature": "passed",
+      "signature_detail": null,
+      "trust": "not_checked",
+      "trust_detail": "full Sigstore verification was not requested",
+      "current": {
+        "status": "rejected",
+        "basis": "2026-11-29T00:00:00Z",
+        "repository": "acme/widgets",
+        "channel": "release",
+        "period": "new-pipeline",
+        "publisher": null,
+        "detail": "no registered identity matches the attestation certificate"
+      },
+      "historical": {
+        "status": "historical",
+        "basis": "2024-01-15T12:00:00Z",
+        "repository": "acme/widgets",
+        "channel": "release",
+        "period": "legacy-workflow",
+        "publisher": {
+          "kind": "GitHub",
+          "repository": "acme/widgets",
+          "workflow": "legacy-release.yml",
+          "environment": null
+        },
+        "detail": "approved identity retained for archived period 'legacy-workflow'"
+      },
+      "attestation": {
+        "version": 1,
+        "verification_material": {
+          "certificate": "MIIEyTCCBHCgAwIBAgIJANVVJpRrXuuaMAoGCCqGSM49BAMCMBcxFTATBgNVBAoMDHNpZ3N0b3JlLmRldjAeFw0yNDAxMTUxMTU5MDBaFw0yNDAxMTUxMjA5MDBaMAAwWTATBgcqhkjOPQIBBggqhkjOPQMBBwNCAAS4zyV9ziQdLB5NtkSzQkS90bdkQNuIn8KVhxnXKbIGfzcUBxafrDQM5RDf5A+pTC0hCw49joIUbs+TNBXboehJo4IDujCCA7YwYAYDVR0RBFkwV4ZVaHR0cHM6Ly9naXRodWIuY29tL2FjbWUvd2lkZ2V0cy8uZ2l0aHViL3dvcmtmbG93cy9sZWdhY3ktcmVsZWFzZS55bWxAcmVmcy90YWdzL3YwLjkuMDA7BgorBgEEAYO/MAEIBC0MK2h0dHBzOi8vdG9rZW4uYWN0aW9ucy5naXRodWJ1c2VyY29udGVudC5jb20wZQYKKwYBBAGDvzABCQRXDFVodHRwczovL2dpdGh1Yi5jb20vYWNtZS93aWRnZXRzLy5naXRodWIvd29ya2Zsb3dzL2xlZ2FjeS1yZWxlYXNlLnltbEByZWZzL3RhZ3MvdjAuOS4wMFAGCisGAQQBg78wAQoEQgxAZjVhMDdhYTE2YmQ5MmI2ZDNhZmE5NzVlYTljZGRlZGQwODIyM2FkOGI4NGRmODUwZWI4YjlkYWJjOGNhYTIzNzAdBgorBgEEAYO/MAELBA8MDWdpdGh1Yi1ob3N0ZWQwLwYKKwYBBAGDvzABDAQhDB9odHRwczovL2dpdGh1Yi5jb20vYWNtZS93aWRnZXRzMFAGCisGAQQBg78wAQ0EQgxAZjVhMDdhYTE2YmQ5MmI2ZDNhZmE5NzVlYTljZGRlZGQwODIyM2FkOGI4NGRmODUwZWI4YjlkYWJjOGNhYTIzNzAgBgorBgEEAYO/MAEOBBIMEHJlZnMvdGFncy92MC45LjAwGQYKKwYBBAGDvzABDwQLDAkxMTIyMzM0NDUwJwYKKwYBBAGDvzABEAQZDBdodHRwczovL2dpdGh1Yi5jb20vYWNtZTAWBgorBgEEAYO/MAERBAgMBjU1NjY3NzBlBgorBgEEAYO/MAESBFcMVWh0dHBzOi8vZ2l0aHViLmNvbS9hY21lL3dpZGdldHMvLmdpdGh1Yi93b3JrZmxvd3MvbGVnYWN5LXJlbGVhc2UueW1sQHJlZnMvdGFncy92MC45LjAwUAYKKwYBBAGDvzABEwRCDEBmNWEwN2FhMTZiZDkyYjZkM2FmYTk3NWVhOWNkZGVkZDA4MjIzYWQ4Yjg0ZGY4NTBlYjhiOWRhYmM4Y2FhMjM3MBcGCisGAQQBg78wARQECQwHcmVsZWFzZTBSBgorBgEEAYO/MAEVBEQMQmh0dHBzOi8vZ2l0aHViLmNvbS9hY21lL3dpZGdldHMvYWN0aW9ucy9ydW5zLzYwMDAwMDAwMDIvYXR0ZW1wdHMvMTAWBgorBgEEAYO/MAEWBAgMBnB1YmxpYzAKBggqhkjOPQQDAgNHADBEAiBGDWW2dI0eJOLV75inyN2x0lgUsmfY9epIG/Uq+JoogwIgQRVicl9scArhHT5kUiRIaAIb+lXCJTBLLowFFyb60KM=",
+          "transparency_entries": [
+            {
+              "logIndex": "000000001",
+              "logId": {
+                "keyId": "ZmljdGlvbmFsLWludGVncml0eS1sb2cta2V5"
+              },
+              "kindVersion": {
+                "kind": "dsse",
+                "version": "0.0.1"
+              },
+              "integratedTime": "1705320000",
+              "inclusionPromise": {
+                "signedEntryTimestamp": "ZmljdGlvbmFs"
+              },
+              "inclusionProof": {
+                "logIndex": "000000001",
+                "rootHash": "eFF16PReeZ4nTNsgyQ258jNwuhVsTkNvwy1lJ+UKhjQ=",
+                "treeSize": "1",
+                "hashes": [],
+                "checkpoint": {
+                  "envelope": "fictional sigstore checkpoint\n"
+                }
+              },
+              "canonicalizedBody": "eyJhcGlWZXJzaW9uIjogIjAuMC4xIiwgImtpbmQiOiAiZHNzZSIsICJzcGVjIjogeyJwYXlsb2FkSGFzaCI6IHsiYWxnb3JpdGhtIjogInNoYTI1NiIsICJ2YWx1ZSI6ICI3ODUxNzVlOGY0NWU3OTllMjc0Y2RiMjBjOTBkYjlmMjMzNzBiYTE1NmM0ZTQzNmZjMzJkNjUyN2U1MGE4NjM0In19fQ=="
+            }
+          ]
+        },
+        "envelope": {
+          "statement": "eyJfdHlwZSI6Imh0dHBzOi8vaW4tdG90by5pby9TdGF0ZW1lbnQvdjEiLCJzdWJqZWN0IjpbeyJuYW1lIjoid2lkZ2V0cy0wLjkuMC1weTMtbm9uZS1hbnkud2hsIiwiZGlnZXN0Ijp7InNoYTI1NiI6ImU1MTU4OTViMGQwN2U0MTU3ZTViYjg0ZjQ3MzgxMTEzMzc5MTQwZjEzZmFiNTAwYjgxYzc5MDg0NmRjZWRmNWYifX1dLCJwcmVkaWNhdGVUeXBlIjoiaHR0cHM6Ly9kb2NzLnB5cGkub3JnL2F0dGVzdGF0aW9ucy9wdWJsaXNoL3YxIiwicHJlZGljYXRlIjpudWxsfQ==",
+          "signature": "MEUCIQDw3EezzVSMHvtgfac/HwaPl6D3jpjymUor8JKRWNP8zQIgIba1S1ec7DwKJzJhKuSAsJDPLsjvGHf1xo3F80vg5+w="
+        }
+      }
+    }
+  ]
+}

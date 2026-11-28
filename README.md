@@ -82,6 +82,60 @@ bundle = attestation.to_bundle()
 print(bundle.to_json())
 ```
 
+### Local release identity approvals
+
+A local approval record answers a different question from Sigstore
+verification: *was this signing identity approved for this repository, release
+channel, and time period?* Keeping that record in the repository (or an
+archive) lets a project retire an old release workflow while still checking
+its historical artifacts.
+
+```python
+from pathlib import Path
+
+from pypi_attestations import Attestation, Channel, Distribution, ReleaseRegistry
+
+registry = ReleaseRegistry.from_file(Path("release-registry.json"))
+dist = Distribution.from_file(Path("widgets-0.9.0-py3-none-any.whl"))
+attestation = Attestation.model_validate_json(
+    Path("widgets-0.9.0-py3-none-any.whl.publish.attestation").read_bytes()
+)
+
+evaluation = registry.evaluate(
+    attestation,
+    dist,
+    repository="acme/widgets",
+    channel=Channel.RELEASE,
+)
+print(evaluation.signature)             # SignatureStatus.PASSED
+print(evaluation.current.status)        # IdentityStatus.REJECTED
+print(evaluation.historical.status)     # IdentityStatus.HISTORICAL
+```
+
+The signature check and the identity-policy check are reported separately.
+`current` is evaluated at the current time, while `historical` is evaluated at
+the attestation's signing time, so a retired workflow stays queryable. Pass
+`local_only=False` to also run the full Sigstore trust-root check
+(`evaluation.trust`).
+
+Approved conclusions can be retained with an `AuditLog`:
+
+```python
+from pypi_attestations import AuditLog
+
+audit = AuditLog()
+audit.record(evaluation, attestation)
+audit.to_file(Path("archive.json"))
+```
+
+The archived proof keeps the attestation bytes and both conclusions, so it can
+be re-checked (`AuditLog.from_file(path).proofs[0].recheck(dist)`) after the
+old workflow is removed from the live registry.
+
+See `examples/release-identity/` for two fictional, locally-signed samples and
+the exact inputs that switch each result between current, historical, and
+pending.
+
 ## Usage as a command line tool
 
 > [!IMPORTANT]
@@ -103,6 +157,9 @@ positional arguments:
     verify       Verify one or more inputs
     inspect      Inspect one or more inputs
     convert      Convert a Sigstore bundle into a PEP 740 attestation
+    approve      Evaluate an attestation against a local release identity
+                 approval record
+    audit        Query archived proofs retained from earlier releases
 
 options:
   -h, --help     show this help message and exit
@@ -174,6 +231,38 @@ signing identity matches the repository specified by the user.
 pypi-attestations convert --output-file /tmp/rfc8785-0.1.2-py3-none-any.whl.publish.attestation  \
   test/assets/rfc8785-0.1.2-py3-none-any.whl.sigstore
 ```
+
+### Checking a release against a local approval record
+
+```bash
+# Current release: must pass the current identity policy.
+pypi-attestations approve \
+  --registry examples/release-identity/release-registry.json \
+  --at 2026-11-29T00:00:00Z --require current \
+  examples/release-identity/widgets-1.0.0-py3-none-any.whl
+
+# Archived release from the retired workflow: passes historical verification.
+pypi-attestations approve \
+  --registry examples/release-identity/release-registry.json \
+  --at 2026-11-29T00:00:00Z --require historical \
+  examples/release-identity/widgets-0.9.0-py3-none-any.whl
+
+# A pending approval is reported and exits non-zero for either requirement.
+pypi-attestations approve \
+  --registry examples/release-identity/release-registry.json --channel prerelease \
+  --at 2026-11-29T00:00:00Z \
+  examples/release-identity/widgets-0.9.0-py3-none-any.whl
+
+# Query the archive and re-check the retained attestation.
+pypi-attestations audit --archive examples/release-identity/archive.json \
+  --verify-file examples/release-identity/widgets-0.9.0-py3-none-any.whl
+```
+
+`approve` reports four independent results: `Signature`, `Sigstore trust`
+(only with `--sigstore`), `Current identity policy`, and
+`Historical identity policy`. See
+`examples/release-identity/README.md` for the registry format and the inputs
+that switch each sample between current, historical, and pending.
 
 
 ## License

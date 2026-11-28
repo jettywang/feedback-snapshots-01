@@ -1,0 +1,56 @@
+{
+  "version": 1,
+  "repositories": [
+    {
+      "identifier": "acme/widgets",
+      "periods": {
+        "legacy-workflow": {
+          "start": "2023-01-01T00:00:00Z",
+          "end": "2024-06-30T23:59:59Z"
+        },
+        "new-pipeline": {
+          "start": "2025-01-01T00:00:00Z",
+          "end": null
+        }
+      },
+      "approvals": [
+        {
+          "period": "legacy-workflow",
+          "channel": "release",
+          "status": "approved",
+          "publisher": {
+            "kind": "GitHub",
+            "repository": "acme/widgets",
+            "workflow": "legacy-release.yml",
+            "environment": null
+          },
+          "note": "Retired old workflow; retained for historical verification."
+        },
+        {
+          "period": "new-pipeline",
+          "channel": "release",
+          "status": "approved",
+          "publisher": {
+            "kind": "GitHub",
+            "repository": "acme/widgets",
+            "workflow": "release.yml",
+            "environment": null
+          },
+          "note": "Current release pipeline."
+        },
+        {
+          "period": "new-pipeline",
+          "channel": "prerelease",
+          "status": "pending",
+          "publisher": {
+            "kind": "GitHub",
+            "repository": "acme/widgets",
+            "workflow": "legacy-release.yml",
+            "environment": null
+          },
+          "note": "Old workflow requested prerelease access; awaiting review."
+        }
+      ]
+    }
+  ]
+}
